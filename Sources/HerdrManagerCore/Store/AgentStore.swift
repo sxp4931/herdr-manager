@@ -1,0 +1,204 @@
+import Foundation
+import Observation
+
+// MARK: - AgentStore
+
+@MainActor
+@Observable
+public final class AgentStore {
+    public private(set) var agents: [AgentID: Agent] = [:]
+
+    public init() {}
+
+    // MARK: - Snapshot
+
+    public func applySnapshot(_ snapshot: HerdrSnapshot) {
+        // Build lookup maps
+        let wsMap = Dictionary(uniqueKeysWithValues: snapshot.workspaces.map { ($0.workspaceId, $0.name) })
+        let tabMap = Dictionary(uniqueKeysWithValues: snapshot.tabs.map { ($0.tabId, $0.name) })
+
+        var newAgents: [AgentID: Agent] = [:]
+
+        for pane in snapshot.panes {
+            // Only track panes that have an agent
+            guard pane.agent != nil || pane.agentStatus != "unknown" else { continue }
+
+            let agentId = AgentID(pane.paneId)
+            let status = AgentStatus(rawValue: pane.agentStatus) ?? .unknown
+            let wsName = wsMap[pane.workspaceId] ?? ""
+            let tabName = tabMap[pane.tabId] ?? ""
+
+            let existing = agents[agentId]
+            let enteredAt: Date
+            if let ex = existing, ex.status == status {
+                enteredAt = ex.enteredAt
+            } else {
+                enteredAt = Date()
+            }
+
+            let kind: AgentKind
+            if let session = pane.agentSession {
+                kind = AgentKind.custom(session.agent)
+            } else if let agentName = pane.agent {
+                kind = AgentKind.custom(agentName)
+            } else {
+                kind = .custom("unknown")
+            }
+
+            let name = pane.agent ?? pane.terminalTitleStripped ?? ""
+
+            let agent = Agent(
+                id: agentId,
+                kind: kind,
+                name: name,
+                displayName: name,
+                status: status,
+                stateChangeSeq: pane.stateChangeSeq ?? 0,
+                enteredAt: enteredAt,
+                lastOutputAt: existing?.lastOutputAt,
+                verdict: Self.verdict(for: status),
+                workspaceName: wsName,
+                tabName: tabName
+            )
+            newAgents[agentId] = agent
+        }
+
+        agents = newAgents
+    }
+
+    // MARK: - Events
+
+    public func applyEvent(_ event: HerdrEvent) {
+        switch event {
+        case .agentStatusChanged(let paneId, let agentStatus, let seq):
+            let agentId = AgentID(paneId)
+            guard var agent = agents[agentId] else { return }
+
+            // Sequence guard: only apply if new seq >= current
+            if let newSeq = seq, newSeq < agent.stateChangeSeq {
+                return
+            }
+
+            let newStatus = AgentStatus(rawValue: agentStatus) ?? .unknown
+            if newStatus != agent.status {
+                agent.enteredAt = Date()
+            }
+            agent.status = newStatus
+            if let seq { agent.stateChangeSeq = seq }
+            agent.verdict = Self.verdict(for: newStatus)
+            agents[agentId] = agent
+
+        case .paneCreated(let paneId, let workspaceId, let tabId):
+            let agentId = AgentID(paneId)
+            if agents[agentId] == nil {
+                agents[agentId] = Agent(
+                    id: agentId,
+                    status: .unknown,
+                    workspaceName: workspaceId,
+                    tabName: tabId
+                )
+            }
+
+        case .paneClosed(let paneId):
+            let agentId = AgentID(paneId)
+            agents.removeValue(forKey: agentId)
+
+        case .paneMoved(let paneId, let workspaceId, let tabId):
+            let agentId = AgentID(paneId)
+            if var agent = agents[agentId] {
+                if let ws = workspaceId { agent.workspaceName = ws }
+                if let tab = tabId { agent.tabName = tab }
+                agents[agentId] = agent
+            }
+
+        case .connected, .disconnected:
+            break
+        }
+    }
+
+    // MARK: - Computed Properties
+
+    public var attentionAgents: [Agent] {
+        agents.values
+            .filter { $0.status == .blocked || $0.verdict.isSilent || $0.status == .done }
+            .sorted { a, b in
+                // blocked first, then done, then silent
+                let priority: (Agent) -> Int = { agent in
+                    switch agent.status {
+                    case .blocked: return 0
+                    case .done: return 1
+                    default: return 2
+                    }
+                }
+                let pa = priority(a)
+                let pb = priority(b)
+                if pa != pb { return pa < pb }
+                return a.enteredAt < b.enteredAt
+            }
+    }
+
+    public var blockedCount: Int {
+        agents.values.filter { $0.status == .blocked }.count
+    }
+
+    public var silentCount: Int {
+        agents.values.filter { $0.verdict.isSilent }.count
+    }
+
+    public var doneCount: Int {
+        agents.values.filter { $0.status == .done }.count
+    }
+
+    // MARK: - Diagnosis
+
+    /// Diagnose all non-idle agents and update their verdicts.
+    public func diagnoseAll(adapter: HerdrAdapter, diagnoser: Diagnoser) async {
+        let nonIdle = agents.values.filter { $0.status != .idle }
+        for agent in nonIdle {
+            let verdict = await diagnoser.diagnose(agent: agent, adapter: adapter)
+            // Update on MainActor (we're already @MainActor)
+            if var current = agents[agent.id] {
+                current.verdict = verdict
+                agents[agent.id] = current
+            }
+        }
+    }
+
+    /// Start heartbeat polling. Returns a Task that polls every 10 seconds.
+    /// The caller is responsible for cancelling the task.
+    public func startHeartbeatPolling(adapter: HerdrAdapter, poller: HeartbeatPoller) -> Task<Void, Never> {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10_000_000_000) // 10 seconds
+                guard let self else { return }
+
+                let workingAgents = self.agents.values.filter { $0.status == .working }
+                let updates = await poller.poll(agents: workingAgents, adapter: adapter)
+
+                // Apply lastOutputAt updates on MainActor
+                await MainActor.run {
+                    for (agentId, date) in updates {
+                        if var agent = self.agents[agentId] {
+                            agent.lastOutputAt = date
+                            self.agents[agentId] = agent
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Helpers
+
+    private static func verdict(for status: AgentStatus) -> Verdict {
+        switch status {
+        case .blocked:
+            return .awaitingInput(BlockClassification(
+                kind: .unknownBlock, since: Date(), summary: "blocked"
+            ))
+        case .idle, .working: return .healthy
+        case .done: return .healthy
+        case .unknown: return .unclassifiable(reason: "unknown status")
+        }
+    }
+}

@@ -1,0 +1,32 @@
+import SwiftUI
+import AppKit
+
+// Custom entry point so we can ignore SIGPIPE before anything touches a socket.
+// POSIX sockets raise SIGPIPE on broken connections, which kills the process.
+@main
+enum HerdrManagerMain {
+    static func main() {
+        signal(SIGPIPE, SIG_IGN)
+        HerdrManagerApp.main()
+    }
+}
+
+struct HerdrManagerApp: App {
+    @State private var appModel = AppModel()
+
+    init() {
+        // Hide from Dock — menu-bar-only app
+        NSApplication.shared.setActivationPolicy(.accessory)
+    }
+
+    var body: some Scene {
+        MenuBarExtra {
+            PanelView()
+                .environment(appModel)
+        } label: {
+            MenuBarLabel()
+                .environment(appModel)
+        }
+        .menuBarExtraStyle(.window)
+    }
+}

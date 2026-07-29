@@ -1,0 +1,16 @@
+# Swift / SPM
+.build/
+.swiftpm/
+*.xcodeproj
+xcuserdata/
+
+# Built app bundle
+HerdrManager.app/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# Runtime data (per-user, not source)
+# ~/Library/Application Support/HerdrManager/ contains settings.json, journal.ndjson, pending-actions.json
