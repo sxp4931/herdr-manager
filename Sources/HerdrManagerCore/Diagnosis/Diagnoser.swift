@@ -17,8 +17,16 @@ public actor Diagnoser {
     /// - Parameters:
     ///   - agent: The agent to diagnose.
     ///   - adapter: The HerdrAdapter to use for herdr API calls.
+    ///   - silentThreshold: Optional per-agent override (seconds) for the S2
+    ///     silent threshold. When nil, falls back to `Self.silentThreshold(for:)`
+    ///     (the kind-based default). Callers with a SettingsStore pass the
+    ///     per-pane override here.
     /// - Returns: A Verdict describing the agent's current state.
-    public func diagnose(agent: Agent, adapter: HerdrAdapter) async -> Verdict {
+    public func diagnose(
+        agent: Agent,
+        adapter: HerdrAdapter,
+        silentThreshold: TimeInterval? = nil
+    ) async -> Verdict {
         let paneId = agent.id.raw  // herdr uses full session-qualified IDs (e.g. "w5:p2")
 
         // S3: Process gone — check first, highest priority
@@ -32,7 +40,12 @@ public actor Diagnoser {
         }
 
         // S2: Silent — working but no output for too long
-        if let s2 = await checkSilent(agent: agent, paneId: paneId, adapter: adapter) {
+        if let s2 = await checkSilent(
+            agent: agent,
+            paneId: paneId,
+            adapter: adapter,
+            silentThreshold: silentThreshold
+        ) {
             return s2
         }
 
@@ -124,10 +137,17 @@ public actor Diagnoser {
     // MARK: - S2: Silent
 
     /// Check if the agent is working but silent (no output for too long).
-    private func checkSilent(agent: Agent, paneId: String, adapter: HerdrAdapter) async -> Verdict? {
+    /// - Parameter silentThreshold: Per-agent override (seconds). When nil,
+    ///   falls back to the kind-based default.
+    private func checkSilent(
+        agent: Agent,
+        paneId: String,
+        adapter: HerdrAdapter,
+        silentThreshold: TimeInterval? = nil
+    ) async -> Verdict? {
         guard agent.status == .working else { return nil }
 
-        let threshold = Self.silentThreshold(for: agent.kind)
+        let threshold = silentThreshold ?? Self.silentThreshold(for: agent.kind)
         let lastOutput = agent.lastOutputAt ?? agent.enteredAt
         let elapsed = Date().timeIntervalSince(lastOutput)
 
@@ -169,12 +189,22 @@ public actor Diagnoser {
     // MARK: - CPU State
 
     /// Get the CPU state for an agent by running `ps -o %cpu= -p <pid>`.
+    ///
+    /// Measures the FOREGROUND agent process (the topmost runtime like
+    /// `node`/`bun` hosting the agent), NOT the pane's shell. The shell
+    /// (zsh/bash) is idle by design while the agent runs — measuring it
+    /// mislabels a busy agent as stalled and an idle shell as healthy.
+    ///
+    /// When `foregroundProcesses` is empty (unreadable / no foreground
+    /// process reported), we return `.unknown` rather than falling back
+    /// to `shellPid`, because the shell's CPU is not a signal of agent
+    /// activity.
     private func cpuState(for agent: Agent, paneId: String, adapter: HerdrAdapter) async -> CPUState {
-        // Try to get the shell PID from process info
         let pid: Int32?
         do {
             let procInfo = try await adapter.processInfo(paneId: paneId)
-            pid = procInfo.shellPid
+            // Topmost foreground process = the agent runtime (node/bun/etc.).
+            pid = procInfo.foregroundProcesses.last?.pid
         } catch {
             return .unknown
         }

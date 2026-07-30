@@ -13,11 +13,21 @@ final class AppModel {
     let sharedActionStore = SharedActionStore()
     let settingsStore = SettingsStore()
     let journal = Journal()
+    let dwellTracker = DwellTracker()
 
     var showAll: Bool = false
     var selectedAgentId: AgentID?
     var pendingActions: [PendingAction] = []
     var metadataWriteBackEnabled: Bool = true
+
+    /// The most recent user-visible error from resync / focus / settings /
+    /// metadata / subscription paths. `nil` when everything is healthy. The
+    /// panel footer renders this so failures are no longer silently swallowed.
+    var lastError: String?
+
+    /// Cached adapter health for the footer badge. Refreshed on every
+    /// successful snapshot so protocol/version mismatches surface quickly.
+    var adapterHealth: AdapterHealth?
 
     // MARK: - Private
 
@@ -31,13 +41,18 @@ final class AppModel {
     private var metadataTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
     private var hasStarted = false
+    private var hasRestoredDwell = false
 
     // MARK: - Init
 
     init() {
         let socketPath = Self.resolveSocketPath()
         self.adapter = LiveHerdrAdapter(socketPath: socketPath)
-        notificationManager.requestAuthorization()
+        // Notification authorization is gated on the user setting inside
+        // NotificationManager; only request when enabled.
+        if notificationManager.isEnabled {
+            notificationManager.requestAuthorization()
+        }
     }
 
     // MARK: - Lifecycle
@@ -57,9 +72,13 @@ final class AppModel {
 
         // Load settings
         Task {
-            try? await settingsStore.load()
-            let snap = await settingsStore.settingsSnapshot()
-            self.metadataWriteBackEnabled = snap.metadataWriteBackEnabled
+            do {
+                try await settingsStore.load()
+                let snap = await settingsStore.settingsSnapshot()
+                self.metadataWriteBackEnabled = snap.metadataWriteBackEnabled
+            } catch {
+                self.lastError = "Settings load failed: \(error.localizedDescription)"
+            }
         }
 
         eventTask?.cancel()
@@ -68,12 +87,13 @@ final class AppModel {
             await self?.runEventLoop()
         }
 
-        // Poll pending actions every 2 seconds
+        // Poll pending actions every 2 seconds; reap stale entries alongside.
         pendingActionsTask?.cancel()
         pendingActionsTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard let self else { return }
+                await self.sharedActionStore.reapStale()
                 let actions = await self.sharedActionStore.pendingActions()
                 await MainActor.run {
                     self.pendingActions = actions
@@ -103,8 +123,18 @@ final class AppModel {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 guard let self else { return }
                 guard self.connectionState == .connected else { continue }
-                if let snapshot = try? await self.adapter.snapshot() {
+                do {
+                    let snapshot = try await self.adapter.snapshot()
                     self.store.applySnapshot(snapshot)
+                    self.adapterHealth = self.adapter.health()
+                    self.updateDwellForAllAgents()
+                    // Restore persisted dwell once after the first successful snapshot.
+                    if !self.hasRestoredDwell {
+                        self.hasRestoredDwell = true
+                        _ = self.dwellTracker.load(currentAgents: self.store.agents)
+                    }
+                } catch {
+                    self.lastError = "Snapshot failed: \(error.localizedDescription)"
                 }
             }
         }
@@ -117,8 +147,15 @@ final class AppModel {
                 let snapshot = try await self.adapter.snapshot()
                 self.store.applySnapshot(snapshot)
                 self.connectionState = self.adapter.connectionState
+                self.adapterHealth = self.adapter.health()
+                self.updateDwellForAllAgents()
+                if !self.hasRestoredDwell {
+                    self.hasRestoredDwell = true
+                    _ = self.dwellTracker.load(currentAgents: self.store.agents)
+                }
+                self.lastError = nil
             } catch {
-                // resync failure is non-fatal; event loop will catch up
+                self.lastError = "Resync failed: \(error.localizedDescription)"
             }
         }
     }
@@ -129,8 +166,9 @@ final class AppModel {
             guard let self else { return }
             do {
                 try await self.adapter.focus(paneId: paneId)
+                self.lastError = nil
             } catch {
-                // focus failure is non-fatal
+                self.lastError = "Focus failed: \(error.localizedDescription)"
             }
         }
     }
@@ -144,9 +182,17 @@ final class AppModel {
             connectionState = .connected
             let snapshot = try await adapter.snapshot()
             store.applySnapshot(snapshot)
+            adapterHealth = adapter.health()
+            updateDwellForAllAgents()
+            if !hasRestoredDwell {
+                hasRestoredDwell = true
+                _ = dwellTracker.load(currentAgents: store.agents)
+            }
+            lastError = nil
             startDiagnosisLoops()
         } catch {
             connectionState = .disconnected
+            lastError = "Connect failed: \(error.localizedDescription)"
         }
     }
 
@@ -178,7 +224,7 @@ final class AppModel {
         // Snapshot previous silent state for notification diff
         let previousSilentIds = Set(store.agents.values.filter { $0.verdict.isSilent }.map { $0.id })
 
-        await store.diagnoseAll(adapter: adapter, diagnoser: diagnoser)
+        await store.diagnoseAll(adapter: adapter, diagnoser: diagnoser, settings: settingsStore)
 
         // Check for newly-silent agents
         for agent in store.agents.values {
@@ -190,6 +236,9 @@ final class AppModel {
                 notificationManager.clearSilentNotification(for: agent.id)
             }
         }
+
+        // Persist dwell after diagnosis so significant verdict changes are saved.
+        dwellTracker.save()
     }
 
     private func runEventLoop() async {
@@ -205,8 +254,16 @@ final class AppModel {
                     do {
                         let snapshot = try await self.adapter.snapshot()
                         self.store.applySnapshot(snapshot)
+                        self.adapterHealth = self.adapter.health()
+                        self.updateDwellForAllAgents()
+                        if !self.hasRestoredDwell {
+                            self.hasRestoredDwell = true
+                            _ = self.dwellTracker.load(currentAgents: self.store.agents)
+                        }
                         self.startDiagnosisLoops()
-                    } catch {}
+                    } catch {
+                        self.lastError = "Reconnect snapshot failed: \(error.localizedDescription)"
+                    }
                 }
             case .disconnected:
                 connectionState = .disconnected
@@ -279,9 +336,35 @@ final class AppModel {
         }
     }
 
-    func approveAll(_ ids: [String]) {
-        for id in ids {
-            approveAction(id)
+    // MARK: - Dwell tracking
+
+    /// Update the dwell tracker for every known agent. Called after each
+    /// successful snapshot so the persisted dwell state stays in lockstep
+    /// with the live herd.
+    private func updateDwellForAllAgents() {
+        for agent in store.agents.values {
+            dwellTracker.update(
+                agentId: agent.id,
+                status: agent.status,
+                enteredAt: agent.enteredAt,
+                lastOutputAt: agent.lastOutputAt,
+                occupantFingerprint: Self.fingerprintForAgent(agent),
+                stateChangeSeq: agent.stateChangeSeq
+            )
+        }
+    }
+
+    /// Derive a stable occupant fingerprint from an Agent. Mirrors
+    /// `DwellTracker.fingerprint(for:)` which is `internal` to Core and
+    /// therefore not directly callable from the app module.
+    private static func fingerprintForAgent(_ agent: Agent) -> String {
+        switch agent.kind {
+        case .claude: return "claude"
+        case .codex: return "codex"
+        case .opencode: return "opencode"
+        case .aider: return "aider"
+        case .gemini: return "gemini"
+        case .custom(let name): return "custom:\(name)"
         }
     }
 
@@ -303,7 +386,7 @@ final class AppModel {
                     ttlMs: 45_000
                 )
             } catch {
-                // Non-fatal: metadata write-back failure
+                lastError = "Metadata write-back failed: \(error.localizedDescription)"
             }
         }
     }
@@ -311,11 +394,6 @@ final class AppModel {
     // MARK: - Socket path resolution
 
     private static func resolveSocketPath() -> String {
-        if let xdg = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"],
-           !xdg.isEmpty {
-            return (xdg as NSString).appendingPathComponent("herdr/herdr.sock")
-        }
-        let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
-        return (home as NSString).appendingPathComponent(".config/herdr/herdr.sock")
+        return LiveHerdrAdapter.resolveSocketPath()
     }
 }

@@ -7,6 +7,7 @@ public enum ActionState: String, Sendable, Codable {
     case approved
     case denied
     case expired
+    case executing
     case executed
     case failed
 }
@@ -21,14 +22,22 @@ public struct PendingAction: Sendable, Codable {
     public var state: ActionState
     public let expiresAt: Date
     public var failDetail: String?
+    public var occupantFingerprint: String?
+    public var observedStatus: String?
+    public var expectedSeq: UInt64?
 
-    public init(actionId: String, tool: String, params: [String: String]) {
+    public init(actionId: String, tool: String, params: [String: String],
+                occupantFingerprint: String? = nil, observedStatus: String? = nil,
+                expectedSeq: UInt64? = nil) {
         self.actionId = actionId
         self.tool = tool
         self.params = params
         self.createdAt = Date()
         self.state = .pending
         self.expiresAt = Date().addingTimeInterval(120)
+        self.occupantFingerprint = occupantFingerprint
+        self.observedStatus = observedStatus
+        self.expectedSeq = expectedSeq
     }
 }
 
@@ -99,11 +108,19 @@ public actor ActionStore {
         }
     }
 
-    /// Generate a short action ID: "a_" + 4 random hex chars.
+    /// Claim an approved action for execution.
+    /// Transitions from `.approved` to `.executing` only if currently approved and not expired.
+    /// Returns the claimed action, or nil if not claimable.
+    public func claimExecuting(actionId: String) -> PendingAction? {
+        guard var action = actions[actionId], action.state == .approved else { return nil }
+        guard Date() <= action.expiresAt else { return nil }
+        action.state = .executing
+        actions[actionId] = action
+        return action
+    }
+
+    /// Generate a unique action ID using UUID.
     private static func generateActionId() -> String {
-        let hex = (0..<4).map { _ in
-            String(format: "%x", Int.random(in: 0...15))
-        }.joined()
-        return "a_\(hex)"
+        return UUID().uuidString
     }
 }

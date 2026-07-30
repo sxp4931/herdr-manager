@@ -1,6 +1,6 @@
 # Herdr Manager — design and build plan
 
-Target: herdr `v0.7.5`, source HEAD `e16d7d8c07a20f5ee0b4111808680bbcfd7df9ac` (2026-07-28), wire protocol version **18**.
+Target: herdr `v0.7.5`, source HEAD `e16d7d8c07a20f5ee0b4111808680bbcfd7df9ac` (2026-07-28), wire protocol version **17** (integer `uint32` in the schema). Compatibility is **capability-based**, not version-string-assumed (§0.2, §3.2).
 
 ## 0. Verification status, and the version problem
 
@@ -9,7 +9,7 @@ Claims are labelled `[verified-source]` (I read the implementing code at HEAD), 
 ### 0.1 Your actual environment `[verified-live]`
 
 ```
-herdr 0.7.4 · client protocol 16 · server protocol 16 · compatible: yes
+herdr 0.7.5 · client protocol 17 · server protocol 17 · compatible: yes
 socket: /Users/admin/.config/herdr/herdr.sock
 sessions: 1 — "default" only, session_dir /Users/admin/.config/herdr
 api schema: 235,560 bytes
@@ -18,39 +18,28 @@ agents: 34 across 8 workspaces (w5, w7, wA, wB, wC, wD, wE)
   by status: idle 32 · working 2 · blocked 0 · done 0
 ```
 
-Everything structural in this plan is confirmed by that output: session-qualified opaque IDs, `agent_status` vocabulary, `agent_session` native references, `foreground_cwd`, `terminal_title_stripped`, `revision`, `screen_detection_skipped`, socket location and `0600` mode.
+Everything structural in this plan is confirmed by that output: session-qualified opaque IDs, `agent_status` vocabulary, `agent_session` native references, `foreground_cwd`, `terminal_title_stripped`, `revision`, `screen_detection_skipped`, socket location and `0600` mode. Protocol 17 is an integer (`uint32`) on the wire; compatibility is capability-based, not assumed from a version string (§0.2, §3.2).
 
-### 0.2 The problem: you are two protocol versions behind what I verified
+### 0.2 Resolved: protocol 17, capability-based compatibility
 
-**I read v0.7.5 (protocol 18). You run v0.7.4 (protocol 16.)** That gap is not cosmetic. Per `CHANGELOG.md` `[verified-source]`, v0.7.5 **added the entire live-agent CLI/API facade** this plan's write path is built on:
+The original gap (0.7.4 / protocol 16 vs. the 0.7.5 this plan was written against) is **resolved**: the live environment now runs herdr 0.7.5 at protocol **17** (an integer `uint32` on the wire). All of the write-path primitives this plan depends on — `agent.prompt` (atomic, bracketed-paste aware), `agent_prompt_stalled`, `agent.wait` with occupant pinning, `agent.start`, machine-readable `protocol_mismatch` — are present and verified.
 
-> "Added a live-agent CLI facade with named `start`, atomic `prompt`, logical `send-keys`, and server-owned `wait` workflows."
+**Compatibility is capability-based, not version-string-assumed.** The adapter does not hard-reject on `protocol != 17`. Instead, `HerdrAdapter.health()` returns an `AdapterHealth` value:
 
-> "The old top-level `wait` commands were replaced by `agent wait` and `pane wait-output`, and `agent send` was replaced by `agent send-keys`."
-
-Specifically, these do **not** exist on your 0.7.4 in the form this plan uses:
-
-| Depends on | Section | Status on 0.7.4 |
-|---|---|---|
-| `agent.prompt` — atomic text+Enter, bracketed-paste aware | §5.2 `agent.say`, §1.6 | **Added in 0.7.5.** Fallback is non-atomic `send_text` + `send_keys enter`, which can misfire on OpenCode text like `A != B` (fixed in 0.7.5, #1525) |
-| `agent_prompt_stalled` after 5s | §7.4 no-retry rule | **Added in 0.7.5.** Without it there is no "my input did nothing" signal |
-| `agent.wait` with occupant pinning | §1.6 | **Added in 0.7.5** |
-| `agent.start` with name/kind validation | §5.2 `session.spawn` | **Added in 0.7.5** |
-| Machine-readable `protocol_mismatch` error | §8.3 | **Added in 0.7.5** (#1435) |
-| `agent.explain` | §1.2, §7.2 — the diagnosis core | **Unconfirmed.** Not in the 0.7.4 or 0.7.5 changelog; may predate both. **Test this first** |
-
-**Recommendation: run `herdr update` before Phase 0.** One command, no config migration for you (the 0.7.5 breaking change is plugin scoping, and you have no plugins installed). It aligns your binary with every line of this document and removes six workarounds. Building against 0.7.4 means implementing a fallback path you will delete a week later.
-
-Two commands to run — the first is the decision, the second is the one remaining unknown:
-
-```bash
-herdr update && herdr --version && herdr status
-
-# then, when something is actually blocked (nothing was in your sample):
-herdr agent explain <pane-id> --json --verbose | head -60
+```swift
+struct AdapterHealth {
+  let protocolVersion: Int       // wire protocol observed at connect
+  let compatible: Bool           // true when the observed protocol is one the adapter was built against
+  let writesEnabled: Bool        // true only for the verified protocol (currently 17)
+  let reason: String?            // human-readable explanation when writes are disabled
+}
 ```
 
-That second one is the only claim in this plan I have not been able to check against your machine, and §7.2's rule-ID table depends on it. If `agent explain` errors, §7.2's fallback (local manifest regexes) becomes the primary path rather than the backup — a half-day of extra work in Phase 2, not a design change.
+- `compatible == true` and `writesEnabled == true` for protocol 17 — the verified baseline.
+- Unknown or newer protocols: `compatible` may still be `true` (reads parse), but `writesEnabled` is `false` with a `reason` explaining which capability is unverified. READ tools continue to work; WRITE tools are disabled with a visible reason in the UI and MCP.
+- Older protocols: `compatible == false`, both reads and writes degrade per the failure-mode table (§8.3).
+
+`HerdrSnapshot.protocol` is an `Int` (not a string), matching the wire type. This model means a herdr upgrade to protocol 18 does not silently break writes — it disables them with an explanation until the adapter is verified against the new protocol.
 
 ---
 
@@ -145,7 +134,7 @@ This is the finding that shapes the architecture, and it is the opposite of what
 
 **You cannot subscribe to "this pane produced output."**
 
-`Subscription` — the complete set of things `events.subscribe` accepts `[verified-source]` `src/api/schema/events.rs:18-84` — contains 28 variants. Pane-related ones are `pane.created`, `pane.closed`, `pane.updated`, `pane.focused`, `pane.moved`, `pane.exited`, `pane.agent_detected`, `pane.output_matched`, `pane.agent_status_changed`, `pane.scroll_changed`. There is **no** `pane.output_changed` variant. Confirmed against the match arms in `src/api/subscriptions.rs:150-296`.
+`Subscription` — the complete set of things `events.subscribe` accepts `[verified-source]` `src/api/schema/events.rs:18-84` — contains 28 variants. Pane-related ones are `pane.created`, `pane.closed`, `pane.updated`, `pane.focused`, `pane.moved`, `pane.exited`, `pane.agent_detected`, `pane.output_matched`, `pane.agent_status_changed`, `pane.scroll_changed`. There is **no** `pane.output_changed` variant. Confirmed against the match arms in `src/api/subscriptions.rs:150-296`. Subscription records arrive wrapped as `{"event": "<kind>", "data": { ... }}` — not a flat `{type, pane_id, ...}` record. The only status subscription the Manager uses is `pane.agent_status_changed`; pane lifecycle (created/closed/moved) is reconciled via periodic snapshots, not subscriptions. Unknown event kinds map to `.ignored` (never a disconnect).
 
 `EventKind::PaneOutputChanged` / `"pane.output_changed"` *is* declared (`events.rs:216,247,279,521`) — but it is **never emitted in production**. The only two constructions anywhere under `src/app/` are inside `#[cfg(test)]`, one of them a test literally named `output_changed_event_hooks_do_not_run_even_if_event_is_emitted` (`src/app/api/plugins/mod.rs:3115-3133`). It is declared-but-dead surface. `[verified-source]`
 
@@ -239,7 +228,7 @@ There is no wall-clock time anywhere in the agent or pane records, and none on e
 
 The `~/.config/herdr` root is **not hardcoded**: `config_dir()` returns `$XDG_CONFIG_HOME/herdr` when that variable is set, falling back to the platform default `[verified-source]` `src/config/io.rs:29-34`. Session discovery must read the env var rather than assuming the literal path, or the Manager will silently find zero sessions on a machine where you've set XDG. `HERDR_SOCKET_PATH` and `HERDR_SESSION` override further (resolution order in §1.8's source, `src/session.rs:173-181`).
 
-Unix domain sockets, mode `0600` `[verified-live]`. Newline-delimited JSON, one request per line, responses echo the request `id`. Subscriptions keep the connection open and push subsequent lines. Protocol version is **18 at HEAD** (`src/protocol/wire.rs:16`) but **16 on your installed 0.7.4** `[verified-live]`; mismatches are rejected with an explicit older/newer message (`wire.rs:945-953`), machine-readable only from 0.7.5 (§0.2).
+Unix domain sockets, mode `0600` `[verified-live]`. Newline-delimited JSON, one request per line, responses echo the request `id`. Subscriptions keep the connection open and push subsequent lines. Protocol version is **17** (integer `uint32`) on the live 0.7.5 install `[verified-live]`; mismatches are rejected with an explicit older/newer message (`wire.rs:945-953`), machine-readable from 0.7.5 (§0.2). Socket resolution order: `HERDR_SOCKET_PATH` → `HERDR_SESSION` (named-session lookup) → `XDG_CONFIG_HOME/herdr` → platform default (`~/.config/herdr/herdr.sock`).
 
 **Your session reality** `[verified-live]`: one session, `"default"`, at `~/.config/herdr/herdr.sock`. You answered "named sessions" when I asked, but `herdr session list` shows none — so multi-session is a plan for how you intend to work, not how you work today. This plan keeps session-qualified IDs everywhere (they cost nothing and prevent R9) but defers the actual connection pool: Phase 0 opens one connection and enumerates sessions, which is correct for one session and correct for five.
 
@@ -263,7 +252,7 @@ Unix domain sockets, mode `0600` `[verified-live]`. Newline-delimited JSON, one 
 | 10 | Spawn a session in repo Y | `workspace.create` → `pane.split` → `agent.start` | `[verified-source]` High | `herdr` CLI subprocess chain |
 | 11 | Kill idle sessions | `pane.close` | `[verified-source]` High | — |
 | 12 | Interrupt a runaway agent | `agent.send_keys ["esc"]` or `["ctrl+c"]` | `[verified-source]` High | — |
-| 13 | Detect API drift | `ping` (protocol 18) + hash of `herdr api schema --json` | `[verified-source]` High | Version-gate on `herdr --version` |
+| 13 | Detect API drift | `ping` (protocol 17) + hash of `herdr api schema --json` | `[verified-source]` High | Version-gate on `herdr --version` |
 | 14 | Multiple named sessions | One socket pair per session under `sessions/<name>/` | `[verified-source]` High | — |
 | 15 | Notify natively | `UNUserNotificationCenter`; optionally mirror via `notification.show` | `[assumed]` (AppKit) High | herdr's own toast only |
 | 16 | Write status back into herdr's sidebar | `pane.report_metadata` tokens → `$name` | `[verified-docs]` Medium | Skip; Manager UI only |
@@ -345,15 +334,21 @@ protocol HerdrAdapter {
   func closePane(_ p: PaneRef) async throws
   func focus(_ a: AgentRef) async throws          // consumes `done` — explicit user action only
 
-  var health: AdapterHealth { get }               // .ok(protocol:) | .degraded(reason:) | .down
+  func health() async -> AdapterHealth            // capability-based, not version-string-assumed
 }
 ```
 
+`AdapterHealth` (§0.2) carries `protocolVersion: Int`, `compatible: Bool`, `writesEnabled: Bool`, `reason: String?`. Writes are gated behind `health().writesEnabled` — `true` only for the verified protocol (currently 17). Unknown or incompatible protocols keep READ tools working but disable WRITE tools with a visible reason. `HerdrSnapshot.protocol` is an `Int`, matching the wire type.
+
 `explain` deliberately does not surface herdr's raw shape. It returns a Manager-owned `BlockClassification` and returns `.unclassified` on any parse failure. One untyped field cannot break the app.
+
+**Subscription envelope.** Status and lifecycle events arrive as `{"event": "<kind>", "data": { ... }}`, not a flat `{type, pane_id, ...}` record. The only schema-supported status subscription used is `pane.agent_status_changed`; pane lifecycle (created/closed/moved) comes via periodic snapshot reconciliation, not subscriptions. Unknown event kinds are mapped to an `.ignored` no-op — they must NOT cause a disconnect. Periodic `session.snapshot` calls remain the safety net that reconciles any events the subscription layer missed or intentionally ignored.
+
+**`workspace.create` response shape.** The real response is `{"type":"workspace_created","workspace":{...,"workspace_id":...},"tab":{"tab_id":...},"root_pane":{"pane_id":...}}`. The adapter returns `WorkspaceCreation { workspaceId, rootPaneId, tabId? }`. `session.spawn` MUST use the returned `rootPaneId` for the subsequent `agent.start` — never synthesize a pane id like `"p1"`.
 
 ### 3.3 Data flow
 
-**Steady state.** Connect → `session.snapshot` per session → build Store → `events.subscribe` for the lifecycle + status set → apply deltas. Zero polling for topology and status.
+**Steady state.** Connect → `session.snapshot` per session → build Store → `events.subscribe` for `pane.agent_status_changed` (the only status subscription) → apply deltas wrapped in `{"event":..., "data":...}` envelopes. Unknown event kinds map to `.ignored` (no disconnect). Topology (pane created/closed/moved) is reconciled via periodic `session.snapshot` calls, not subscriptions. Zero polling for status; topology polling is the safety net.
 
 **Dwell.** Every applied status change stamps `enteredAt = now()` on the agent and appends to the journal. All durations derive from this.
 
@@ -515,7 +510,7 @@ params: { session?, repoPath: string, kind: AgentKind, name: string,
           brief?: string, spaceLabel?: string }
 returns: { agentId, space, pane, started: bool, actionId }
 ```
-Confirmation required. `repoPath` must be an existing directory and is canonicalised; the Manager holds an allowlist of roots (default: your usual code roots) and rejects anything outside. Sequence: `workspace.create --cwd` → root pane → `agent.start` → optional `agent.prompt(brief)`.
+Confirmation required. `repoPath` must be an existing directory and is canonicalised; the Manager holds an allowlist of roots (default: your usual code roots) and rejects anything outside. Sequence: `workspace.create --cwd` → use the returned `rootPaneId` from the `WorkspaceCreation` response (never synthesize a pane id like `"p1"`) → `agent.start` in that pane → optional `agent.prompt(brief)`.
 
 **`action.status`** — poll a pending confirmation.
 ```
@@ -523,6 +518,8 @@ params: { actionId }
 returns: { state: "pending"|"approved"|"denied"|"expired"|"executed"|"failed", detail? }
 ```
 Confirmations expire after 120s. The agent is told to stop waiting, not left hanging.
+
+**Safe confirmation flow.** Every pending action records an occupant fingerprint (pane identity), observed status, and `state_change_seq` at the moment of diagnosis. After approval the caller atomically claims `approved → executing` (`claimExecuting`) and re-fetches a fresh snapshot before sending any input. The action is rejected (no input sent) if: the pane is gone, the occupant fingerprint changed, or the status episode / `state_change_seq` advanced since diagnosis. `agent.answer` requires `state_change_seq` in its params and bounds `select.index` to `0...20`. Pending actions expire after 120 seconds; terminal action records are pruned after 24 hours. Action IDs are UUIDs.
 
 ### 5.3 Worked transcripts
 
@@ -532,8 +529,8 @@ Confirmations expire after 120s. The agent is told to stop waiting, not left han
 
 `herd.overview {}` →
 ```json
-{ "sessions":[{"name":"default","connected":true,"protocol":18},
-              {"name":"work","connected":true,"protocol":18}],
+{ "sessions":[{"name":"default","connected":true,"protocol":17},
+              {"name":"work","connected":true,"protocol":17}],
   "counts":{"blocked":2,"working":5,"silent":1,"done":3,"idle":4,"unknown":0},
   "attention":[
    {"agentId":"work/w3:p2","name":"migrations","kind":"claude","space":"api",
@@ -747,7 +744,7 @@ Prompt text and choices are parsed from `pane.read --source detection` — the s
 
 Build the fallback first (Phase 2), the observer second (Phase 2b). The fallback has no subprocess cost and is good enough to prove the feature.
 
-Optional local enrichment, cheap and worth it: `ps -o %cpu,state -p <shell_pid>` distinguishes **thinking hard** (high CPU) from **deadlocked** (0% CPU, `S` state) from **waiting on I/O** (`U`). This reaches outside herdr, onto your own machine, for a fact herdr does not model. That's a reasonable place to step outside the adapter — but it goes *in* the adapter anyway, behind `ProcessFacts`, so nothing above it learns that `ps` exists.
+Optional local enrichment, cheap and worth it: `ps -o %cpu,state -p <foreground_agent_pid>` distinguishes **thinking hard** (high CPU) from **possibly stalled** (low CPU) from **waiting on I/O** (`U`). The measurement targets the foreground agent process, not the pane shell PID. The diagnosis reports "low CPU, possibly stalled" rather than a definitive "deadlocked" unless corroborated by additional signals (no output for an extended period, no terminal frame activity). This reaches outside herdr, onto your own machine, for a fact herdr does not model. That's a reasonable place to step outside the adapter — but it goes *in* the adapter anyway, behind `ProcessFacts`, so nothing above it learns that `ps` exists.
 
 **S3** — call `pane.process_info`, check whether any `foreground_processes[].name` matches the expected agent binary for `kind`. Shell-only foreground with a non-`idle` status means the agent died and left its last frame painted. Corroborated by a `pane.exited` event if one was seen.
 
@@ -782,6 +779,10 @@ The design already survives this: §7.2's "state is authoritative, rule ID is a 
 | `T_blocked_escalate` | 10 min | Panel row goes red-bold; still no auto-action |
 | Observer pool | 12 | Beyond this, fall back to polling for the remainder |
 | Diagnosis cache | invalidated on any status change or new output | Never serve a stale verdict |
+
+Diagnosis uses the **effective** Settings silent-threshold: per-agent overrides keyed by the herdr session identity, with fallback to the kind default. CPU measurement targets the **foreground agent process** (not the pane shell PID), and reports "low CPU, possibly stalled" rather than a definitive "deadlocked" unless corroborated by multiple signals.
+
+Dwell episodes persist to disk and are restored after relaunch only when the occupant fingerprint + `state_change_seq` still match — a restarted agent in the same pane does not inherit the previous occupant's dwell.
 
 Per-agent overrides persist in the journal, keyed by agent `name` so they survive restarts.
 
@@ -841,7 +842,9 @@ Enforcement lives in `Policy` inside the Manager, **not** in the MCP bridge. The
 
 **Rate limits.** Writes: ≤1 per agent per 10s, ≤6/min globally. Reads: ≤20/min per agent (`agent.tail` is the expensive one). `agent.answer`: ≤3 consecutive per agent without an intervening status change. Exceeding returns a structured error with a retry-after; the bridge never silently drops.
 
-**Logging.** Every write appends to `~/Library/Application Support/HerdrManager/journal.ndjson`: timestamp, actionId, tool, params, caller (`mcp` or `ui`), pre-state (status + seq), post-state, outcome. Panel has a "recent actions" view — the answer to "what did it just do." Reads are counted, not logged in full.
+**Logging.** Every write appends to `~/Library/Application Support/HerdrManager/journal.ndjson`: timestamp, actionId, tool, params, caller (`mcp` or `ui`), pre-state (status + seq), post-state, outcome. Panel has a "recent actions" view — the answer to "what did it just do." Reads are counted, not logged in full. The journal appends with `O_APPEND` under the advisory lock and retains 30 days of entries.
+
+**Durable shared state.** `~/Library/Application Support/HerdrManager/` is created mode `0700` with files mode `0600` (migrated on launch if looser). The shared action store and journal use advisory locking (`fcntl` sidecar `.lock` files) across the full read-modify-write — this provides cross-process safety when the app, MCP bridge, and CLI coexist. Replacement is atomic via POSIX `rename` (no unlink gap). The journal appends with `O_APPEND` under the lock.
 
 **Redaction.** `agent.tail` and diagnosis evidence run a scrubber before anything leaves the Manager: `sk-…`, `ghp_…`, AWS key shapes, `Bearer …`, `.env`-style `KEY=value` for secret-ish keys, PEM blocks. Reports `redactions: N` so the agent knows text was removed. Imperfect by nature — pane content is untrusted data from tools you don't control.
 
@@ -857,8 +860,8 @@ What it **cannot** do: run a shell command directly; write files; stop the herdr
 |---|---|---|
 | **Server not running** | `connect()` ENOENT/ECONNREFUSED | Menu bar → ⚪️⚠︎. Panel shows last snapshot greyed with "as of HH:MM". MCP tools return `{error:"herdr_unavailable", session}`. **Never fabricate state.** Retry 1s→30s |
 | **Server restarts** | Connection EOF | Mark stale → reconnect → fresh `session.snapshot` → diff. **Notifications suppressed 60s.** Dwell for changed agents shows `≥ Xm` |
-| **Protocol version change** | `ping` returns ≠ 18 | Refuse writes, allow reads if shapes still parse. Banner: "herdr protocol 19, Manager expects 18 — read-only." |
-| **Schema drift within v18** | Hash of `herdr api schema --json` at startup ≠ pinned | Banner naming changed methods. Degrade per-capability, not globally — if `pane.read` still parses, tail still works even if `agent.explain` broke |
+| **Protocol version change** | `ping` returns ≠ 17 | Capability gate (§0.2, §3.2): `health().writesEnabled` becomes `false` with a `reason`; reads continue if shapes still parse. Banner: "herdr protocol N, writes require 17 — read-only." |
+| **Schema drift within v17** | Hash of `herdr api schema --json` at startup ≠ pinned | Banner naming changed methods. Degrade per-capability, not globally — if `pane.read` still parses, tail still works even if `agent.explain` broke |
 | **`agent.explain` shape change** | Parse failure | `BlockClassification.unclassified`. Diagnosis falls back to raw tail + LLM prose. **Zero user-visible breakage** — this is why the adapter never surfaces herdr's shape |
 | **Manifest remote update changes rule IDs** | Unmapped `matched_rule.id` | `unknown_block` + tail. Blocked detection unaffected (typed API) |
 | **Observer stream dies** | `terminal.closed` / subprocess exit | Fall back to `pane.read` polling for that pane. Log once, don't spam |
@@ -928,7 +931,7 @@ Swap polling for `terminal session observe` subprocesses, pool of 12, LRU, autom
 
 ## 10. Open questions
 
-**Q0 — Upgrade to 0.7.5 before Phase 0?** *Recommend yes, and I'd treat it as a prerequisite rather than a question* (§0.2, R0). The only thing that would change my answer is if you're deliberately pinned to 0.7.4 for a reason I can't see — in which case tell me and I'll rewrite the write path around `pane.send_text`/`send_keys` with the `!=` corruption caveat documented.
+**Q0 — Upgrade to 0.7.5 before Phase 0?** *Resolved — done.* Live environment runs herdr 0.7.5 / protocol 17. Capability-based compatibility (§0.2) is in place.
 
 **Q1 — Silent threshold default.** 5 min for coding agents, 15 for build/test panes, per-agent override? *Recommend yes.* Under 5 min you'll get false positives from long tool calls; over 10 you stop catching hangs while they're cheap. Your OpenCode panes report lifecycle directly, so consider a longer threshold for them — their `working` is more trustworthy than a screen-detected one.
 
@@ -950,9 +953,9 @@ Swap polling for `terminal session observe` subprocesses, pool of 12, LRU, autom
 
 ## 11. Risks, ranked
 
-**R0 — You are building against a binary two protocol versions older than this plan.** *Likelihood: certain — already true.* *Impact: high.* Your 0.7.4 lacks `agent.prompt` (atomic submit), `agent_prompt_stalled`, `agent.wait` occupant pinning, `agent.start`, and machine-readable `protocol_mismatch` — all added in 0.7.5 (§0.2). Building the write path against 0.7.4 means a non-atomic `send_text` + `send_keys` fallback that is known to corrupt text containing `!=` (#1525), and no stalled-input signal, which removes the safety property in §7.4 that says never retry. **Mitigation: `herdr update` before Phase 0.** One command; you have no plugins, so the 0.7.5 breaking change doesn't touch you. *Not accepted — fix it first. This is the only item in this list I'd call a blocker.*
+**R0 — Protocol version mismatch.** *Resolved.* The live environment was upgraded to herdr 0.7.5 / protocol 17 before the safety refactor. All write-path primitives (`agent.prompt`, `agent_prompt_stalled`, `agent.wait` occupant pinning, `agent.start`, machine-readable `protocol_mismatch`) are present. Capability-based compatibility (§0.2) ensures that a future protocol change disables writes with an explanation rather than silently misbehaving.
 
-**R1 — herdr's API changes under you.** *Likelihood: near-certain* (66 releases, weekly cadence; protocol moved 16 → 18 across two point releases). *Impact: high.* **Mitigation:** the adapter boundary (§3.2) plus schema-hash pinning (§8.3) — your schema is 235,560 bytes, so hashing it is trivial and diffing it is genuinely informative. Every herdr fact lives behind one interface; drift is detected at connect with a named diff and degrades per-capability rather than globally. *Accepted with mitigation — this is the single biggest reason the adapter exists, and R0 is proof the risk is real rather than theoretical.*
+**R1 — herdr's API changes under you.** *Likelihood: near-certain* (66 releases, weekly cadence; protocol moved 16 → 17 across point releases). *Impact: high.* **Mitigation:** the adapter boundary (§3.2) with capability-based compatibility (§0.2) plus schema-hash pinning (§8.3) — your schema is 235,560 bytes, so hashing it is trivial and diffing it is genuinely informative. Every herdr fact lives behind one interface; drift is detected at connect with a named diff and degrades per-capability rather than globally. *Accepted with mitigation — this is the single biggest reason the adapter exists.*
 
 **R2 — Agent approves a destructive command.** *Likelihood: low-moderate. Impact: high* (data loss in a repo or database). **Mitigation:** bounded-choice enum, command text always surfaced before the choice, `stateChangeSeq` revalidation, journal, 3-answer cap, and optionally Q2's destructive-pattern gate. *Residual risk remains and is irreducible* (§8.2) — the Manager cannot judge intent. Q2 is the cheapest meaningful reduction.
 

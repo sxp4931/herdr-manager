@@ -140,3 +140,128 @@ struct DwellTrackerTests {
         #expect(tracker.entry(for: id) == nil)
     }
 }
+
+// MARK: - DwellTracker Persistence Tests
+
+@Suite("DwellTracker persistence")
+struct DwellTrackerPersistenceTests {
+
+    @Test("save() then load(currentAgents:) round-trips entries")
+    func saveAndLoadRoundTrip() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fileURL = dir.appendingPathComponent("dwell-state.json")
+
+        let tracker1 = DwellTracker(fileURL: fileURL)
+        let agentId = AgentID("w1:p1")
+        let now = Date()
+        tracker1.update(
+            agentId: agentId,
+            status: .working,
+            enteredAt: now,
+            lastOutputAt: now,
+            occupantFingerprint: "claude",
+            stateChangeSeq: 5
+        )
+        tracker1.save()
+
+        // Create a new tracker and load
+        let tracker2 = DwellTracker(fileURL: fileURL)
+        let currentAgents: [AgentID: Agent] = [
+            agentId: Agent(
+                id: agentId,
+                kind: .claude,
+                status: .working,
+                stateChangeSeq: 5
+            )
+        ]
+        let restored = tracker2.load(currentAgents: currentAgents)
+        #expect(restored == 1)
+
+        let entry = tracker2.entry(for: agentId)
+        #expect(entry != nil)
+        #expect(entry?.status == .working)
+        #expect(entry?.occupantFingerprint == "claude")
+        #expect(entry?.stateChangeSeq == 5)
+
+        // Cleanup
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    @Test("Restore guard: fingerprint mismatch discards entry")
+    func fingerprintMismatchDiscardsEntry() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fileURL = dir.appendingPathComponent("dwell-state.json")
+
+        let tracker1 = DwellTracker(fileURL: fileURL)
+        let agentId = AgentID("w1:p1")
+        let now = Date()
+        tracker1.update(
+            agentId: agentId,
+            status: .working,
+            enteredAt: now,
+            lastOutputAt: now,
+            occupantFingerprint: "claude",
+            stateChangeSeq: 5
+        )
+        tracker1.save()
+
+        // Load with a different fingerprint (opencode instead of claude)
+        let tracker2 = DwellTracker(fileURL: fileURL)
+        let currentAgents: [AgentID: Agent] = [
+            agentId: Agent(
+                id: agentId,
+                kind: .opencode, // Different kind!
+                status: .working,
+                stateChangeSeq: 5
+            )
+        ]
+        let restored = tracker2.load(currentAgents: currentAgents)
+        #expect(restored == 0, "Entry should be discarded when fingerprint doesn't match")
+        #expect(tracker2.entry(for: agentId) == nil)
+
+        // Cleanup
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    @Test("Restore guard: stateChangeSeq mismatch discards entry")
+    func stateChangeSeqMismatchDiscardsEntry() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fileURL = dir.appendingPathComponent("dwell-state.json")
+
+        let tracker1 = DwellTracker(fileURL: fileURL)
+        let agentId = AgentID("w1:p1")
+        let now = Date()
+        tracker1.update(
+            agentId: agentId,
+            status: .working,
+            enteredAt: now,
+            lastOutputAt: now,
+            occupantFingerprint: "claude",
+            stateChangeSeq: 5
+        )
+        tracker1.save()
+
+        // Load with a different stateChangeSeq (10 instead of 5)
+        let tracker2 = DwellTracker(fileURL: fileURL)
+        let currentAgents: [AgentID: Agent] = [
+            agentId: Agent(
+                id: agentId,
+                kind: .claude,
+                status: .working,
+                stateChangeSeq: 10 // Different seq!
+            )
+        ]
+        let restored = tracker2.load(currentAgents: currentAgents)
+        #expect(restored == 0, "Entry should be discarded when stateChangeSeq doesn't match")
+        #expect(tracker2.entry(for: agentId) == nil)
+
+        // Cleanup
+        try? FileManager.default.removeItem(at: dir)
+    }
+}

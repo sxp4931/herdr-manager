@@ -209,7 +209,7 @@ public enum Verdict: Sendable, Equatable {
             let elapsed = Self.formatElapsed(since: since)
             switch cpu {
             case .thinking: return "Silent \(elapsed) · thinking hard"
-            case .deadlocked: return "Silent \(elapsed) · looks deadlocked"
+            case .deadlocked: return "Silent \(elapsed) · low CPU, possibly stalled"
             case .ioWait: return "Silent \(elapsed) · i/o wait"
             case .unknown, .none: return "Silent \(elapsed) · no output"
             }
@@ -413,7 +413,7 @@ public struct ForegroundProcess: Sendable {
 
 public struct HerdrSnapshot: Sendable {
     public let version: String
-    public let `protocol`: String
+    public let `protocol`: Int
     public let workspaces: [Workspace]
     public let tabs: [Tab]
     public let panes: [PaneInfo]
@@ -421,7 +421,7 @@ public struct HerdrSnapshot: Sendable {
     public let focusedTabId: String?
     public let focusedPaneId: String?
 
-    public init(version: String, protocol: String, workspaces: [Workspace], tabs: [Tab], panes: [PaneInfo],
+    public init(version: String, protocol: Int, workspaces: [Workspace], tabs: [Tab], panes: [PaneInfo],
                 focusedWorkspaceId: String?, focusedTabId: String?, focusedPaneId: String?) {
         self.version = version
         self.protocol = `protocol`
@@ -509,6 +509,23 @@ public enum HerdrEvent: Sendable {
     case paneMoved(paneId: String, workspaceId: String?, tabId: String?)
     case connected
     case disconnected
+    /// An unrecognized or no-op event that should be silently dropped.
+    case ignored
+}
+
+// MARK: - WorkspaceCreation
+
+/// Result of a successful `workspace.create` call to herdr.
+public struct WorkspaceCreation: Sendable, Codable, Equatable {
+    public let workspaceId: String
+    public let rootPaneId: String
+    public let tabId: String?
+
+    public init(workspaceId: String, rootPaneId: String, tabId: String? = nil) {
+        self.workspaceId = workspaceId
+        self.rootPaneId = rootPaneId
+        self.tabId = tabId
+    }
 }
 
 // MARK: - HerdrConnectionState

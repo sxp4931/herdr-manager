@@ -13,6 +13,7 @@ enum HerdrManagerMain {
 
 struct HerdrManagerApp: App {
     @State private var appModel = AppModel()
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         // Hide from Dock — menu-bar-only app
@@ -28,5 +29,11 @@ struct HerdrManagerApp: App {
                 .environment(appModel)
         }
         .menuBarExtraStyle(.window)
+        .onChange(of: scenePhase) { _, newPhase in
+            // Save dwell state when the app is backgrounded or terminated.
+            if newPhase == .background || newPhase == .inactive {
+                appModel.dwellTracker.save()
+            }
+        }
     }
 }

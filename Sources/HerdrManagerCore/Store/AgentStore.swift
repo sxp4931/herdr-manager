@@ -131,7 +131,7 @@ public final class AgentStore {
                 agents[agentId] = agent
             }
 
-        case .connected, .disconnected:
+        case .connected, .disconnected, .ignored:
             break
         }
     }
@@ -172,10 +172,43 @@ public final class AgentStore {
     // MARK: - Diagnosis
 
     /// Diagnose all non-idle agents and update their verdicts.
-    public func diagnoseAll(adapter: HerdrAdapter, diagnoser: Diagnoser) async {
+    /// - Parameters:
+    ///   - adapter: The HerdrAdapter to use for herdr API calls.
+    ///   - diagnoser: The Diagnoser to classify each agent.
+    ///   - settings: Optional SettingsStore for per-agent silent-threshold
+    ///     overrides. When nil, each agent falls back to the kind-based
+    ///     default (source-compatible with the previous signature).
+    public func diagnoseAll(
+        adapter: HerdrAdapter,
+        diagnoser: Diagnoser,
+        settings: SettingsStore? = nil
+    ) async {
         let nonIdle = agents.values.filter { $0.status != .idle }
+
+        // Snapshot per-agent thresholds off the actor before the loop so we
+        // don't hop into SettingsStore on every iteration.
+        let thresholds: [String: TimeInterval]?
+        if let settings {
+            var map: [String: TimeInterval] = [:]
+            for agent in nonIdle {
+                // SettingsStore keys overrides by pane-id (the herdr session
+                // identity). `agent.id.raw` is the full "wX:pY" form; the
+                // pane component is what the UI persists.
+                let minutes = await settings.threshold(for: agent.id.raw)
+                map[agent.id.raw] = TimeInterval(minutes) * 60.0
+            }
+            thresholds = map
+        } else {
+            thresholds = nil
+        }
+
         for agent in nonIdle {
-            let verdict = await diagnoser.diagnose(agent: agent, adapter: adapter)
+            let override = thresholds?[agent.id.raw]
+            let verdict = await diagnoser.diagnose(
+                agent: agent,
+                adapter: adapter,
+                silentThreshold: override
+            )
             // Update on MainActor (we're already @MainActor)
             if var current = agents[agent.id] {
                 current.verdict = verdict

@@ -113,20 +113,46 @@ public final class NDJSONClient: @unchecked Sendable {
         return "\(requestId)"
     }
 
-    public func send(method: String, params: [String: Any]) throws -> [String: Any] {
-        // One transaction at a time per client: serialize the blocking
-        // write+read so concurrent callers cannot corrupt the read buffer.
+    /// Synchronous idempotent read: reconnect + retry once on transport failure.
+    /// Safe because reads do not mutate herdr state. Must be called off the main
+    /// actor (callers are in async contexts).
+    public func sendRead(method: String, params: [String: Any]) throws -> [String: Any] {
         txLock.lock()
         defer { txLock.unlock() }
         do {
             return try sendOnce(method: method, params: params)
         } catch NDJSONClientError.sendFailed, NDJSONClientError.connectionClosed, NDJSONClientError.readFailed {
             // herdr closes the connection after each response (one-shot protocol).
-            // Reconnect and retry once before surfacing the error.
+            // Reconnect and retry once — safe for idempotent reads.
             closeSocket()
             try connect()
             return try sendOnce(method: method, params: params)
         }
+    }
+
+    /// Synchronous non-idempotent write: reconnect if needed but do NOT retry
+    /// the send after bytes may have reached herdr, because a partial write
+    /// could have already mutated state. Surface the error to the caller.
+    /// Must be called off the main actor (callers are in async contexts).
+    public func sendWrite(method: String, params: [String: Any]) throws -> [String: Any] {
+        txLock.lock()
+        defer { txLock.unlock() }
+        do {
+            return try sendOnce(method: method, params: params)
+        } catch let originalError {
+            // Transport broke — write may or may not have landed.
+            // Reconnect so the next call has a live socket, but do NOT retry —
+            // the original bytes may have been partially written.
+            closeSocket()
+            try? connect()
+            throw originalError
+        }
+    }
+
+    /// Backwards-compatible wrapper: idempotent read path. Prefer `sendRead` /
+    /// `sendWrite` at call sites so the retry semantics are explicit.
+    public func send(method: String, params: [String: Any]) throws -> [String: Any] {
+        return try sendRead(method: method, params: params)
     }
 
     private func sendOnce(method: String, params: [String: Any]) throws -> [String: Any] {

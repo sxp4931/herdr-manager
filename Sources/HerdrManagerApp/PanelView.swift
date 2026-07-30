@@ -35,6 +35,12 @@ struct PanelView: View {
                 peekView(content: content)
             }
             Divider()
+            if let errorText = appModel.lastError {
+                errorBanner(errorText)
+            }
+            if let health = appModel.adapterHealth, !health.compatible || !health.writesEnabled {
+                healthBanner(health)
+            }
             footer
         }
         .frame(width: 360, height: min(520, CGFloat(max(160, rowCount * 46 + 120))))
@@ -176,6 +182,39 @@ struct PanelView: View {
         }
     }
 
+    private func errorBanner(_ text: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 9))
+                .foregroundStyle(.red)
+            Text(text)
+                .font(.system(size: 9))
+                .foregroundStyle(.red)
+                .lineLimit(2)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 3)
+        .background(Color.red.opacity(0.06))
+    }
+
+    private func healthBanner(_ health: AdapterHealth) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 9))
+                .foregroundStyle(.orange)
+            let reason = health.reason ?? (health.compatible ? "writes disabled" : "incompatible protocol")
+            Text("v\(health.protocolVersion): \(reason)")
+                .font(.system(size: 9))
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 3)
+        .background(Color.orange.opacity(0.06))
+    }
+
     // MARK: - Empty state
 
     private var emptyState: some View {
@@ -216,7 +255,6 @@ struct PanelView: View {
             .padding(.horizontal, 12)
             .padding(.top, 6)
             .padding(.bottom, 2)
-            .keyboardShortcut(index < 9 ? KeyEquivalent(Character(String(index + 1))) : KeyEquivalent("0"), modifiers: .command)
 
             if appModel.showAll || group.hasAttention {
                 let agentsToShow = appModel.showAll ? group.agents : group.attentionOnly
@@ -251,7 +289,7 @@ struct PanelView: View {
                 let pb = Self.attentionPriorityFull(b)
                 if pa != pb { return pa < pb }
                 let nameA = a.displayName.isEmpty ? a.name : a.displayName
-                let nameB = b.displayName.isEmpty ? a.name : b.displayName
+                let nameB = b.displayName.isEmpty ? b.name : b.displayName
                 if nameA != nameB { return nameA < nameB }
                 return a.id.raw < b.id.raw
             }

@@ -110,14 +110,7 @@ struct HerdmgrCommand: AsyncParsableCommand {
 
     private func resolveSocketPath() -> String {
         if let socket { return socket }
-        let configHome: String
-        if let xdg = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"] {
-            configHome = xdg
-        } else {
-            configHome = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".config").path
-        }
-        return configHome + "/herdr/herdr.sock"
+        return LiveHerdrAdapter.resolveSocketPath()
     }
 
     // MARK: - Agent list building (non-@MainActor version for CLI)
@@ -188,7 +181,7 @@ struct HerdmgrCommand: AsyncParsableCommand {
                 if let ws = workspaceId { agents[idx].workspaceName = ws }
                 if let tab = tabId { agents[idx].tabName = tab }
             }
-        case .connected, .disconnected:
+        case .connected, .disconnected, .ignored:
             break
         }
     }

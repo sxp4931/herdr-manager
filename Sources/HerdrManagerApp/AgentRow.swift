@@ -31,6 +31,14 @@ struct AgentRow: View, Equatable {
         }
     }
 
+    /// Accessibility label conveying name, status, and diagnostic reason.
+    private var accessibilityDescription: String {
+        let name = displayName
+        let status = agent.status.rawValue
+        let reason = agent.verdict.reasonText ?? "no issues"
+        return "\(name), \(status), \(reason)"
+    }
+
     var body: some View {
         let accent = Brand.color(for: agent)
         let active = (agent.status == .working || agent.status == .blocked)
@@ -104,6 +112,11 @@ struct AgentRow: View, Equatable {
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isHovering)
         .contentShape(Rectangle())
         .onHover { hovering in isHovering = hovering }
+        .focusable()
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(accessibilityDescription)
+        .accessibilityHint("Double-click to focus this agent")
         .contextMenu {
             let paneId = agent.id.raw
             Button("Override: 5 min") {

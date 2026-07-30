@@ -2,6 +2,81 @@ import Foundation
 import Testing
 @testable import HerdrManagerCore
 
+// MARK: - Mock HerdrAdapter for Diagnosis Tests
+
+private struct MockHerdrAdapter: HerdrAdapter {
+    var snapshotResult: HerdrSnapshot?
+    var readResult: PaneReadResult?
+    var explainResult: AgentExplainResult?
+    var processInfoResult: ProcessInfoResult?
+    var focusError: Error?
+    var sendKeysError: Error?
+    var promptError: Error?
+    var closePaneError: Error?
+    var createWorkspaceResult: WorkspaceCreation?
+    var startAgentError: Error?
+    var waitStatusResult: Bool = true
+    var reportMetadataError: Error?
+    var connectionState: HerdrConnectionState = .connected
+    
+    func snapshot() async throws -> HerdrSnapshot {
+        guard let result = snapshotResult else { throw NSError(domain: "Mock", code: 1) }
+        return result
+    }
+    
+    func read(paneId: String, source: PaneReadSource) async throws -> PaneReadResult {
+        guard let result = readResult else { throw NSError(domain: "Mock", code: 1) }
+        return result
+    }
+    
+    func explain(paneId: String) async throws -> AgentExplainResult {
+        guard let result = explainResult else { throw NSError(domain: "Mock", code: 1) }
+        return result
+    }
+    
+    func processInfo(paneId: String) async throws -> ProcessInfoResult {
+        guard let result = processInfoResult else { throw NSError(domain: "Mock", code: 1) }
+        return result
+    }
+    
+    func focus(paneId: String) async throws {
+        if let error = focusError { throw error }
+    }
+    
+    func events() -> AsyncStream<HerdrEvent> {
+        return AsyncStream { $0.finish() }
+    }
+    
+    func sendKeys(paneId: String, keys: [String]) async throws {
+        if let error = sendKeysError { throw error }
+    }
+    
+    func prompt(paneId: String, text: String) async throws {
+        if let error = promptError { throw error }
+    }
+    
+    func closePane(paneId: String) async throws {
+        if let error = closePaneError { throw error }
+    }
+    
+    func createWorkspace(cwd: String, label: String?) async throws -> WorkspaceCreation {
+        guard let result = createWorkspaceResult else { throw NSError(domain: "Mock", code: 1) }
+        return result
+    }
+    
+    func startAgent(paneId: String, kind: String, name: String) async throws {
+        if let error = startAgentError { throw error }
+    }
+    
+    func waitStatus(paneId: String, until: [String], timeoutMs: Int) async throws -> Bool {
+        return waitStatusResult
+    }
+    
+    func reportMetadata(paneId: String, source: String, tokens: [String: String], ttlMs: Int) async throws {
+        if let error = reportMetadataError { throw error }
+    }
+}
+
 // MARK: - BlockKind.from(ruleId:) Tests
 
 @Suite("BlockKind.from(ruleId:)")
@@ -240,5 +315,118 @@ struct DiagnoserSilentThresholdTests {
     @Test("Custom agents use 5-minute default threshold")
     func customAgents() {
         #expect(Diagnoser.silentThreshold(for: .custom("myagent")) == 300)
+    }
+}
+
+// MARK: - Diagnoser.diagnose with explicit silentThreshold
+
+@Suite("Diagnoser.diagnose with silentThreshold")
+struct DiagnoserDiagnoseThresholdTests {
+
+    @Test("Small threshold classifies working agent as silent")
+    func smallThresholdClassifiesSilent() async {
+        let diagnoser = Diagnoser()
+        let agentId = AgentID("w1:p1")
+        let agent = Agent(
+            id: agentId,
+            kind: .claude,
+            status: .working,
+            lastOutputAt: Date().addingTimeInterval(-10) // 10 seconds ago
+        )
+        
+        let adapter = MockHerdrAdapter(
+            processInfoResult: ProcessInfoResult(
+                shellPid: 123,
+                foregroundProcesses: [ForegroundProcess(pid: 456, name: "node", argv0: nil, cmdline: nil, cwd: nil)]
+            )
+        )
+        
+        // With a 5-second threshold, 10 seconds of silence should trigger .silent
+        let verdict = await diagnoser.diagnose(agent: agent, adapter: adapter, silentThreshold: 5)
+        #expect(verdict.isSilent)
+    }
+
+    @Test("Large threshold does not classify working agent as silent")
+    func largeThresholdDoesNotClassifySilent() async {
+        let diagnoser = Diagnoser()
+        let agentId = AgentID("w1:p1")
+        let agent = Agent(
+            id: agentId,
+            kind: .claude,
+            status: .working,
+            lastOutputAt: Date().addingTimeInterval(-10) // 10 seconds ago
+        )
+        
+        let adapter = MockHerdrAdapter(
+            processInfoResult: ProcessInfoResult(
+                shellPid: 123,
+                foregroundProcesses: [ForegroundProcess(pid: 456, name: "node", argv0: nil, cmdline: nil, cwd: nil)]
+            )
+        )
+        
+        // With a 60-second threshold, 10 seconds of silence should NOT trigger .silent
+        let verdict = await diagnoser.diagnose(agent: agent, adapter: adapter, silentThreshold: 60)
+        #expect(!verdict.isSilent)
+    }
+}
+
+// MARK: - Diagnoser cpuState with foreground processes
+
+@Suite("Diagnoser cpuState with foreground processes")
+struct DiagnoserCpuStateTests {
+
+    @Test("Busy foreground process is measured")
+    func busyForegroundProcess() async {
+        let diagnoser = Diagnoser()
+        let agentId = AgentID("w1:p1")
+        let agent = Agent(
+            id: agentId,
+            kind: .claude,
+            status: .working,
+            lastOutputAt: Date().addingTimeInterval(-400) // 400 seconds ago to trigger silent
+        )
+        
+        // Mock adapter returns a foreground process (node)
+        let adapter = MockHerdrAdapter(
+            processInfoResult: ProcessInfoResult(
+                shellPid: 123,
+                foregroundProcesses: [
+                    ForegroundProcess(pid: 456, name: "node", argv0: nil, cmdline: nil, cwd: nil)
+                ]
+            )
+        )
+        
+        // The diagnoser will call ps on pid 456. Since we can't control ps output in a unit test,
+        // we just verify that the diagnosis completes without error and returns a verdict.
+        let verdict = await diagnoser.diagnose(agent: agent, adapter: adapter)
+        // Should be silent (400s > 300s default threshold)
+        #expect(verdict.isSilent)
+    }
+
+    @Test("Empty foreground processes returns unknown CPU state")
+    func emptyForegroundProcessesReturnsUnknown() async {
+        let diagnoser = Diagnoser()
+        let agentId = AgentID("w1:p1")
+        let agent = Agent(
+            id: agentId,
+            kind: .claude,
+            status: .working,
+            lastOutputAt: Date().addingTimeInterval(-400) // 400 seconds ago to trigger silent
+        )
+        
+        // Mock adapter returns empty foreground processes
+        let adapter = MockHerdrAdapter(
+            processInfoResult: ProcessInfoResult(
+                shellPid: 123,
+                foregroundProcesses: []
+            )
+        )
+        
+        let verdict = await diagnoser.diagnose(agent: agent, adapter: adapter)
+        // Should be silent with unknown CPU state
+        #expect(verdict.isSilent)
+        if case .silent(_, let cpu) = verdict {
+            #expect(cpu == .unknown)
+        }
     }
 }

@@ -15,7 +15,7 @@ public protocol HerdrAdapter: Sendable {
     func sendKeys(paneId: String, keys: [String]) async throws
     func prompt(paneId: String, text: String) async throws
     func closePane(paneId: String) async throws
-    func createWorkspace(cwd: String, label: String?) async throws -> String
+    func createWorkspace(cwd: String, label: String?) async throws -> WorkspaceCreation
     func startAgent(paneId: String, kind: String, name: String) async throws
     func waitStatus(paneId: String, until: [String], timeoutMs: Int) async throws -> Bool
     func reportMetadata(paneId: String, source: String, tokens: [String: String], ttlMs: Int) async throws
@@ -35,6 +35,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     private let subClient: NDJSONClient
     private let stateLock = NSLock()
     private var _connectionState: HerdrConnectionState = .disconnected
+    private var _latestProtocolVersion: Int = 0
     private var eventContinuation: AsyncStream<HerdrEvent>.Continuation?
     private let eventStream: AsyncStream<HerdrEvent>
     private var eventLoopTask: Task<Void, Never>?
@@ -61,6 +62,18 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         stateLock.unlock()
     }
 
+    private func setLatestProtocol(_ version: Int) {
+        stateLock.lock()
+        _latestProtocolVersion = version
+        stateLock.unlock()
+    }
+
+    private func latestProtocol() -> Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _latestProtocolVersion
+    }
+
     public func connect() async throws {
         setConnectionState(.connecting)
         try reqClient.connect()
@@ -68,8 +81,10 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     }
 
     public func snapshot() async throws -> HerdrSnapshot {
-        let result = try reqClient.send(method: "session.snapshot", params: [:])
-        return try Self.parseSnapshot(result)
+        let result = try reqClient.sendRead(method: "session.snapshot", params: [:])
+        let snap = try Self.parseSnapshot(result)
+        setLatestProtocol(snap.protocol)
+        return snap
     }
 
     public func read(paneId: String, source: PaneReadSource) async throws -> PaneReadResult {
@@ -77,7 +92,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             "pane_id": paneId,
             "source": source.rawValue
         ]
-        let result = try reqClient.send(method: "pane.read", params: params)
+        let result = try reqClient.sendRead(method: "pane.read", params: params)
         let text = result["text"] as? String ?? ""
         let src = result["source"] as? String ?? source.rawValue
         return PaneReadResult(text: text, source: src)
@@ -85,7 +100,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     public func explain(paneId: String) async throws -> AgentExplainResult {
         let params: [String: Any] = ["target": paneId]
-        let result = try reqClient.send(method: "agent.explain", params: params)
+        let result = try reqClient.sendRead(method: "agent.explain", params: params)
 
         // The herdr response nests data under result["explain"]:
         // {"type": "agent_explain", "explain": {"agent": ..., "state": ..., "matched_rule": {"id": ..., "priority": ...}, "screen_detection_skipped": ...}}
@@ -116,7 +131,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     public func processInfo(paneId: String) async throws -> ProcessInfoResult {
         let params: [String: Any] = ["pane_id": paneId]
-        let result = try reqClient.send(method: "pane.process_info", params: params)
+        let result = try reqClient.sendRead(method: "pane.process_info", params: params)
         let shellPid = result["shell_pid"] as? Int32
         var procs: [ForegroundProcess] = []
         if let fgList = result["foreground_processes"] as? [[String: Any]] {
@@ -135,7 +150,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     public func focus(paneId: String) async throws {
         let params: [String: Any] = ["pane_id": paneId]
-        _ = try reqClient.send(method: "agent.focus", params: params)
+        _ = try reqClient.sendWrite(method: "agent.focus", params: params)
     }
 
     // MARK: - Write Methods
@@ -145,7 +160,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             "target": paneId,
             "keys": keys
         ]
-        _ = try reqClient.send(method: "agent.send_keys", params: params)
+        _ = try reqClient.sendWrite(method: "agent.send_keys", params: params)
     }
 
     public func prompt(paneId: String, text: String) async throws {
@@ -153,19 +168,28 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             "target": paneId,
             "text": text
         ]
-        _ = try reqClient.send(method: "agent.prompt", params: params)
+        _ = try reqClient.sendWrite(method: "agent.prompt", params: params)
     }
 
     public func closePane(paneId: String) async throws {
         let params: [String: Any] = ["pane_id": paneId]
-        _ = try reqClient.send(method: "pane.close", params: params)
+        _ = try reqClient.sendWrite(method: "pane.close", params: params)
     }
 
-    public func createWorkspace(cwd: String, label: String?) async throws -> String {
+    public func createWorkspace(cwd: String, label: String?) async throws -> WorkspaceCreation {
         var params: [String: Any] = ["cwd": cwd]
         if let label { params["label"] = label }
-        let result = try reqClient.send(method: "workspace.create", params: params)
-        return result["workspace_id"] as? String ?? ""
+        let result = try reqClient.sendWrite(method: "workspace.create", params: params)
+        guard let workspaceId = result["workspace"] as? [String: Any],
+              let wid = workspaceId["workspace_id"] as? String, !wid.isEmpty else {
+            throw NDJSONClientError.invalidResponse("workspace.create missing workspace.workspace_id")
+        }
+        guard let rootPane = result["root_pane"] as? [String: Any],
+              let pid = rootPane["pane_id"] as? String, !pid.isEmpty else {
+            throw NDJSONClientError.invalidResponse("workspace.create missing root_pane.pane_id")
+        }
+        let tabId = (result["tab"] as? [String: Any])?["tab_id"] as? String
+        return WorkspaceCreation(workspaceId: wid, rootPaneId: pid, tabId: tabId)
     }
 
     public func startAgent(paneId: String, kind: String, name: String) async throws {
@@ -174,7 +198,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             "kind": kind,
             "name": name
         ]
-        _ = try reqClient.send(method: "agent.start", params: params)
+        _ = try reqClient.sendWrite(method: "agent.start", params: params)
     }
 
     public func waitStatus(paneId: String, until: [String], timeoutMs: Int) async throws -> Bool {
@@ -183,7 +207,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             "until": until,
             "timeout_ms": timeoutMs
         ]
-        let result = try reqClient.send(method: "agent.wait", params: params)
+        let result = try reqClient.sendWrite(method: "agent.wait", params: params)
         // herdr returns the final status; if we got a response, it settled
         return result["status"] != nil || result["settled"] != nil
     }
@@ -195,7 +219,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             "tokens": tokens,
             "ttl_ms": ttlMs
         ]
-        _ = try reqClient.send(method: "pane.report_metadata", params: params)
+        _ = try reqClient.sendWrite(method: "pane.report_metadata", params: params)
     }
 
     public func events() -> AsyncStream<HerdrEvent> {
@@ -219,10 +243,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                     try subClient.connect()
                 }
                 let stream = subClient.subscribe(subscriptions: [
-                    "pane.agent_status_changed",
-                    "pane.created",
-                    "pane.closed",
-                    "pane.moved"
+                    "pane.agent_status_changed"
                 ])
                 // Subscription (re)established — we are live again.
                 setConnectionState(.connected)
@@ -255,7 +276,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     // MARK: - Parsing
 
-    private static func parseSnapshot(_ dict: [String: Any]) throws -> HerdrSnapshot {
+    internal static func parseSnapshot(_ dict: [String: Any]) throws -> HerdrSnapshot {
         // The result has {type: "session_snapshot", snapshot: {...}}
         let snap: [String: Any]
         if let inner = dict["snapshot"] as? [String: Any] {
@@ -265,7 +286,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         }
 
         let version = snap["version"] as? String ?? ""
-        let proto = snap["protocol"] as? String ?? ""
+        let proto = snap["protocol"] as? Int ?? 0
 
         var workspaces: [HerdrSnapshot.Workspace] = []
         if let wsList = snap["workspaces"] as? [[String: Any]] {
@@ -328,27 +349,86 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         )
     }
 
-    private static func parseEvent(_ dict: [String: Any]) -> HerdrEvent {
-        let type = dict["type"] as? String ?? ""
-        let paneId = dict["pane_id"] as? String ?? ""
+    internal static func parseEvent(_ dict: [String: Any]) -> HerdrEvent {
+        // Real herdr subscription envelope: {event:"pane.agent_status_changed", data:{pane_id, workspace_id, agent_status, ...}}
+        guard let eventKind = dict["event"] as? String,
+              let data = dict["data"] as? [String: Any] else {
+            return .ignored
+        }
+        let paneId = data["pane_id"] as? String ?? ""
 
-        switch type {
-        case "pane_agent_status_changed":
-            let status = dict["agent_status"] as? String ?? "unknown"
-            let seq = dict["state_change_seq"] as? UInt64
+        switch eventKind {
+        case "pane.agent_status_changed":
+            let status = data["agent_status"] as? String ?? "unknown"
+            let seq = data["state_change_seq"] as? UInt64
             return .agentStatusChanged(paneId: paneId, agentStatus: status, stateChangeSeq: seq)
-        case "pane_created":
-            let wsId = dict["workspace_id"] as? String ?? ""
-            let tabId = dict["tab_id"] as? String ?? ""
+        case "pane.created":
+            let wsId = data["workspace_id"] as? String ?? ""
+            let tabId = data["tab_id"] as? String ?? ""
             return .paneCreated(paneId: paneId, workspaceId: wsId, tabId: tabId)
-        case "pane_closed":
+        case "pane.closed":
             return .paneClosed(paneId: paneId)
-        case "pane_moved":
-            let wsId = dict["workspace_id"] as? String
-            let tabId = dict["tab_id"] as? String
+        case "pane.moved":
+            let wsId = data["workspace_id"] as? String
+            let tabId = data["tab_id"] as? String
             return .paneMoved(paneId: paneId, workspaceId: wsId, tabId: tabId)
         default:
-            return .disconnected
+            return .ignored
         }
+    }
+
+    // MARK: - Health
+
+    public func health() -> AdapterHealth {
+        let proto = latestProtocol()
+        let supportedVersions: Set<Int> = [17]
+        if proto == 0 {
+            return AdapterHealth(protocolVersion: 0, compatible: false, writesEnabled: false, reason: "protocol unknown")
+        }
+        if supportedVersions.contains(proto) {
+            return AdapterHealth(protocolVersion: proto, compatible: true, writesEnabled: true, reason: nil)
+        }
+        return AdapterHealth(protocolVersion: proto, compatible: false, writesEnabled: false, reason: "herdr protocol \(proto) not verified for writes")
+    }
+
+    // MARK: - Socket Resolution
+
+    /// Resolve herdr socket path in priority order:
+    /// 1. HERDR_SOCKET_PATH (explicit override)
+    /// 2. HERDR_SESSION (session-based lookup)
+    /// 3. XDG_CONFIG_HOME/herdr/herdr.sock
+    /// 4. ~/.config/herdr/herdr.sock (default)
+    public static func resolveSocketPath() -> String {
+        let env = ProcessInfo.processInfo.environment
+        if let explicit = env["HERDR_SOCKET_PATH"], !explicit.isEmpty {
+            return explicit
+        }
+        if let session = env["HERDR_SESSION"], !session.isEmpty {
+            // Session-based path resolution (if herdr supports it)
+            // For now, fall through to XDG/default
+            _ = session
+        }
+        if let xdg = env["XDG_CONFIG_HOME"], !xdg.isEmpty {
+            return (xdg as NSString).appendingPathComponent("herdr/herdr.sock")
+        }
+        let home = env["HOME"] ?? NSHomeDirectory()
+        return (home as NSString).appendingPathComponent(".config/herdr/herdr.sock")
+    }
+}
+
+// MARK: - AdapterHealth
+
+/// Bounded capability/health surface for the herdr adapter.
+public struct AdapterHealth: Sendable, Equatable {
+    public let protocolVersion: Int
+    public let compatible: Bool
+    public let writesEnabled: Bool
+    public let reason: String?
+
+    public init(protocolVersion: Int, compatible: Bool, writesEnabled: Bool, reason: String?) {
+        self.protocolVersion = protocolVersion
+        self.compatible = compatible
+        self.writesEnabled = writesEnabled
+        self.reason = reason
     }
 }
