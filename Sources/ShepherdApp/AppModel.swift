@@ -443,9 +443,13 @@ final class AppModel {
     // .writesEnabled`) so an incompatible/unverified herdr protocol never
     // silently fires a write the server would reject anyway.
 
-    /// Jump: focus the workspace first, then the pane — otherwise the user
-    /// lands in the right pane of a workspace they can't see. Returns whether
-    /// it succeeded so the panel can dismiss itself only on success.
+    /// Jump: focus the workspace first, then the pane, then activate the GUI
+    /// application hosting Herdr. Herdr itself is a terminal executable, so
+    /// the final activation is what switches macOS Spaces when Shepherd was
+    /// opened over another full-screen app.
+    ///
+    /// Returns whether the full jump succeeded so the panel dismisses only
+    /// after the destination is actually brought forward.
     @discardableResult
     func jump(_ agent: Agent) async -> Bool {
         let health = adapter.health()
@@ -456,6 +460,10 @@ final class AppModel {
         do {
             try await adapter.focusWorkspace(agent.id.workspaceId)
             try await adapter.focus(paneId: agent.id.raw)
+            guard HerdrHostActivator.activate() else {
+                setLastError("Jump selected the agent, but could not bring its Herdr window forward")
+                return false
+            }
             setLastError(nil)
             return true
         } catch {
