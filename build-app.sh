@@ -18,6 +18,11 @@ mkdir -p "$APP_DIR/Contents/Resources"
 # Copy binary
 cp "$BINARY" "$APP_DIR/Contents/MacOS/HerdrManager"
 
+# Copy app icon
+if [ -f "Resources/AppIcon.icns" ]; then
+    cp "Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+fi
+
 # Create Info.plist
 cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -44,6 +49,10 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
 </dict>
 </plist>
 PLIST

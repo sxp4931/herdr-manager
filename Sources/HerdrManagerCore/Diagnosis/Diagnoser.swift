@@ -4,7 +4,8 @@ import Foundation
 
 /// The S1-S4 classifier. Precedence: S3 → S1 → S2 → S4.
 ///
-/// - S3: Process gone — pane.process_info shows no agent process in foreground + non-idle status
+/// - S3: Process gone — pane.process_info shows a bare shell while the agent
+///       is supposed to be alive (working/blocked/unknown).
 /// - S1: Awaiting input — status==blocked + agent.explain → matched_rule.id → BlockKind
 /// - S2: Silent — status==working ∧ now−lastOutputAt > threshold, enriched with CPU via `ps`
 /// - S4: Unclassifiable — unknown status or screen_detection_skipped → degraded classification
@@ -42,28 +43,38 @@ public actor Diagnoser {
     // MARK: - S3: Process Gone
 
     /// Check if the agent's process is gone. Returns .processGone if so, nil otherwise.
-    /// Only triggers when status is NOT idle (idle agents are expected to have no foreground process).
+    ///
+    /// A *finished* (`done`) or `idle` agent has legitimately returned to the
+    /// shell — that is the expected end state, NOT a crash, so we never flag it.
+    /// We only consider agents that are supposed to be alive (working/blocked/
+    /// unknown), and even then we corroborate: the foreground must be a bare
+    /// shell. If a non-shell process (e.g. `node`/`bun` hosting the agent) is
+    /// in the foreground, the read is inconclusive and we stay silent rather
+    /// than raise a false "process gone".
     private func checkProcessGone(agent: Agent, paneId: String, adapter: HerdrAdapter) async -> Verdict? {
-        // Idle agents are expected to have no foreground agent process
-        guard agent.status != .idle else { return nil }
+        guard agent.status == .working || agent.status == .blocked || agent.status == .unknown else {
+            return nil
+        }
 
         do {
             let procInfo = try await adapter.processInfo(paneId: paneId)
-            let expectedName = agentProcessName(for: agent.kind)
-            let hasAgentProcess = procInfo.foregroundProcesses.contains { proc in
-                proc.name.lowercased().contains(expectedName) ||
-                (proc.argv0?.lowercased().contains(expectedName) ?? false)
-            }
+            let procs = procInfo.foregroundProcesses
 
-            if !hasAgentProcess {
-                // No agent process in foreground — process is gone
-                let lastLine = procInfo.foregroundProcesses.last.map { "\($0.name) (pid \($0.pid))" }
-                return .processGone(lastLine: lastLine)
-            }
+            // Empty foreground = we couldn't read it; inconclusive, don't alarm.
+            guard !procs.isEmpty else { return nil }
+
+            // Corroborate: only a bare shell in the foreground means the agent's
+            // process group vanished. Anything else (a runtime hosting it) means
+            // we genuinely can't tell, so we do not declare it gone.
+            let foregroundIsBareShell = procs.allSatisfy { Self.isShellProcessName($0.name) }
+            guard foregroundIsBareShell else { return nil }
+
+            let lastLine = procs.last.map { "\($0.name) (pid \($0.pid))" }
+            return .processGone(lastLine: lastLine)
         } catch {
             // If we can't get process info, we can't determine S3 — fall through
+            return nil
         }
-        return nil
     }
 
     // MARK: - S1: Awaiting Input
@@ -208,16 +219,14 @@ public actor Diagnoser {
 
     // MARK: - Helpers
 
-    /// Map agent kind to expected process name for S3 detection.
-    private func agentProcessName(for kind: AgentKind) -> String {
-        switch kind {
-        case .claude: return "claude"
-        case .codex: return "codex"
-        case .opencode: return "opencode"
-        case .aider: return "aider"
-        case .gemini: return "gemini"
-        case .custom(let s): return s.lowercased()
-        }
+    /// True when a foreground process name looks like a login/interactive shell.
+    /// Used to corroborate S3: a "gone" agent leaves a bare shell in the pane,
+    /// whereas a healthy agent leaves its runtime (node/bun/…) in the foreground.
+    private static func isShellProcessName(_ name: String) -> Bool {
+        let base = name.split(separator: "/").last.map(String.init) ?? name
+        let n = base.hasPrefix("-") ? String(base.dropFirst()) : base
+        return ["zsh", "bash", "sh", "fish", "tcsh", "ksh", "dash", "login"]
+            .contains(n.lowercased())
     }
 
     /// Silent threshold for an agent kind.

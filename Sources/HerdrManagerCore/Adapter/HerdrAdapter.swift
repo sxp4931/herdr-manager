@@ -23,16 +23,25 @@ public protocol HerdrAdapter: Sendable {
 
 // MARK: - LiveHerdrAdapter
 
+/// Two sockets, by design. `reqClient` carries request/response traffic
+/// (snapshot, explain, reads, writes) — one short transaction at a time,
+/// serialized inside the client. `subClient` is dedicated to the long-lived
+/// `events.subscribe` stream and is NEVER used for requests. Sharing one socket
+/// between a blocking event read-loop and concurrent requests raced two readers
+/// on a single file descriptor, corrupting the NDJSON framing and flapping the
+/// connection — which both stalled live updates and reflowed the menu bar.
 public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
-    private let client: NDJSONClient
+    private let reqClient: NDJSONClient
+    private let subClient: NDJSONClient
     private let stateLock = NSLock()
     private var _connectionState: HerdrConnectionState = .disconnected
     private var eventContinuation: AsyncStream<HerdrEvent>.Continuation?
     private let eventStream: AsyncStream<HerdrEvent>
-    private var reconnectTask: Task<Void, Never>?
+    private var eventLoopTask: Task<Void, Never>?
 
     public init(socketPath: String) {
-        self.client = NDJSONClient(socketPath: socketPath)
+        self.reqClient = NDJSONClient(socketPath: socketPath)
+        self.subClient = NDJSONClient(socketPath: socketPath)
         var continuation: AsyncStream<HerdrEvent>.Continuation?
         self.eventStream = AsyncStream { cont in
             continuation = cont
@@ -54,13 +63,12 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     public func connect() async throws {
         setConnectionState(.connecting)
-        try client.connect()
+        try reqClient.connect()
         setConnectionState(.connected)
-        eventContinuation?.yield(.connected)
     }
 
     public func snapshot() async throws -> HerdrSnapshot {
-        let result = try await client.send(method: "session.snapshot", params: [:])
+        let result = try reqClient.send(method: "session.snapshot", params: [:])
         return try Self.parseSnapshot(result)
     }
 
@@ -69,7 +77,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             "pane_id": paneId,
             "source": source.rawValue
         ]
-        let result = try await client.send(method: "pane.read", params: params)
+        let result = try reqClient.send(method: "pane.read", params: params)
         let text = result["text"] as? String ?? ""
         let src = result["source"] as? String ?? source.rawValue
         return PaneReadResult(text: text, source: src)
@@ -77,7 +85,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     public func explain(paneId: String) async throws -> AgentExplainResult {
         let params: [String: Any] = ["target": paneId]
-        let result = try await client.send(method: "agent.explain", params: params)
+        let result = try reqClient.send(method: "agent.explain", params: params)
 
         // The herdr response nests data under result["explain"]:
         // {"type": "agent_explain", "explain": {"agent": ..., "state": ..., "matched_rule": {"id": ..., "priority": ...}, "screen_detection_skipped": ...}}
@@ -108,7 +116,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     public func processInfo(paneId: String) async throws -> ProcessInfoResult {
         let params: [String: Any] = ["pane_id": paneId]
-        let result = try await client.send(method: "pane.process_info", params: params)
+        let result = try reqClient.send(method: "pane.process_info", params: params)
         let shellPid = result["shell_pid"] as? Int32
         var procs: [ForegroundProcess] = []
         if let fgList = result["foreground_processes"] as? [[String: Any]] {
@@ -127,7 +135,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     public func focus(paneId: String) async throws {
         let params: [String: Any] = ["pane_id": paneId]
-        _ = try await client.send(method: "agent.focus", params: params)
+        _ = try reqClient.send(method: "agent.focus", params: params)
     }
 
     // MARK: - Write Methods
@@ -137,7 +145,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             "target": paneId,
             "keys": keys
         ]
-        _ = try await client.send(method: "agent.send_keys", params: params)
+        _ = try reqClient.send(method: "agent.send_keys", params: params)
     }
 
     public func prompt(paneId: String, text: String) async throws {
@@ -145,18 +153,18 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             "target": paneId,
             "text": text
         ]
-        _ = try await client.send(method: "agent.prompt", params: params)
+        _ = try reqClient.send(method: "agent.prompt", params: params)
     }
 
     public func closePane(paneId: String) async throws {
         let params: [String: Any] = ["pane_id": paneId]
-        _ = try await client.send(method: "pane.close", params: params)
+        _ = try reqClient.send(method: "pane.close", params: params)
     }
 
     public func createWorkspace(cwd: String, label: String?) async throws -> String {
         var params: [String: Any] = ["cwd": cwd]
         if let label { params["label"] = label }
-        let result = try await client.send(method: "workspace.create", params: params)
+        let result = try reqClient.send(method: "workspace.create", params: params)
         return result["workspace_id"] as? String ?? ""
     }
 
@@ -166,7 +174,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             "kind": kind,
             "name": name
         ]
-        _ = try await client.send(method: "agent.start", params: params)
+        _ = try reqClient.send(method: "agent.start", params: params)
     }
 
     public func waitStatus(paneId: String, until: [String], timeoutMs: Int) async throws -> Bool {
@@ -175,7 +183,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             "until": until,
             "timeout_ms": timeoutMs
         ]
-        let result = try await client.send(method: "agent.wait", params: params)
+        let result = try reqClient.send(method: "agent.wait", params: params)
         // herdr returns the final status; if we got a response, it settled
         return result["status"] != nil || result["settled"] != nil
     }
@@ -187,58 +195,61 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             "tokens": tokens,
             "ttl_ms": ttlMs
         ]
-        _ = try await client.send(method: "pane.report_metadata", params: params)
+        _ = try reqClient.send(method: "pane.report_metadata", params: params)
     }
 
     public func events() -> AsyncStream<HerdrEvent> {
-        // Start listening for events in background
-        Task {
-            await self.startEventLoop()
+        // Start the self-healing subscription loop in the background.
+        eventLoopTask?.cancel()
+        eventLoopTask = Task { [weak self] in
+            await self?.runSubscriptionLoop()
         }
         return eventStream
     }
 
-    private func startEventLoop() async {
-        do {
-            let stream = client.subscribe(subscriptions: [
-                "pane.agent_status_changed",
-                "pane.created",
-                "pane.closed",
-                "pane.moved"
-            ])
-            for try await lineData in stream {
-                if let dict = try JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
-                    let event = Self.parseEvent(dict)
-                    eventContinuation?.yield(event)
+    /// Subscribe on the dedicated `subClient`, forever. On any error or clean
+    /// close, mark disconnected, back off, and re-subscribe — so a transient
+    /// socket hiccup no longer kills live updates permanently.
+    private func runSubscriptionLoop() async {
+        var attempt = 0
+        var backoff: UInt64 = 1_000_000_000 // 1s
+        while !Task.isCancelled {
+            do {
+                if !subClient.connected {
+                    try subClient.connect()
                 }
-            }
-        } catch {
-            eventContinuation?.yield(.disconnected)
-            setConnectionState(.disconnected)
-            scheduleReconnect()
-        }
-    }
+                let stream = subClient.subscribe(subscriptions: [
+                    "pane.agent_status_changed",
+                    "pane.created",
+                    "pane.closed",
+                    "pane.moved"
+                ])
+                // Subscription (re)established — we are live again.
+                setConnectionState(.connected)
+                eventContinuation?.yield(.connected)
+                attempt = 0
+                backoff = 1_000_000_000
 
-    private func scheduleReconnect() {
-        reconnectTask?.cancel()
-        reconnectTask = Task { [weak self] in
-            var attempt = 0
-            var delay: UInt64 = 1_000_000_000 // 1 second
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: delay)
-                guard let self else { return }
-                self.setConnectionState(.reconnecting(attempt: attempt))
-                do {
-                    self.client.closeSocket()
-                    try self.client.connect()
-                    self.setConnectionState(.connected)
-                    self.eventContinuation?.yield(.connected)
-                    return
-                } catch {
-                    attempt += 1
-                    delay = min(delay * 2, 30_000_000_000) // cap at 30s
+                for try await lineData in stream {
+                    if let dict = try JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
+                        let event = Self.parseEvent(dict)
+                        eventContinuation?.yield(event)
+                    }
                 }
+                // Stream ended without throwing: server closed the subscription.
+            } catch {
+                // fall through to backoff/reconnect below
             }
+
+            guard !Task.isCancelled else { return }
+            setConnectionState(.disconnected)
+            eventContinuation?.yield(.disconnected)
+            subClient.closeSocket()
+
+            setConnectionState(.reconnecting(attempt: attempt))
+            try? await Task.sleep(nanoseconds: backoff)
+            attempt += 1
+            backoff = min(backoff * 2, 30_000_000_000) // cap at 30s
         }
     }
 

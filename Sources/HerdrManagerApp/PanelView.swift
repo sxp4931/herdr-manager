@@ -13,12 +13,13 @@ struct PanelView: View {
 
         VStack(alignment: .leading, spacing: 0) {
             header
+            statStrip
             Divider()
             if !appModel.pendingActions.isEmpty {
                 PendingActionsView()
             }
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 2) {
                     let groups = visibleGroups
                     if groups.isEmpty {
                         emptyState
@@ -36,7 +37,8 @@ struct PanelView: View {
             Divider()
             footer
         }
-        .frame(width: 360, height: min(480, CGFloat(max(120, rowCount * 28 + 80))))
+        .frame(width: 360, height: min(520, CGFloat(max(160, rowCount * 46 + 120))))
+        .background(panelBackground)
         .onKeyPress(.escape) {
             dismiss()
             return .handled
@@ -65,30 +67,79 @@ struct PanelView: View {
     // MARK: - Header
 
     private var header: some View {
-        HStack {
-            Text("Herdr Manager")
-                .font(.headline)
+        HStack(spacing: 8) {
+            HerdMark(size: 16, glow: appModel.connectionState == .connected)
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Herdr Manager")
+                    .font(.system(size: 13, weight: .bold))
+                Text(headerSubtitle)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
             Spacer()
-            Button {
+            iconButton(system: "arrow.clockwise", help: "Resync (⌘R)", shortcut: "r") {
                 appModel.resync()
-            } label: {
-                Image(systemName: "arrow.clockwise")
             }
-            .buttonStyle(.borderless)
-            .help("Resync (⌘R)")
-            .keyboardShortcut("r", modifiers: .command)
-
-            Button {
+            iconButton(
+                system: appModel.showAll ? "eye.fill" : "eye.slash.fill",
+                help: "Show all (⌘A)", shortcut: "a"
+            ) {
                 appModel.showAll.toggle()
-            } label: {
-                Image(systemName: appModel.showAll ? "eye" : "eye.slash")
             }
-            .buttonStyle(.borderless)
-            .help("Show all (⌘A)")
-            .keyboardShortcut("a", modifiers: .command)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.top, 10)
+        .padding(.bottom, 6)
+    }
+
+    private func iconButton(
+        system: String, help: String, shortcut: Character, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 11, weight: .semibold))
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(Color.primary.opacity(0.06)))
+        }
+        .buttonStyle(.borderless)
+        .help(help)
+        .keyboardShortcut(KeyEquivalent(shortcut), modifiers: .command)
+    }
+
+    // MARK: - Stat strip
+
+    private var statStrip: some View {
+        let s = appModel.store
+        let chips: [(label: String, count: Int, color: Color)] = [
+            ("blocked", s.blockedCount, Brand.blocked),
+            ("silent", s.silentCount, Brand.silent),
+            ("done", s.doneCount, Brand.done),
+            ("working", workingCount, Brand.working),
+        ]
+        let active = chips.filter { $0.count > 0 }
+        let shown = active.isEmpty
+            ? [("idle", s.agents.count, Brand.idle)]
+            : active
+        return HStack(spacing: 6) {
+            ForEach(Array(shown.enumerated()), id: \.offset) { _, chip in
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(chip.color)
+                        .frame(width: 6, height: 6)
+                        .shadow(color: chip.color.opacity(0.7), radius: 2)
+                    Text("\(chip.count) \(chip.label)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(chip.color.opacity(0.12)))
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
     }
 
     // MARK: - Footer
@@ -128,30 +179,37 @@ struct PanelView: View {
     // MARK: - Empty state
 
     private var emptyState: some View {
-        VStack(spacing: 4) {
-            Text("🟢 All clear")
-                .font(.subheadline)
+        VStack(spacing: 10) {
+            HerdMark(size: 34, glow: true, herd: true)
+                .opacity(0.92)
+            Text("All quiet")
+                .font(.system(size: 13, weight: .semibold))
+            Text("The herd is resting — nothing needs you right now.")
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            Text("No agents need attention")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 24)
+        .padding(.vertical, 28)
     }
 
     // MARK: - Workspace sections
 
     private func workspaceSection(index: Int, group: WorkspaceGroup) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text(group.name)
-                    .font(.caption.bold())
+            HStack(spacing: 6) {
+                Text(group.name.isEmpty ? "(default)" : group.name.uppercased())
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .tracking(0.6)
                     .foregroundStyle(.secondary)
                 if !appModel.showAll && !group.hasAttention {
-                    Text("(\(group.agents.count) idle)")
-                        .font(.caption2)
+                    Text("\(group.agents.count) idle")
+                        .font(.system(size: 9.5, weight: .medium))
                         .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.primary.opacity(0.05)))
                 }
                 Spacer()
             }
@@ -167,12 +225,13 @@ struct PanelView: View {
                         agent: agent,
                         isSelected: appModel.selectedAgentId == agent.id
                     )
-                    .onTapGesture {
-                        appModel.selectedAgentId = agent.id
-                    }
+                    .equatable()
                     .onTapGesture(count: 2) {
                         appModel.selectedAgentId = agent.id
                         appModel.focusAgent(agent)
+                    }
+                    .onTapGesture {
+                        appModel.selectedAgentId = agent.id
                     }
                 }
             }
@@ -186,14 +245,21 @@ struct PanelView: View {
         let grouped = Dictionary(grouping: agents, by: { $0.workspaceName })
 
         var groups: [WorkspaceGroup] = grouped.map { name, agents in
+            // Deterministic total order: attentionPriority, then displayName, then id
             let sorted = agents.sorted { a, b in
-                Self.attentionPriority(a) < Self.attentionPriority(b)
+                let pa = Self.attentionPriorityFull(a)
+                let pb = Self.attentionPriorityFull(b)
+                if pa != pb { return pa < pb }
+                let nameA = a.displayName.isEmpty ? a.name : a.displayName
+                let nameB = b.displayName.isEmpty ? a.name : b.displayName
+                if nameA != nameB { return nameA < nameB }
+                return a.id.raw < b.id.raw
             }
             let attention = sorted.filter { Self.isAttention($0) }
             return WorkspaceGroup(name: name.isEmpty ? "(default)" : name, agents: sorted, attentionOnly: attention)
         }
 
-        // Sort: workspaces with attention first, then alphabetical
+        // Deterministic group order: workspaces with attention first, then alphabetical by name
         groups.sort { a, b in
             if a.hasAttention != b.hasAttention { return a.hasAttention }
             return a.name < b.name
@@ -212,6 +278,41 @@ struct PanelView: View {
     private var flatVisibleAgents: [Agent] {
         visibleGroups.flatMap { group in
             appModel.showAll ? group.agents : group.attentionOnly
+        }
+    }
+
+    // MARK: - Brand chrome
+
+    private var headerSubtitle: String {
+        let total = appModel.store.agents.count
+        let att = appModel.store.attentionAgents.count
+        switch appModel.connectionState {
+        case .connected:
+            return att > 0 ? "\(total) agents · \(att) need you" : "\(total) agents · all quiet"
+        case .connecting:
+            return "connecting…"
+        case .reconnecting(let n):
+            return "reconnecting #\(n)…"
+        case .disconnected:
+            return "disconnected"
+        }
+    }
+
+    private var workingCount: Int {
+        appModel.store.agents.values.filter { $0.status == .working }.count
+    }
+
+    private var panelBackground: some View {
+        ZStack {
+            Rectangle().fill(.regularMaterial)
+            LinearGradient(
+                colors: [Brand.bgMid.opacity(0.22), Brand.bgDeep.opacity(0.06), .clear],
+                startPoint: .top, endPoint: .bottom
+            )
+            RadialGradient(
+                colors: [Brand.amber.opacity(0.10), .clear],
+                center: .topLeading, startRadius: 8, endRadius: 340
+            )
         }
     }
 
@@ -292,18 +393,6 @@ struct PanelView: View {
         agent.status == .blocked || agent.verdict.isSilent || agent.status == .done
     }
 
-    private static func attentionPriority(_ agent: Agent) -> Int {
-        switch agent.status {
-        case .blocked: return 0
-        case .done: return 1
-        case .idle: return 3
-        case .working: return 4
-        case .unknown: return 5
-        }
-        // silent verdict agents that aren't blocked/done
-    }
-
-    // Override for silent verdict
     private static func attentionPriorityFull(_ agent: Agent) -> Int {
         if agent.status == .blocked { return 0 }
         if agent.status == .done { return 1 }

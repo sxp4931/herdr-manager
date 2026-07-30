@@ -123,6 +123,16 @@ public enum CPUState: String, Sendable, Equatable {
     }
 }
 
+// MARK: - ReasonTone
+
+/// Drives the colour of a verdict's reason line in the UI.
+public enum ReasonTone: Sendable, Equatable {
+    case danger  // needs you now (blocked / process gone)
+    case warn    // worth a look (silent)
+    case info    // informational
+    case neutral // no strong signal
+}
+
 // MARK: - Verdict
 
 public enum Verdict: Sendable, Equatable {
@@ -181,9 +191,42 @@ public enum Verdict: Sendable, Equatable {
                 return "🔇 Silent for \(elapsed) (\(cpuHint))"
             }
         case .processGone:
-            return "💀 Process gone"
+            return "⚠️ Process gone — pane returned to shell"
         case .unclassifiable:
             return "❓ Unknown state"
+        }
+    }
+
+    /// Emoji-free, crafted reason line for the redesigned UI. The colour is
+    /// driven separately by `reasonTone`, so the text stays clean.
+    public var reasonText: String? {
+        switch self {
+        case .healthy:
+            return nil
+        case .awaitingInput(let classification):
+            return "Waiting · \(classification.summary)"
+        case .silent(let since, let cpu):
+            let elapsed = Self.formatElapsed(since: since)
+            switch cpu {
+            case .thinking: return "Silent \(elapsed) · thinking hard"
+            case .deadlocked: return "Silent \(elapsed) · looks deadlocked"
+            case .ioWait: return "Silent \(elapsed) · i/o wait"
+            case .unknown, .none: return "Silent \(elapsed) · no output"
+            }
+        case .processGone:
+            return "Agent gone — pane is back to a shell"
+        case .unclassifiable(let reason):
+            return reason
+        }
+    }
+
+    /// Colour tone for `reasonText`.
+    public var reasonTone: ReasonTone {
+        switch self {
+        case .awaitingInput, .processGone: return .danger
+        case .silent: return .warn
+        case .unclassifiable: return .neutral
+        case .healthy: return .neutral
         }
     }
 
@@ -239,7 +282,22 @@ public struct AgentID: Hashable, Sendable, Codable {
 
 // MARK: - Agent
 
-public struct Agent: Sendable, Identifiable {
+public struct Agent: Sendable, Identifiable, Equatable {
+    public static func == (lhs: Agent, rhs: Agent) -> Bool {
+        lhs.id == rhs.id
+            && lhs.kind == rhs.kind
+            && lhs.name == rhs.name
+            && lhs.displayName == rhs.displayName
+            && lhs.status == rhs.status
+            && lhs.stateChangeSeq == rhs.stateChangeSeq
+            && lhs.enteredAt == rhs.enteredAt
+            && lhs.lastOutputAt == rhs.lastOutputAt
+            && lhs.verdict == rhs.verdict
+            && lhs.workspaceName == rhs.workspaceName
+            && lhs.tabName == rhs.tabName
+            && lhs.cwd == rhs.cwd
+    }
+
     public let id: AgentID
     public var kind: AgentKind
     public var name: String
@@ -251,6 +309,7 @@ public struct Agent: Sendable, Identifiable {
     public var verdict: Verdict
     public var workspaceName: String
     public var tabName: String
+    public var cwd: String
 
     public init(
         id: AgentID,
@@ -263,7 +322,8 @@ public struct Agent: Sendable, Identifiable {
         lastOutputAt: Date? = nil,
         verdict: Verdict = .unclassifiable(reason: "not yet diagnosed"),
         workspaceName: String = "",
-        tabName: String = ""
+        tabName: String = "",
+        cwd: String = ""
     ) {
         self.id = id
         self.kind = kind
@@ -276,6 +336,7 @@ public struct Agent: Sendable, Identifiable {
         self.verdict = verdict
         self.workspaceName = workspaceName
         self.tabName = tabName
+        self.cwd = cwd
     }
 }
 

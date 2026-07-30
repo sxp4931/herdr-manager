@@ -24,6 +24,12 @@ public final class NDJSONClient: @unchecked Sendable {
     private let socketPath: String
     nonisolated(unsafe) private var fd: Int32 = -1
     private let lock = NSLock()
+    // Serializes whole request/response transactions so two concurrent `send`
+    // callers never interleave their write+read on the same socket (which would
+    // append out-of-order byte chunks to `readBuffer` and corrupt framing).
+    // `send`/`sendOnce` are synchronous (blocking I/O, no `await`), so holding
+    // this non-async lock across them never crosses a suspension point.
+    private let txLock = NSLock()
     nonisolated(unsafe) private var requestId: UInt64 = 0
     nonisolated(unsafe) private var readBuffer = Data()
     nonisolated(unsafe) private var isConnected = false
@@ -107,7 +113,11 @@ public final class NDJSONClient: @unchecked Sendable {
         return "\(requestId)"
     }
 
-    public func send(method: String, params: [String: Any]) async throws -> [String: Any] {
+    public func send(method: String, params: [String: Any]) throws -> [String: Any] {
+        // One transaction at a time per client: serialize the blocking
+        // write+read so concurrent callers cannot corrupt the read buffer.
+        txLock.lock()
+        defer { txLock.unlock() }
         do {
             return try sendOnce(method: method, params: params)
         } catch NDJSONClientError.sendFailed, NDJSONClientError.connectionClosed, NDJSONClientError.readFailed {
@@ -162,7 +172,7 @@ public final class NDJSONClient: @unchecked Sendable {
                     let params: [String: Any] = [
                         "subscriptions": subscriptions.map { ["type": $0] }
                     ]
-                    _ = try await self.send(method: "events.subscribe", params: params)
+                    _ = try self.send(method: "events.subscribe", params: params)
 
                     // Now read events continuously
                     while true {

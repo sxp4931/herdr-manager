@@ -29,6 +29,8 @@ final class AppModel {
     private var diagnosisTask: Task<Void, Never>?
     private var pendingActionsTask: Task<Void, Never>?
     private var metadataTask: Task<Void, Never>?
+    private var refreshTask: Task<Void, Never>?
+    private var hasStarted = false
 
     // MARK: - Init
 
@@ -41,6 +43,13 @@ final class AppModel {
     // MARK: - Lifecycle
 
     func start() {
+        // `start` spins up long-lived tasks; it must run exactly once. The
+        // menu-bar label calls it from `onAppear`, which SwiftUI can re-invoke,
+        // and re-running would cancel and recreate every task (and reconnect the
+        // socket) — churn that can bounce the menu-bar window on open.
+        guard !hasStarted else { return }
+        hasStarted = true
+
         // Clean up old journal entries on launch
         Task {
             await journal.cleanup()
@@ -80,6 +89,23 @@ final class AppModel {
                 guard let self else { return }
                 guard self.metadataWriteBackEnabled else { continue }
                 await self.reportMetadataForStuckAgents()
+            }
+        }
+
+        // Reconcile with herdr every few seconds. The live event stream is
+        // edge-triggered and can drop or delay a pane appearing, which left the
+        // UI showing a stale agent count until a manual ⌘R. A cheap periodic
+        // snapshot is the safety net; applySnapshot preserves diagnosed state so
+        // this never flickers the verdict lines.
+        refreshTask?.cancel()
+        refreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard let self else { return }
+                guard self.connectionState == .connected else { continue }
+                if let snapshot = try? await self.adapter.snapshot() {
+                    self.store.applySnapshot(snapshot)
+                }
             }
         }
     }

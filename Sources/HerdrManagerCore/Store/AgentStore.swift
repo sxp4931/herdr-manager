@@ -47,6 +47,17 @@ public final class AgentStore {
 
             let name = pane.agent ?? pane.terminalTitleStripped ?? ""
 
+            // Preserve a diagnosed verdict across periodic snapshots so the
+            // few-second reconciliation refresh doesn't flicker "silent"/"gone"
+            // lines back to a generic status verdict between diagnosis passes.
+            // A genuine status change still resets to the status-derived verdict.
+            let verdict: Verdict
+            if let ex = existing, ex.status == status {
+                verdict = ex.verdict
+            } else {
+                verdict = Self.verdict(for: status)
+            }
+
             let agent = Agent(
                 id: agentId,
                 kind: kind,
@@ -56,14 +67,23 @@ public final class AgentStore {
                 stateChangeSeq: pane.stateChangeSeq ?? 0,
                 enteredAt: enteredAt,
                 lastOutputAt: existing?.lastOutputAt,
-                verdict: Self.verdict(for: status),
+                verdict: verdict,
                 workspaceName: wsName,
-                tabName: tabName
+                tabName: tabName,
+                cwd: pane.foregroundCwd ?? pane.cwd ?? ""
             )
             newAgents[agentId] = agent
         }
 
-        agents = newAgents
+        // Only publish a change when the herd actually differs. The periodic
+        // reconciliation snapshot (every few seconds) usually returns an
+        // identical herd; rewriting the dictionary anyway would fire @Observable
+        // on a timer and re-render the menu-bar panel continuously — which makes
+        // a MenuBarExtra window flicker. Skipping the no-op write keeps the UI
+        // calm while still picking up genuine additions/removals instantly.
+        if newAgents != agents {
+            agents = newAgents
+        }
     }
 
     // MARK: - Events
