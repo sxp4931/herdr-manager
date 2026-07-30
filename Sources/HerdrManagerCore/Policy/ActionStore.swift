@@ -14,7 +14,7 @@ public enum ActionState: String, Sendable, Codable {
 
 // MARK: - PendingAction
 
-public struct PendingAction: Sendable, Codable {
+public struct PendingAction: Sendable, Codable, Equatable {
     public let actionId: String
     public let tool: String
     public let params: [String: String]

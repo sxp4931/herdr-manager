@@ -181,6 +181,27 @@ struct HerdmgrCommand: AsyncParsableCommand {
                 if let ws = workspaceId { agents[idx].workspaceName = ws }
                 if let tab = tabId { agents[idx].tabName = tab }
             }
+        case .paneUpdated(let info):
+            // Full pane state from the real `pane_updated` event. herdmgr's
+            // status table only tracks the fields buildAgentList/printTable
+            // use, so just keep status/seq in sync for an existing row.
+            guard let idx = agents.firstIndex(where: { $0.id.raw == info.paneId }) else { return }
+            let newStatus = AgentStatus(rawValue: info.agentStatus) ?? .unknown
+            if newStatus != agents[idx].status {
+                agents[idx].enteredAt = Date()
+            }
+            agents[idx].status = newStatus
+            agents[idx].stateChangeSeq = info.stateChangeSeq
+            agents[idx].verdict = verdict(for: newStatus)
+        case .paneFocused:
+            // herdmgr's plain table doesn't track focus — nothing to update.
+            break
+        case .paneExited(let paneId):
+            agents.removeAll { $0.id.raw == paneId }
+        case .workspacesChanged:
+            // Labels changed; herdmgr's live loop doesn't re-fetch a full
+            // snapshot mid-stream, so just note it happened.
+            print("(workspace/tab labels changed)")
         case .connected, .disconnected, .ignored:
             break
         }

@@ -13,13 +13,13 @@ struct PendingActionsView: View {
                 Divider()
                 HStack {
                     Text("Pending Actions (\(actions.count))")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.orange)
                     Spacer()
                 }
-                .padding(.horizontal, 12)
-                .padding(.top, 4)
-                .padding(.bottom, 2)
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
+                .padding(.bottom, 4)
 
                 ForEach(actions, id: \.actionId) { action in
                     actionRow(action)
@@ -33,23 +33,23 @@ struct PendingActionsView: View {
         let summary = Self.summary(for: action)
         let expiresText = Self.expiresText(for: action)
 
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(summary)
-                        .font(.system(size: 10.5, weight: .medium))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     HStack(spacing: 4) {
                         if let observed = action.observedStatus, !observed.isEmpty {
                             Text("observed: \(observed)")
-                                .font(.system(size: 9, design: .monospaced))
+                                .font(.system(size: 10.5, design: .monospaced))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
                         if !expiresText.isEmpty {
                             Text(expiresText)
-                                .font(.system(size: 9, design: .monospaced))
+                                .font(.system(size: 10.5, design: .monospaced))
                                 .foregroundStyle(.orange)
                                 .lineLimit(1)
                         }
@@ -60,22 +60,22 @@ struct PendingActionsView: View {
                     appModel.approveAction(action.actionId)
                 } label: {
                     Text("OK")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.green)
                 }
                 .buttonStyle(.borderless)
-                .controlSize(.mini)
+                .controlSize(.small)
                 .help("Approve")
 
                 Button {
                     appModel.denyAction(action.actionId)
                 } label: {
                     Text("Deny")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.red)
                 }
                 .buttonStyle(.borderless)
-                .controlSize(.mini)
+                .controlSize(.small)
                 .help("Deny")
             }
 
@@ -89,7 +89,7 @@ struct PendingActionsView: View {
                             if !key.hasPrefix("_fp_") {
                                 let value = action.params[key] ?? ""
                                 Text("\(key): \(value)")
-                                    .font(.system(size: 9, design: .monospaced))
+                                    .font(.system(size: 10.5, design: .monospaced))
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
                                     .textSelection(.enabled)
@@ -99,12 +99,12 @@ struct PendingActionsView: View {
                     .padding(.leading, 4)
                     .padding(.top, 2)
                 }
-                .font(.system(size: 9, weight: .medium))
+                .font(.system(size: 10.5, weight: .medium))
                 .tint(.secondary)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 3)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 5)
     }
 
     // MARK: - Deterministic summary

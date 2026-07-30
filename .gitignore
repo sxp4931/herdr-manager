@@ -6,6 +6,7 @@ xcuserdata/
 
 # Built app bundle
 HerdrManager.app/
+Shepherd.app/
 
 # macOS
 .DS_Store

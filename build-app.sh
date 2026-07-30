@@ -1,14 +1,14 @@
 #!/bin/bash
-# Build HerdrManager.app bundle from the SPM executable
+# Build Shepherd.app bundle from the SPM executable
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-echo "Building HerdrManagerApp..."
+echo "Building ShepherdApp..."
 swift build -c release 2>&1 | tail -1
 
-BINARY=".build/release/HerdrManagerApp"
-APP_DIR="HerdrManager.app"
+BINARY=".build/release/ShepherdApp"
+APP_DIR="Shepherd.app"
 
 echo "Creating $APP_DIR bundle..."
 rm -rf "$APP_DIR"
@@ -16,7 +16,7 @@ mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
 # Copy binary
-cp "$BINARY" "$APP_DIR/Contents/MacOS/HerdrManager"
+cp "$BINARY" "$APP_DIR/Contents/MacOS/Shepherd"
 
 # Copy app icon
 if [ -f "Resources/AppIcon.icns" ]; then
@@ -30,17 +30,17 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>HerdrManager</string>
+    <string>Shepherd</string>
     <key>CFBundleDisplayName</key>
-    <string>Herdr Manager</string>
+    <string>Shepherd</string>
     <key>CFBundleIdentifier</key>
-    <string>com.herdr.manager</string>
+    <string>com.shepherd.app</string>
     <key>CFBundleVersion</key>
     <string>1.0.0</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0.0</string>
     <key>CFBundleExecutable</key>
-    <string>HerdrManager</string>
+    <string>Shepherd</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
@@ -59,4 +59,4 @@ PLIST
 
 echo "✅ $APP_DIR created"
 echo "   Launch: open $APP_DIR"
-echo "   Or:     $APP_DIR/Contents/MacOS/HerdrManager"
+echo "   Or:     $APP_DIR/Contents/MacOS/Shepherd"

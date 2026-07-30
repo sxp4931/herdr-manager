@@ -7,7 +7,7 @@ let package = Package(
     products: [
         .library(name: "HerdrManagerCore", targets: ["HerdrManagerCore"]),
         .executable(name: "herdmgr", targets: ["herdmgr"]),
-        .executable(name: "HerdrManagerApp", targets: ["HerdrManagerApp"]),
+        .executable(name: "ShepherdApp", targets: ["ShepherdApp"]),
         .executable(name: "herdr-manager-mcp", targets: ["herdr-manager-mcp"]),
     ],
     dependencies: [
@@ -27,9 +27,9 @@ let package = Package(
             path: "Sources/herdmgr"
         ),
         .executableTarget(
-            name: "HerdrManagerApp",
+            name: "ShepherdApp",
             dependencies: ["HerdrManagerCore"],
-            path: "Sources/HerdrManagerApp"
+            path: "Sources/ShepherdApp"
         ),
         .executableTarget(
             name: "herdr-manager-mcp",

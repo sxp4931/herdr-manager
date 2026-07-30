@@ -50,6 +50,18 @@ public enum AgentKind: Sendable, Equatable {
         case .custom(let s): try container.encode(s)
         }
     }
+
+    /// Lowercase wire name, also used verbatim as the UI's row label.
+    public var label: String {
+        switch self {
+        case .claude: return "claude"
+        case .codex: return "codex"
+        case .opencode: return "opencode"
+        case .aider: return "aider"
+        case .gemini: return "gemini"
+        case .custom(let s): return s.lowercased()
+        }
+    }
 }
 
 // MARK: - BlockKind
@@ -500,6 +512,132 @@ public struct HerdrSnapshot: Sendable {
     }
 }
 
+// MARK: - HerdrAgentInfo
+
+/// One agent as reported by herdr's `agent.list`. This is the source of truth
+/// for "is this pane actually running an agent" and carries `stateChangeSeq`,
+/// which plain `session.snapshot` panes do not.
+public struct HerdrAgentInfo: Sendable, Equatable {
+    public let paneId: String
+    public let workspaceId: String
+    public let tabId: String
+    public let agent: String?            // detected agent kind, e.g. "claude"
+    public let displayAgent: String?
+    public let name: String?
+    public let title: String?            // herdr-reported title (report_metadata)
+    public let terminalTitleStripped: String?
+    public let agentStatus: String
+    public let agentSession: HerdrSnapshot.AgentSession?
+    public let focused: Bool
+    public let stateChangeSeq: UInt64
+    public let cwd: String?
+    public let foregroundCwd: String?
+    public let revision: UInt64?
+    public let tokens: [String: String]
+    public let stateLabels: [String: String]
+    public let interactiveReady: Bool
+    public let launchPending: Bool
+
+    public init(
+        paneId: String,
+        workspaceId: String,
+        tabId: String,
+        agent: String?,
+        displayAgent: String?,
+        name: String?,
+        title: String?,
+        terminalTitleStripped: String?,
+        agentStatus: String,
+        agentSession: HerdrSnapshot.AgentSession?,
+        focused: Bool,
+        stateChangeSeq: UInt64,
+        cwd: String?,
+        foregroundCwd: String?,
+        revision: UInt64?,
+        tokens: [String: String],
+        stateLabels: [String: String],
+        interactiveReady: Bool,
+        launchPending: Bool
+    ) {
+        self.paneId = paneId
+        self.workspaceId = workspaceId
+        self.tabId = tabId
+        self.agent = agent
+        self.displayAgent = displayAgent
+        self.name = name
+        self.title = title
+        self.terminalTitleStripped = terminalTitleStripped
+        self.agentStatus = agentStatus
+        self.agentSession = agentSession
+        self.focused = focused
+        self.stateChangeSeq = stateChangeSeq
+        self.cwd = cwd
+        self.foregroundCwd = foregroundCwd
+        self.revision = revision
+        self.tokens = tokens
+        self.stateLabels = stateLabels
+        self.interactiveReady = interactiveReady
+        self.launchPending = launchPending
+    }
+
+    public static func == (lhs: HerdrAgentInfo, rhs: HerdrAgentInfo) -> Bool {
+        lhs.paneId == rhs.paneId
+            && lhs.workspaceId == rhs.workspaceId
+            && lhs.tabId == rhs.tabId
+            && lhs.agent == rhs.agent
+            && lhs.displayAgent == rhs.displayAgent
+            && lhs.name == rhs.name
+            && lhs.title == rhs.title
+            && lhs.terminalTitleStripped == rhs.terminalTitleStripped
+            && lhs.agentStatus == rhs.agentStatus
+            && lhs.focused == rhs.focused
+            && lhs.stateChangeSeq == rhs.stateChangeSeq
+            && lhs.cwd == rhs.cwd
+            && lhs.foregroundCwd == rhs.foregroundCwd
+            && lhs.revision == rhs.revision
+            && lhs.tokens == rhs.tokens
+            && lhs.stateLabels == rhs.stateLabels
+            && lhs.interactiveReady == rhs.interactiveReady
+            && lhs.launchPending == rhs.launchPending
+    }
+}
+
+// MARK: - HerdSnapshot
+
+/// A fully-resolved view of the herd: agents (from `agent.list`, the
+/// authoritative source — plain shells are excluded) plus the workspace/tab
+/// labels (from `session.snapshot`) needed to describe where each one lives.
+public struct HerdSnapshot: Sendable {
+    public let version: String
+    public let `protocol`: Int
+    public let agents: [HerdrAgentInfo]
+    public let workspaceNames: [String: String]   // workspaceId -> label
+    public let tabNames: [String: String]         // tabId -> label
+    public let focusedWorkspaceId: String?
+    public let focusedTabId: String?
+    public let focusedPaneId: String?
+
+    public init(
+        version: String,
+        protocol: Int,
+        agents: [HerdrAgentInfo],
+        workspaceNames: [String: String],
+        tabNames: [String: String],
+        focusedWorkspaceId: String?,
+        focusedTabId: String?,
+        focusedPaneId: String?
+    ) {
+        self.version = version
+        self.protocol = `protocol`
+        self.agents = agents
+        self.workspaceNames = workspaceNames
+        self.tabNames = tabNames
+        self.focusedWorkspaceId = focusedWorkspaceId
+        self.focusedTabId = focusedTabId
+        self.focusedPaneId = focusedPaneId
+    }
+}
+
 // MARK: - HerdrEvent
 
 public enum HerdrEvent: Sendable {
@@ -507,6 +645,16 @@ public enum HerdrEvent: Sendable {
     case paneCreated(paneId: String, workspaceId: String, tabId: String)
     case paneClosed(paneId: String)
     case paneMoved(paneId: String, workspaceId: String?, tabId: String?)
+    /// The full state of one pane, as delivered by the real `pane_updated`
+    /// event. Carries strictly more information than `agentStatusChanged`
+    /// (the old, never-actually-fired, per-pane status subscription) and is
+    /// also usable to derive a plain status transition.
+    case paneUpdated(HerdrAgentInfo)
+    case paneFocused(paneId: String, workspaceId: String?)
+    case paneExited(paneId: String)
+    /// Any workspace_*/tab_*/worktree_*/layout_updated event. These change
+    /// labels, not agent state — the caller should resync via `herdSnapshot()`.
+    case workspacesChanged
     case connected
     case disconnected
     /// An unrecognized or no-op event that should be silently dropped.

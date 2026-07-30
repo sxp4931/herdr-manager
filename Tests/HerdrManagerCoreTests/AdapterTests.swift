@@ -194,6 +194,213 @@ struct ParseEventTests {
             Issue.record("Expected .ignored when data key missing, got \(event)")
         }
     }
+
+    // MARK: - Real herdr wire format (underscored names, Bug 2)
+
+    @Test("pane_updated (real wire format) yields .paneUpdated with full agent info")
+    func paneUpdatedRealWireFormat() throws {
+        let jsonString = """
+        {
+            "event": "pane_updated",
+            "data": {
+                "type": "pane_updated",
+                "pane": {
+                    "pane_id": "wE:p5",
+                    "terminal_id": "term_1",
+                    "workspace_id": "wE",
+                    "tab_id": "wE:t3",
+                    "focused": false,
+                    "cwd": "/Users/admin/Documents/Herdr Manager",
+                    "foreground_cwd": "/Users/admin/Documents/Herdr Manager",
+                    "agent": "codex",
+                    "terminal_title": "[ . ] Action Required | Herdr Manager",
+                    "terminal_title_stripped": "Action Required | Herdr Manager",
+                    "agent_status": "blocked",
+                    "agent_session": {"source": "herdr:codex", "agent": "codex", "kind": "id", "value": "019f"},
+                    "tokens": {"stuck_for": "3m"},
+                    "state_change_seq": 507,
+                    "revision": 507
+                }
+            }
+        }
+        """
+        let data = jsonString.data(using: .utf8)!
+        let dict = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let event = LiveHerdrAdapter.parseEvent(dict)
+        if case .paneUpdated(let info) = event {
+            #expect(info.paneId == "wE:p5")
+            #expect(info.agentStatus == "blocked")
+            #expect(info.stateChangeSeq == 507)
+            #expect(info.agent == "codex")
+            #expect(info.workspaceId == "wE")
+            #expect(info.tabId == "wE:t3")
+        } else {
+            Issue.record("Expected .paneUpdated, got \(event)")
+        }
+    }
+
+    @Test("pane_closed (real wire format) yields .paneClosed")
+    func paneClosedRealWireFormat() {
+        let dict: [String: Any] = [
+            "event": "pane_closed",
+            "data": ["type": "pane_closed", "pane_id": "wE:p4", "workspace_id": "wE"] as [String: Any]
+        ]
+        let event = LiveHerdrAdapter.parseEvent(dict)
+        if case .paneClosed(let paneId) = event {
+            #expect(paneId == "wE:p4")
+        } else {
+            Issue.record("Expected .paneClosed, got \(event)")
+        }
+    }
+
+    @Test("pane_focused (real wire format) yields .paneFocused")
+    func paneFocusedRealWireFormat() {
+        let dict: [String: Any] = [
+            "event": "pane_focused",
+            "data": ["type": "pane_focused", "pane_id": "wE:p5", "workspace_id": "wE"] as [String: Any]
+        ]
+        let event = LiveHerdrAdapter.parseEvent(dict)
+        if case .paneFocused(let paneId, let wsId) = event {
+            #expect(paneId == "wE:p5")
+            #expect(wsId == "wE")
+        } else {
+            Issue.record("Expected .paneFocused, got \(event)")
+        }
+    }
+
+    @Test("pane_exited (real wire format) yields .paneExited")
+    func paneExitedRealWireFormat() {
+        let dict: [String: Any] = [
+            "event": "pane_exited",
+            "data": ["type": "pane_exited", "pane_id": "wE:p6", "workspace_id": "wE"] as [String: Any]
+        ]
+        let event = LiveHerdrAdapter.parseEvent(dict)
+        if case .paneExited(let paneId) = event {
+            #expect(paneId == "wE:p6")
+        } else {
+            Issue.record("Expected .paneExited, got \(event)")
+        }
+    }
+
+    @Test("workspace_focused (real wire format) yields .workspacesChanged")
+    func workspaceFocusedRealWireFormat() {
+        let dict: [String: Any] = [
+            "event": "workspace_focused",
+            "data": ["type": "workspace_focused", "workspace_id": "wE"] as [String: Any]
+        ]
+        let event = LiveHerdrAdapter.parseEvent(dict)
+        if case .workspacesChanged = event {
+            // pass
+        } else {
+            Issue.record("Expected .workspacesChanged, got \(event)")
+        }
+    }
+
+    @Test("Genuinely unknown underscored event name still maps to .ignored")
+    func unknownUnderscoredEventIsIgnored() {
+        let dict: [String: Any] = [
+            "event": "totally_new_underscored_event",
+            "data": ["foo": "bar"] as [String: Any]
+        ]
+        let event = LiveHerdrAdapter.parseEvent(dict)
+        if case .ignored = event {
+            // pass
+        } else {
+            Issue.record("Expected .ignored for unknown underscored event, got \(event)")
+        }
+    }
+}
+
+// MARK: - agent.list parsing (Bug 4)
+
+@Suite("HerdrAdapter.parseAgentList")
+struct ParseAgentListTests {
+
+    @Test("Produces HerdrAgentInfo with non-zero state_change_seq")
+    func nonZeroStateChangeSeq() throws {
+        let jsonString = """
+        {
+            "type": "agent_list",
+            "agents": [
+                {
+                    "pane_id": "wA:p1", "workspace_id": "wA", "tab_id": "wA:t1",
+                    "terminal_id": "term_1", "agent": "claude", "display_agent": "Claude",
+                    "name": null, "title": "Claude", "terminal_title_stripped": "Claude",
+                    "agent_status": "working", "focused": true, "state_change_seq": 12,
+                    "revision": 3, "interactive_ready": true, "launch_pending": false
+                }
+            ]
+        }
+        """
+        let data = jsonString.data(using: .utf8)!
+        let dict = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let agents = LiveHerdrAdapter.parseAgentList(dict)
+        #expect(agents.count == 1)
+        #expect(agents.first?.paneId == "wA:p1")
+        #expect(agents.first?.stateChangeSeq == 12)
+        #expect((agents.first?.stateChangeSeq ?? 0) > 0)
+    }
+
+    @Test("Drops entries with no agent (plain shells)")
+    func dropsShellEntries() throws {
+        let jsonString = """
+        {
+            "type": "agent_list",
+            "agents": [
+                {
+                    "pane_id": "wA:p1", "workspace_id": "wA", "tab_id": "wA:t1",
+                    "terminal_id": "term_1", "agent": "claude",
+                    "agent_status": "working", "focused": true, "state_change_seq": 5, "revision": 1
+                },
+                {
+                    "pane_id": "wA:p2", "workspace_id": "wA", "tab_id": "wA:t1",
+                    "terminal_id": "term_2", "agent": null,
+                    "agent_status": "unknown", "focused": false, "state_change_seq": 0, "revision": 1
+                }
+            ]
+        }
+        """
+        let data = jsonString.data(using: .utf8)!
+        let dict = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let agents = LiveHerdrAdapter.parseAgentList(dict)
+        #expect(agents.count == 1)
+        #expect(agents.first?.paneId == "wA:p1")
+    }
+}
+
+// MARK: - Subscription params builder (Bug 1)
+
+@Suite("LiveHerdrAdapter.globalSubscriptionTypes")
+struct SubscriptionParamsTests {
+
+    @Test("No emitted subscription type requires pane_id")
+    func noPaneScopedSubscriptionTypes() {
+        let paneScopedTypes: Set<String> = [
+            "pane.agent_status_changed", "pane.scroll_changed", "pane.output_matched"
+        ]
+        for type in LiveHerdrAdapter.globalSubscriptionTypes {
+            #expect(!paneScopedTypes.contains(type), "\(type) requires pane_id and must not be globally subscribed")
+        }
+    }
+
+    @Test("Subscription list is non-empty and includes pane.updated")
+    func includesPaneUpdated() {
+        #expect(LiveHerdrAdapter.globalSubscriptionTypes.contains("pane.updated"))
+        #expect(!LiveHerdrAdapter.globalSubscriptionTypes.isEmpty)
+    }
+}
+
+// MARK: - agent.focus params (Bug 3)
+
+@Suite("LiveHerdrAdapter.focusParams")
+struct FocusParamsTests {
+
+    @Test("Builds params keyed 'target', not 'pane_id'")
+    func usesTargetKey() {
+        let params = LiveHerdrAdapter.focusParams(paneId: "w1:p2")
+        #expect(params["target"] as? String == "w1:p2")
+        #expect(params["pane_id"] == nil)
+    }
 }
 
 // MARK: - WorkspaceCreation decoding

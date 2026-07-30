@@ -4,14 +4,14 @@ import AppKit
 // Custom entry point so we can ignore SIGPIPE before anything touches a socket.
 // POSIX sockets raise SIGPIPE on broken connections, which kills the process.
 @main
-enum HerdrManagerMain {
+enum ShepherdMain {
     static func main() {
         signal(SIGPIPE, SIG_IGN)
-        HerdrManagerApp.main()
+        ShepherdApp.main()
     }
 }
 
-struct HerdrManagerApp: App {
+struct ShepherdApp: App {
     @State private var appModel = AppModel()
     @Environment(\.scenePhase) private var scenePhase
 

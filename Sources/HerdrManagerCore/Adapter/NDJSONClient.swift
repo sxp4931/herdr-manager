@@ -150,9 +150,26 @@ public final class NDJSONClient: @unchecked Sendable {
     /// the send after bytes may have reached herdr, because a partial write
     /// could have already mutated state. Surface the error to the caller.
     /// Must be called off the main actor (callers are in async contexts).
+    ///
+    /// herdr's sockets are one-shot: it closes its end right after writing a
+    /// response (see the SIGPIPE-handling comments at both CLI entry points).
+    /// `sendRead` never surfaces this because it transparently reconnects and
+    /// retries once on transport failure — safe for an idempotent read. A
+    /// second write reusing the same connection right after a first has no
+    /// such safety net and reliably fails with EPIPE: reproduced live by
+    /// calling `focusWorkspace` immediately followed by `focus` (the Jump
+    /// action's exact sequence) — the first write's response arrives fine,
+    /// herdr closes the socket, and the second write's `send()` dies with
+    /// `sendFailed(32)` before a single byte of the new request is ever
+    /// written. Reconnecting unconditionally before every write closes that
+    /// gap and is safe to do unconditionally (unlike retrying *after* a
+    /// failed write): no bytes for the upcoming request have been sent yet,
+    /// so there is nothing to double-execute.
     public func sendWrite(method: String, params: [String: Any]) throws -> [String: Any] {
         txLock.lock()
         defer { txLock.unlock() }
+        closeSocket()
+        try connect()
         do {
             return try sendOnce(method: method, params: params)
         } catch let originalError {
@@ -207,8 +224,24 @@ public final class NDJSONClient: @unchecked Sendable {
         }
     }
 
-    public func subscribe(subscriptions: [String]) -> AsyncThrowingStream<Data, Error> {
-        AsyncThrowingStream { continuation in
+    /// Send `events.subscribe` and block until herdr confirms it (or rejects
+    /// it), THEN return the live event stream. This is deliberately synchronous
+    /// and split from the read loop below: a caller that reports "connected"
+    /// as soon as this call returns is reporting a *confirmed* subscription,
+    /// not merely "a stream object exists" — the previous design conflated
+    /// the two and reported `.connected` even when the subscribe request was
+    /// about to fail (e.g. a subscription type missing a required `pane_id`),
+    /// which is what caused the endless connect/disconnect flapping.
+    public func subscribe(subscriptions: [String]) throws -> AsyncThrowingStream<Data, Error> {
+        let params: [String: Any] = [
+            "subscriptions": subscriptions.map { ["type": $0] }
+        ]
+        let result = try send(method: "events.subscribe", params: params)
+        guard (result["type"] as? String) == "subscription_started" else {
+            throw NDJSONClientError.invalidResponse("events.subscribe: unexpected response \(result)")
+        }
+
+        return AsyncThrowingStream { continuation in
             // Run the long-lived blocking read loop on a DEDICATED thread, not
             // the cooperative pool — an event stream blocks between events by
             // design, and parking that on a pool thread would starve Swift
@@ -216,12 +249,6 @@ public final class NDJSONClient: @unchecked Sendable {
             // so these reads block until herdr pushes (no spurious timeouts).
             let thread = Thread {
                 do {
-                    let params: [String: Any] = [
-                        "subscriptions": subscriptions.map { ["type": $0] }
-                    ]
-                    _ = try self.send(method: "events.subscribe", params: params)
-
-                    // Now read events continuously
                     while true {
                         let line = try self.readLine()
                         // Yield raw Data (Sendable) — consumer parses JSON

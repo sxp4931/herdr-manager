@@ -182,8 +182,14 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     public func focus(paneId: String) async throws {
         try await onIO { [reqClient] in
-            _ = try reqClient.sendWrite(method: "agent.focus", params: ["pane_id": paneId])
+            _ = try reqClient.sendWrite(method: "agent.focus", params: Self.focusParams(paneId: paneId))
         }
+    }
+
+    /// Extracted so the param shape (`{"target": …}`, per schema `AgentTarget`)
+    /// is independently testable without a socket.
+    internal static func focusParams(paneId: String) -> [String: Any] {
+        ["target": paneId]
     }
 
     // MARK: - Write Methods
@@ -267,6 +273,103 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         }
     }
 
+    // MARK: - Agent-centric methods (Bug 4: agent.list is the source of truth)
+
+    /// `agent.list` — the authoritative list of real agents (never plain
+    /// shells) with a genuine `state_change_seq`, which `session.snapshot`
+    /// panes do not carry.
+    public func agentList() async throws -> [HerdrAgentInfo] {
+        try await onIO { [reqClient] in
+            let result = try reqClient.sendRead(method: "agent.list", params: [:])
+            return LiveHerdrAdapter.parseAgentList(result)
+        }
+    }
+
+    /// `agent.list` merged with `session.snapshot`'s workspace/tab labels and
+    /// focus pointers — the one-stop call sites should use going forward.
+    public func herdSnapshot() async throws -> HerdSnapshot {
+        let result: HerdSnapshot = try await onIO { [reqClient] in
+            let agentsResult = try reqClient.sendRead(method: "agent.list", params: [:])
+            let agents = LiveHerdrAdapter.parseAgentList(agentsResult)
+
+            let snapResult = try reqClient.sendRead(method: "session.snapshot", params: [:])
+            let snap = try LiveHerdrAdapter.parseSnapshot(snapResult)
+
+            let workspaceNames = Dictionary(uniqueKeysWithValues: snap.workspaces.map { ($0.workspaceId, $0.name) })
+            let tabNames = Dictionary(uniqueKeysWithValues: snap.tabs.map { ($0.tabId, $0.name) })
+
+            return HerdSnapshot(
+                version: snap.version,
+                protocol: snap.protocol,
+                agents: agents,
+                workspaceNames: workspaceNames,
+                tabNames: tabNames,
+                focusedWorkspaceId: snap.focusedWorkspaceId,
+                focusedTabId: snap.focusedTabId,
+                focusedPaneId: snap.focusedPaneId
+            )
+        }
+        setLatestProtocol(result.protocol)
+        return result
+    }
+
+    /// `tab.create` -> `{"type":"tab_created","tab":{...},"root_pane":{...}}`.
+    public func createTab(
+        workspaceId: String?,
+        cwd: String?,
+        label: String?,
+        focus: Bool
+    ) async throws -> (tabId: String, rootPaneId: String) {
+        try await onIO { [reqClient] in
+            var params: [String: Any] = ["focus": focus]
+            if let workspaceId { params["workspace_id"] = workspaceId }
+            if let cwd { params["cwd"] = cwd }
+            if let label { params["label"] = label }
+            let result = try reqClient.sendWrite(method: "tab.create", params: params)
+            guard let tab = result["tab"] as? [String: Any],
+                  let tabId = tab["tab_id"] as? String, !tabId.isEmpty else {
+                throw NDJSONClientError.invalidResponse("tab.create missing tab.tab_id")
+            }
+            guard let rootPane = result["root_pane"] as? [String: Any],
+                  let paneId = rootPane["pane_id"] as? String, !paneId.isEmpty else {
+                throw NDJSONClientError.invalidResponse("tab.create missing root_pane.pane_id")
+            }
+            return (tabId: tabId, rootPaneId: paneId)
+        }
+    }
+
+    /// `workspace.focus` -> `{workspace_id}` (schema `WorkspaceTarget`).
+    public func focusWorkspace(_ workspaceId: String) async throws {
+        try await onIO { [reqClient] in
+            _ = try reqClient.sendWrite(method: "workspace.focus", params: ["workspace_id": workspaceId])
+        }
+    }
+
+    /// `tab.focus` -> `{tab_id}` (schema `TabTarget`).
+    public func focusTab(_ tabId: String) async throws {
+        try await onIO { [reqClient] in
+            _ = try reqClient.sendWrite(method: "tab.focus", params: ["tab_id": tabId])
+        }
+    }
+
+    /// `pane.focus` -> `{pane_id}` (schema `PaneTarget`). Distinct from
+    /// `agent.focus`, which takes `{target}` and additionally routes agent
+    /// attention; this is a plain pane focus.
+    public func focusPane(_ paneId: String) async throws {
+        try await onIO { [reqClient] in
+            _ = try reqClient.sendWrite(method: "pane.focus", params: ["pane_id": paneId])
+        }
+    }
+
+    /// `server.agent_manifests` -> `{"type":"agent_manifest_status","manifests":[{"agent":...},...]}`.
+    public func availableAgentKinds() async throws -> [String] {
+        try await onIO { [reqClient] in
+            let result = try reqClient.sendRead(method: "server.agent_manifests", params: [:])
+            guard let manifests = result["manifests"] as? [[String: Any]] else { return [] }
+            return manifests.compactMap { $0["agent"] as? String }
+        }
+    }
+
     public func events() -> AsyncStream<HerdrEvent> {
         // Start the self-healing subscription loop in the background.
         eventLoopTask?.cancel()
@@ -276,23 +379,43 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         return eventStream
     }
 
+    /// Global (no-argument) subscription types. `pane.updated` carries the
+    /// entire pane object including `agent_status`, which is what the old
+    /// (and never-working — it required a `pane_id` we never sent)
+    /// `pane.agent_status_changed` per-pane subscription was for. Deliberately
+    /// excludes `pane.agent_status_changed`, `pane.scroll_changed`, and
+    /// `pane.output_matched`, which the schema requires a `pane_id` for.
+    internal static let globalSubscriptionTypes: [String] = [
+        "pane.updated", "pane.created", "pane.closed",
+        "pane.exited", "pane.focused", "pane.agent_detected",
+        "workspace.created", "workspace.closed", "workspace.renamed", "workspace.focused",
+        "tab.created", "tab.closed", "tab.renamed"
+    ]
+
     /// Subscribe on the dedicated `subClient`, forever. On any error or clean
-    /// close, mark disconnected, back off, and re-subscribe — so a transient
-    /// socket hiccup no longer kills live updates permanently.
+    /// close, back off and re-subscribe — so a transient socket hiccup no
+    /// longer kills live updates permanently. `.disconnected` is only ever
+    /// yielded on a genuine transition away from a previously-connected state
+    /// (tracked via `wasConnected`) — a retry loop that never got connected in
+    /// the first place must not flap `.connected`/`.disconnected` on every
+    /// backoff cycle.
     private func runSubscriptionLoop() async {
         var attempt = 0
         var backoff: UInt64 = 1_000_000_000 // 1s
+        var wasConnected = false
         while !Task.isCancelled {
             do {
                 if !subClient.connected {
                     try subClient.connect()
                 }
-                let stream = subClient.subscribe(subscriptions: [
-                    "pane.agent_status_changed"
-                ])
-                // Subscription (re)established — we are live again.
+                // `subscribe` blocks until herdr confirms `subscription_started`
+                // (or throws) before returning the stream — so reaching this
+                // line means the subscription is genuinely live, not merely
+                // that a stream object was constructed.
+                let stream = try subClient.subscribe(subscriptions: Self.globalSubscriptionTypes)
                 setConnectionState(.connected)
                 eventContinuation?.yield(.connected)
+                wasConnected = true
                 attempt = 0
                 backoff = 1_000_000_000
 
@@ -308,8 +431,11 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             }
 
             guard !Task.isCancelled else { return }
-            setConnectionState(.disconnected)
-            eventContinuation?.yield(.disconnected)
+            if wasConnected {
+                setConnectionState(.disconnected)
+                eventContinuation?.yield(.disconnected)
+                wasConnected = false
+            }
             subClient.closeSocket()
 
             setConnectionState(.reconnecting(attempt: attempt))
@@ -395,7 +521,12 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     }
 
     internal static func parseEvent(_ dict: [String: Any]) -> HerdrEvent {
-        // Real herdr subscription envelope: {event:"pane.agent_status_changed", data:{pane_id, workspace_id, agent_status, ...}}
+        // Real herdr subscription envelope, protocol 17:
+        //   {"event":"pane_updated","data":{"type":"pane_updated","pane":{...}}}
+        // Event names are UNDERSCORED on the wire (pane_updated, pane_closed,
+        // pane_focused, workspace_focused, ...). We also accept the dotted
+        // forms harmlessly, so older test fixtures and any future herdr
+        // rename back to dotted names keep working.
         guard let eventKind = dict["event"] as? String,
               let data = dict["data"] as? [String: Any] else {
             return .ignored
@@ -403,6 +534,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         let paneId = data["pane_id"] as? String ?? ""
 
         switch eventKind {
+        // MARK: Legacy/dotted forms (kept for back-compat; not the real wire format)
         case "pane.agent_status_changed":
             let status = data["agent_status"] as? String ?? "unknown"
             let seq = data["state_change_seq"] as? UInt64
@@ -417,8 +549,99 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             let wsId = data["workspace_id"] as? String
             let tabId = data["tab_id"] as? String
             return .paneMoved(paneId: paneId, workspaceId: wsId, tabId: tabId)
+
+        // MARK: Real herdr wire format (underscored)
+        case "pane_agent_status_changed":
+            let status = data["agent_status"] as? String ?? "unknown"
+            let seq = data["state_change_seq"] as? UInt64
+            return .agentStatusChanged(paneId: paneId, agentStatus: status, stateChangeSeq: seq)
+        case "pane_updated":
+            // {"type":"pane_updated","pane":{ ...full pane... }}
+            guard let pane = data["pane"] as? [String: Any] else { return .ignored }
+            return .paneUpdated(parseAgentInfo(pane))
+        case "pane_created":
+            // {"type":"pane_created","pane":{ ...full pane... }}
+            guard let pane = data["pane"] as? [String: Any] else { return .ignored }
+            let pId = pane["pane_id"] as? String ?? ""
+            let wsId = pane["workspace_id"] as? String ?? ""
+            let tabId = pane["tab_id"] as? String ?? ""
+            return .paneCreated(paneId: pId, workspaceId: wsId, tabId: tabId)
+        case "pane_closed":
+            // {"type":"pane_closed","pane_id":...,"workspace_id":...} — the
+            // .paneClosed case only carries paneId; workspace_id isn't needed
+            // to remove the agent from the store.
+            return .paneClosed(paneId: paneId)
+        case "pane_focused":
+            let wsId = data["workspace_id"] as? String
+            return .paneFocused(paneId: paneId, workspaceId: wsId)
+        case "pane_exited":
+            return .paneExited(paneId: paneId)
+        case "pane_moved":
+            // {"type":"pane_moved","pane":{...}, "previous_pane_id":..., ...}
+            guard let pane = data["pane"] as? [String: Any] else { return .ignored }
+            let pId = pane["pane_id"] as? String ?? ""
+            let wsId = pane["workspace_id"] as? String
+            let tabId = pane["tab_id"] as? String
+            return .paneMoved(paneId: pId, workspaceId: wsId, tabId: tabId)
+        case "workspace_created", "workspace_updated", "workspace_metadata_updated",
+             "workspace_closed", "workspace_renamed", "workspace_moved", "workspace_focused",
+             "worktree_created", "worktree_opened", "worktree_removed",
+             "tab_created", "tab_closed", "tab_renamed", "tab_moved", "tab_focused",
+             "layout_updated":
+            return .workspacesChanged
         default:
+            // Includes pane_agent_detected/pane_output_changed (not modeled
+            // yet — harmless to drop) and any genuinely unknown event.
             return .ignored
+        }
+    }
+
+    /// Shared parser for both `agent.list`'s `AgentInfo` entries and the
+    /// `pane_updated` event's nested `PaneInfo` — the two shapes overlap on
+    /// every field this type needs; fields present only on one side (e.g.
+    /// `state_change_seq`, `name`, `interactive_ready` are `agent.list`-only)
+    /// simply default when absent.
+    internal static func parseAgentInfo(_ dict: [String: Any]) -> HerdrAgentInfo {
+        var agentSession: HerdrSnapshot.AgentSession?
+        if let asDict = dict["agent_session"] as? [String: Any] {
+            agentSession = HerdrSnapshot.AgentSession(
+                source: asDict["source"] as? String ?? "",
+                agent: asDict["agent"] as? String ?? "",
+                kind: asDict["kind"] as? String ?? "",
+                value: asDict["value"] as? String ?? ""
+            )
+        }
+        return HerdrAgentInfo(
+            paneId: dict["pane_id"] as? String ?? "",
+            workspaceId: dict["workspace_id"] as? String ?? "",
+            tabId: dict["tab_id"] as? String ?? "",
+            agent: dict["agent"] as? String,
+            displayAgent: dict["display_agent"] as? String,
+            name: dict["name"] as? String,
+            title: dict["title"] as? String,
+            terminalTitleStripped: dict["terminal_title_stripped"] as? String,
+            agentStatus: dict["agent_status"] as? String ?? "unknown",
+            agentSession: agentSession,
+            focused: dict["focused"] as? Bool ?? false,
+            stateChangeSeq: dict["state_change_seq"] as? UInt64 ?? 0,
+            cwd: dict["cwd"] as? String,
+            foregroundCwd: dict["foreground_cwd"] as? String,
+            revision: dict["revision"] as? UInt64,
+            tokens: dict["tokens"] as? [String: String] ?? [:],
+            stateLabels: dict["state_labels"] as? [String: String] ?? [:],
+            interactiveReady: dict["interactive_ready"] as? Bool ?? false,
+            launchPending: dict["launch_pending"] as? Bool ?? false
+        )
+    }
+
+    /// Parses `agent.list`'s `{"agents":[AgentInfo, ...]}` result, dropping
+    /// any entry with no `agent` (a plain shell pane is not an agent).
+    internal static func parseAgentList(_ dict: [String: Any]) -> [HerdrAgentInfo] {
+        let list = dict["agents"] as? [[String: Any]] ?? []
+        return list.compactMap { entry -> HerdrAgentInfo? in
+            let info = parseAgentInfo(entry)
+            guard let agent = info.agent, !agent.isEmpty else { return nil }
+            return info
         }
     }
 
@@ -426,14 +649,27 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     public func health() -> AdapterHealth {
         let proto = latestProtocol()
-        let supportedVersions: Set<Int> = [17]
+        // Protocol 17 is the version this adapter was built and verified
+        // against. Anything newer is presumed additive/compatible (herdr's
+        // protocol has been append-only in practice) so a routine herdr bump
+        // doesn't silently disable every write in the app; anything older is
+        // unverified and left disabled.
+        let minSupportedVersion = 17
         if proto == 0 {
             return AdapterHealth(protocolVersion: 0, compatible: false, writesEnabled: false, reason: "protocol unknown")
         }
-        if supportedVersions.contains(proto) {
+        if proto == minSupportedVersion {
             return AdapterHealth(protocolVersion: proto, compatible: true, writesEnabled: true, reason: nil)
         }
-        return AdapterHealth(protocolVersion: proto, compatible: false, writesEnabled: false, reason: "herdr protocol \(proto) not verified for writes")
+        if proto > minSupportedVersion {
+            return AdapterHealth(
+                protocolVersion: proto,
+                compatible: true,
+                writesEnabled: true,
+                reason: "herdr protocol \(proto) is newer than the verified \(minSupportedVersion); treating as compatible-with-writes"
+            )
+        }
+        return AdapterHealth(protocolVersion: proto, compatible: false, writesEnabled: false, reason: "herdr protocol \(proto) is older than the minimum verified \(minSupportedVersion); writes disabled")
     }
 
     // MARK: - Socket Resolution

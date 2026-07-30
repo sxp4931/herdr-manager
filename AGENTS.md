@@ -4,7 +4,7 @@
 
 This is a Swift 6 package targeting macOS 14+. Shared domain, adapter, diagnosis, policy, persistence, and redaction code lives in `Sources/HerdrManagerCore/`. Keep reusable behavior there so all three front ends stay consistent:
 
-- `Sources/HerdrManagerApp/`: SwiftUI menu-bar application.
+- `Sources/ShepherdApp/`: SwiftUI menu-bar application (product name "Shepherd").
 - `Sources/herdmgr/`: command-line status client.
 - `Sources/herdr-manager-mcp/`: stdio JSON-RPC/MCP server.
 - `Tests/HerdrManagerCoreTests/`: core unit tests.
@@ -17,9 +17,9 @@ This is a Swift 6 package targeting macOS 14+. Shared domain, adapter, diagnosis
 - `swift build`: compile all package targets in debug mode.
 - `swift test`: run the Swift Testing suite.
 - `swift run herdmgr --show-all`: display live agents from the local herdr socket.
-- `swift run HerdrManagerApp`: launch the development menu-bar executable.
+- `swift run ShepherdApp`: launch the development menu-bar executable.
 - `swift run herdr-manager-mcp`: start the MCP server over stdin/stdout.
-- `./build-app.sh`: create a release-mode `HerdrManager.app` bundle with its icon.
+- `./build-app.sh`: create a release-mode `Shepherd.app` bundle with its icon.
 
 Live commands require herdr to be running and its socket to be available under the configured XDG directory.
 

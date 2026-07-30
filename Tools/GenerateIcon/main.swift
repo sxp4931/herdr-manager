@@ -1,14 +1,15 @@
 #!/usr/bin/env swift
 //
-//  Herdr Manager — App Icon Generator
+//  Shepherd — App Icon Generator
 //  Generates a 1024×1024 master PNG, full iconset, and .icns file.
 //
 //  Usage: swift Tools/GenerateIcon/main.swift
 //
 //  Art direction:
 //  - Deep pine/teal layered background with radial depth
-//  - Shepherd's-crook-formed "H" in warm amber/gold gradient
-//  - 7 glowing status dots streaming diagonally past the crook
+//  - A small connected flock — three dotted-linked nodes in warm amber/gold,
+//    echoing the app's SF Symbol mark (point.3.connected.trianglepath.dotted)
+//  - 7 glowing status dots streaming diagonally past the mark
 //  - macOS squircle canvas, legible at 16px
 //
 
@@ -167,163 +168,67 @@ func drawBackground(ctx: CGContext, size: Int) {
     )
 }
 
-func buildHPath(size: CGFloat) -> CGPath {
-    let path = CGMutablePath()
-
-    // H dimensions
-    let hHeight: CGFloat = size * 0.565   // ~579px
-    let hTop: CGFloat = (size - hHeight) / 2.0   // ~222
-    let hBottom: CGFloat = hTop + hHeight         // ~801
-    let strokeW: CGFloat = size * 0.082           // ~84px
-    let halfStroke = strokeW / 2.0
-
-    // Left vertical center-x
-    let leftCX: CGFloat = size * 0.315   // ~322
-    // Right vertical center-x
-    let rightCX: CGFloat = size * 0.685  // ~702
-
-    // Crossbar
-    let crossH: CGFloat = size * 0.066   // ~68px
-    let crossTop: CGFloat = size * 0.478
-
-    // --- Left vertical bar ---
-    path.addRoundedRect(
-        in: CGRect(x: leftCX - halfStroke, y: hTop,
-                   width: strokeW, height: hHeight),
-        cornerWidth: halfStroke,
-        cornerHeight: halfStroke
-    )
-
-    // --- Crossbar ---
-    path.addRoundedRect(
-        in: CGRect(x: leftCX, y: crossTop,
-                   width: rightCX - leftCX, height: crossH),
-        cornerWidth: crossH / 2.0,
-        cornerHeight: crossH / 2.0
-    )
-
-    // --- Right vertical + shepherd's crook ---
-    // Draw as a thick stroked path for smooth curves
-    let rightPath = CGMutablePath()
-    // Bottom of right vertical
-    rightPath.move(to: CGPoint(x: rightCX, y: hBottom))
-    // Up to where the crook begins
-    let crookStart: CGFloat = hTop + hHeight * 0.28  // ~383
-    rightPath.addLine(to: CGPoint(x: rightCX, y: crookStart))
-
-    // Shepherd's crook: curve up, bulge right, curl back left
-    // The crook hooks to the right then curls back
-    rightPath.addCurve(
-        to: CGPoint(x: rightCX - strokeW * 0.45, y: hTop + strokeW * 0.8),
-        control1: CGPoint(x: rightCX, y: crookStart - strokeW * 1.4),
-        control2: CGPoint(x: rightCX + strokeW * 1.3, y: crookStart - strokeW * 0.9)
-    )
-
-    // Stroke this path with thick line
-    return rightPath
-}
-
-func drawHWithCrook(ctx: CGContext, size: Int) {
+/// Three dotted-linked nodes in a small triangle, echoing the app's SF
+/// Symbol mark (`point.3.connected.trianglepath.dotted`) rather than a
+/// monogram — replaces the old drawn "H" (Shepherd dropped that glyph
+/// entirely; it didn't render legibly at menu-bar size).
+func drawFlockMark(ctx: CGContext, size: Int) {
     let s = CGFloat(size)
 
-    // Build the static H parts (left vertical + crossbar) as a filled path
-    let staticPath = CGMutablePath()
-    let hHeight: CGFloat = s * 0.565
-    let hTop: CGFloat = (s - hHeight) / 2.0
-    let hBottom: CGFloat = hTop + hHeight
-    let strokeW: CGFloat = s * 0.082
-    let halfStroke = strokeW / 2.0
-    let leftCX: CGFloat = s * 0.315
-    let rightCX: CGFloat = s * 0.685
-    let crossH: CGFloat = s * 0.066
-    let crossTop: CGFloat = s * 0.478
+    let topPoint = CGPoint(x: s * 0.500, y: s * 0.775)
+    let leftPoint = CGPoint(x: s * 0.335, y: s * 0.415)
+    let rightPoint = CGPoint(x: s * 0.665, y: s * 0.415)
+    let nodeRadius = s * 0.072
+    let strokeW = s * 0.026
 
-    // Left vertical
-    staticPath.addRoundedRect(
-        in: CGRect(x: leftCX - halfStroke, y: hTop,
-                   width: strokeW, height: hHeight),
-        cornerWidth: halfStroke, cornerHeight: halfStroke
-    )
-    // Crossbar
-    staticPath.addRoundedRect(
-        in: CGRect(x: leftCX, y: crossTop,
-                   width: rightCX - leftCX, height: crossH),
-        cornerWidth: crossH / 2.0, cornerHeight: crossH / 2.0
-    )
-
-    // Create amber gradient (vertical, top to bottom)
     let amberGradient = CGGradient(
         colorsSpace: CGColorSpaceCreateDeviceRGB(),
         colors: [cgColor(amberLight), cgColor(amberDark)] as CFArray,
         locations: [0.0, 1.0]
     )!
 
-    // --- Warm inner glow (drawn first, behind) ---
+    // --- Dotted connecting strokes, glowing ---
     ctx.saveGState()
-    ctx.setShadow(
-        offset: CGSize(width: 0, height: 0),
-        blur: 30,
-        color: cgColor(amberLight, alpha: 0.45)
-    )
-    // Draw static parts
-    ctx.addPath(staticPath)
-    ctx.fillPath()
-    ctx.restoreGState()
-
-    // Draw the crook part with glow
-    let crookStart: CGFloat = hTop + hHeight * 0.28
-    let rightPath = CGMutablePath()
-    rightPath.move(to: CGPoint(x: rightCX, y: hBottom))
-    rightPath.addLine(to: CGPoint(x: rightCX, y: crookStart))
-    rightPath.addCurve(
-        to: CGPoint(x: rightCX - strokeW * 0.45, y: hTop + strokeW * 0.8),
-        control1: CGPoint(x: rightCX, y: crookStart - strokeW * 1.4),
-        control2: CGPoint(x: rightCX + strokeW * 1.3, y: crookStart - strokeW * 0.9)
-    )
-
-    ctx.saveGState()
-    ctx.setShadow(
-        offset: CGSize(width: 0, height: 0),
-        blur: 30,
-        color: cgColor(amberLight, alpha: 0.45)
-    )
-    ctx.setStrokeColor(cgColor(amberLight))
+    ctx.setShadow(offset: .zero, blur: 22, color: cgColor(amberLight, alpha: 0.4))
+    ctx.setStrokeColor(cgColor(amberLight, alpha: 0.9))
     ctx.setLineWidth(strokeW)
     ctx.setLineCap(.round)
-    ctx.setLineJoin(.round)
-    ctx.addPath(rightPath)
+    ctx.setLineDash(phase: 0, lengths: [strokeW * 1.5, strokeW * 1.8])
+    let linkPath = CGMutablePath()
+    linkPath.move(to: topPoint)
+    linkPath.addLine(to: leftPoint)
+    linkPath.move(to: topPoint)
+    linkPath.addLine(to: rightPoint)
+    linkPath.move(to: leftPoint)
+    linkPath.addLine(to: rightPoint)
+    ctx.addPath(linkPath)
     ctx.strokePath()
     ctx.restoreGState()
 
-    // --- Main H fill with gradient ---
-    // For the static parts, use the gradient clipped to the path
-    ctx.saveGState()
-    ctx.addPath(staticPath)
-    ctx.clip()
-    ctx.drawLinearGradient(
-        amberGradient,
-        start: CGPoint(x: s / 2, y: hTop),
-        end: CGPoint(x: s / 2, y: hBottom),
-        options: []
-    )
-    ctx.restoreGState()
+    // --- Three glowing nodes, gradient-filled ---
+    for point in [topPoint, leftPoint, rightPoint] {
+        let rect = CGRect(
+            x: point.x - nodeRadius, y: point.y - nodeRadius,
+            width: nodeRadius * 2, height: nodeRadius * 2
+        )
 
-    // For the crook stroke, draw with gradient
-    ctx.saveGState()
-    ctx.addPath(rightPath)
-    ctx.setLineWidth(strokeW)
-    ctx.setLineCap(.round)
-    ctx.setLineJoin(.round)
-    // Use gradient as stroke color via clipping
-    ctx.replacePathWithStrokedPath()
-    ctx.clip()
-    ctx.drawLinearGradient(
-        amberGradient,
-        start: CGPoint(x: s / 2, y: hTop),
-        end: CGPoint(x: s / 2, y: hBottom),
-        options: []
-    )
-    ctx.restoreGState()
+        ctx.saveGState()
+        ctx.setShadow(offset: .zero, blur: 30, color: cgColor(amberLight, alpha: 0.45))
+        ctx.addEllipse(in: rect)
+        ctx.fillPath()
+        ctx.restoreGState()
+
+        ctx.saveGState()
+        ctx.addEllipse(in: rect)
+        ctx.clip()
+        ctx.drawRadialGradient(
+            amberGradient,
+            startCenter: point, startRadius: 0,
+            endCenter: point, endRadius: nodeRadius,
+            options: []
+        )
+        ctx.restoreGState()
+    }
 }
 
 func fillEllipseWithRadialGradient(ctx: CGContext, rect: CGRect, gradient: CGGradient) {
@@ -428,7 +333,7 @@ func drawDots(ctx: CGContext, size: Int) {
 
 // MARK: - Main
 
-print("🎨 Herdr Manager Icon Generator")
+print("🎨 Shepherd Icon Generator")
 print("================================")
 
 // Ensure output directories exist
@@ -446,7 +351,7 @@ ctx.clip()
 
 // 3. Draw layers
 drawBackground(ctx: ctx, size: canvasSize)
-drawHWithCrook(ctx: ctx, size: canvasSize)
+drawFlockMark(ctx: ctx, size: canvasSize)
 drawDots(ctx: ctx, size: canvasSize)
 
 // 4. Get the master image
