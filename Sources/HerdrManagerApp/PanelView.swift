@@ -151,13 +151,22 @@ struct PanelView: View {
     // MARK: - Footer
 
     private var footer: some View {
-        HStack {
+        @Bindable var appModel = appModel
+        return HStack(spacing: 8) {
             let total = appModel.store.agents.count
             let attention = appModel.store.attentionAgents.count
             Text("\(attention) attention · \(total) total")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
+            // Notification opt-in: notifications default OFF; the user must
+            // enable them explicitly here before anything is posted.
+            Toggle(isOn: $appModel.notificationsEnabled) {
+                Image(systemName: appModel.notificationsEnabled ? "bell.fill" : "bell.slash.fill")
+                    .font(.system(size: 10))
+            }
+            .toggleStyle(.button)
+            .help(appModel.notificationsEnabled ? "Notifications on" : "Notifications off — click to opt in")
             connectionIndicator
         }
         .padding(.horizontal, 12)

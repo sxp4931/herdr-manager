@@ -177,7 +177,7 @@ struct DwellTrackerPersistenceTests {
             )
         ]
         let restored = tracker2.load(currentAgents: currentAgents)
-        #expect(restored == 1)
+        #expect(restored.count == 1)
 
         let entry = tracker2.entry(for: agentId)
         #expect(entry != nil)
@@ -220,7 +220,7 @@ struct DwellTrackerPersistenceTests {
             )
         ]
         let restored = tracker2.load(currentAgents: currentAgents)
-        #expect(restored == 0, "Entry should be discarded when fingerprint doesn't match")
+        #expect(restored.count == 0, "Entry should be discarded when fingerprint doesn't match")
         #expect(tracker2.entry(for: agentId) == nil)
 
         // Cleanup
@@ -258,7 +258,7 @@ struct DwellTrackerPersistenceTests {
             )
         ]
         let restored = tracker2.load(currentAgents: currentAgents)
-        #expect(restored == 0, "Entry should be discarded when stateChangeSeq doesn't match")
+        #expect(restored.count == 0, "Entry should be discarded when stateChangeSeq doesn't match")
         #expect(tracker2.entry(for: agentId) == nil)
 
         // Cleanup

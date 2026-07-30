@@ -1,6 +1,21 @@
 import Foundation
 import Darwin
 
+// MARK: - SharedActionStoreError
+
+/// Thrown when the cross-process advisory lock cannot be acquired. The store
+/// refuses to proceed unlocked — degrading silently to an unguarded
+/// read-modify-write is exactly the corruption risk the lock exists to prevent.
+public enum SharedActionStoreError: Error, CustomStringConvertible {
+    case lockUnavailable(String)
+    public var description: String {
+        switch self {
+        case .lockUnavailable(let detail):
+            return "Cross-process lock unavailable: \(detail)"
+        }
+    }
+}
+
 // MARK: - SharedActionStore
 
 /// File-based IPC for sharing pending actions between the MCP server and the menu-bar app.
@@ -63,8 +78,8 @@ public actor SharedActionStore {
     // MARK: - Create
 
     /// Create a new pending action, write to file, return actionId.
-    public func create(tool: String, params: [String: String]) -> String {
-        return withLock {
+    public func create(tool: String, params: [String: String]) throws -> String {
+        return try withLock {
             var actions = loadActions()
             let actionId = Self.generateActionId()
             let action = PendingAction(actionId: actionId, tool: tool, params: params)
@@ -77,8 +92,8 @@ public actor SharedActionStore {
     // MARK: - Mutate
 
     /// Approve a pending action by actionId.
-    public func approve(_ actionId: String) {
-        mutate(actionId) { action in
+    public func approve(_ actionId: String) throws {
+        try mutate(actionId) { action in
             guard action.state == .pending else { return false }
             action.state = .approved
             return true
@@ -86,8 +101,8 @@ public actor SharedActionStore {
     }
 
     /// Deny a pending action by actionId.
-    public func deny(_ actionId: String) {
-        mutate(actionId) { action in
+    public func deny(_ actionId: String) throws {
+        try mutate(actionId) { action in
             guard action.state == .pending else { return false }
             action.state = .denied
             return true
@@ -95,16 +110,16 @@ public actor SharedActionStore {
     }
 
     /// Mark an action as executed.
-    public func markExecuted(_ actionId: String) {
-        mutate(actionId) { action in
+    public func markExecuted(_ actionId: String) throws {
+        try mutate(actionId) { action in
             action.state = .executed
             return true
         }
     }
 
     /// Mark an action as failed.
-    public func markFailed(_ actionId: String, detail: String) {
-        mutate(actionId) { action in
+    public func markFailed(_ actionId: String, detail: String) throws {
+        try mutate(actionId) { action in
             action.state = .failed
             action.failDetail = detail
             return true
@@ -112,8 +127,8 @@ public actor SharedActionStore {
     }
 
     /// Expire stale pending actions (past their expiresAt).
-    public func expireStale() {
-        withLock {
+    public func expireStale() throws {
+        try withLock {
             let now = Date()
             var actions = loadActions()
             var changed = false
@@ -134,8 +149,8 @@ public actor SharedActionStore {
     /// `.executing` only if it is currently `.approved` and not past its `expiresAt`.
     /// Returns the claimed action, or nil if it was not claimable
     /// (already executing/executed/denied/expired/missing).
-    public func claimExecuting(actionId: String) -> PendingAction? {
-        return withLock {
+    public func claimExecuting(actionId: String) throws -> PendingAction? {
+        return try withLock {
             var actions = loadActions()
             guard let idx = actions.firstIndex(where: { $0.actionId == actionId }) else {
                 return nil
@@ -151,8 +166,8 @@ public actor SharedActionStore {
     /// Expire pending actions past their `expiresAt` and prune terminal actions
     /// (`.executed`, `.failed`, `.denied`, `.expired`) whose `createdAt` is older
     /// than 24 hours. Additive — callers may invoke this periodically.
-    public func reapStale(now: Date = Date()) {
-        withLock {
+    public func reapStale(now: Date = Date()) throws {
+        try withLock {
             var actions = loadActions()
             var dirty = false
 
@@ -183,8 +198,8 @@ public actor SharedActionStore {
 
     // MARK: - Private
 
-    private func mutate(_ actionId: String, _ transform: (inout PendingAction) -> Bool) {
-        withLock {
+    private func mutate(_ actionId: String, _ transform: (inout PendingAction) -> Bool) throws {
+        try withLock {
             var actions = loadActions()
             guard let idx = actions.firstIndex(where: { $0.actionId == actionId }) else {
                 return
@@ -223,23 +238,31 @@ public actor SharedActionStore {
         }
     }
 
-    /// Acquire a cross-process advisory lock (POSIX fcntl on a sidecar `.lock` file),
-    /// execute the synchronous body, then release. Never holds the lock across an `await`.
-    private func withLock<T>(_ body: () throws -> T) rethrows -> T {
+    /// Acquire a cross-process advisory lock (POSIX fcntl on a sidecar `.lock`
+    /// file), execute the synchronous body, then release. Never holds the lock
+    /// across an `await`. If the lock cannot be opened or acquired this THROWS
+    /// rather than degrading to an unguarded read-modify-write — proceeding
+    /// unlocked is the corruption risk the lock exists to prevent.
+    private func withLock<T>(_ body: () throws -> T) throws -> T {
         let fd: Int32 = lockURL.withUnsafeFileSystemRepresentation { pathPtr in
             guard let pathPtr else { return -1 }
             return Darwin.open(pathPtr, O_RDWR | O_CREAT, 0o600)
         }
         guard fd >= 0 else {
-            // Degrade to unlocked operation if the lock file cannot be opened
-            return try body()
+            let detail = "cannot open lock file \(lockURL.lastPathComponent) (errno \(errno))"
+            Self.logLockFailure(detail)
+            throw SharedActionStoreError.lockUnavailable(detail)
         }
         var lock = flock()
         lock.l_type = Int16(F_WRLCK)
         lock.l_whence = Int16(SEEK_SET)
         lock.l_start = 0
         lock.l_len = 0  // Lock entire file
-        _ = Darwin.fcntl(fd, F_SETLKW, &lock)
+        var acquired = false
+        for _ in 0..<3 {
+            if Darwin.fcntl(fd, F_SETLKW, &lock) == 0 { acquired = true; break }
+            if errno != EINTR { break }
+        }
         defer {
             var unlock = flock()
             unlock.l_type = Int16(F_UNLCK)
@@ -249,7 +272,18 @@ public actor SharedActionStore {
             _ = Darwin.fcntl(fd, F_SETLK, &unlock)
             Darwin.close(fd)
         }
+        guard acquired else {
+            let detail = "fcntl lock failed on \(lockURL.lastPathComponent) (errno \(errno))"
+            Self.logLockFailure(detail)
+            throw SharedActionStoreError.lockUnavailable(detail)
+        }
         return try body()
+    }
+
+    private static func logLockFailure(_ detail: String) {
+        FileHandle.standardError.write(
+            Data("SharedActionStore LOCK FAILURE: \(detail)\n".utf8)
+        )
     }
 
     private static func ensureDirectory(at dir: URL) {

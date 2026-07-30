@@ -135,9 +135,15 @@ actor MCPServer {
             continuation.finish()
         }
 
-        // Process each JSON-RPC line
+        // Process each JSON-RPC line CONCURRENTLY. A long-running tools/call
+        // (e.g. a 120s confirmation wait) must not block ping, reads, or
+        // action.status. Each request runs in its own child task; responses are
+        // id-correlated and stdout writes are serialized by stdoutLock, so
+        // out-of-order responses are valid for JSON-RPC over stdio. The actor
+        // serializes shared state and interleaves tasks at suspension points
+        // (the confirmation poll sleeps, releasing the actor to serve others).
         for await line in stream {
-            await handleLine(line)
+            Task { await self.handleLine(line) }
         }
 
         stdinTask.cancel()
@@ -543,7 +549,7 @@ actor MCPServer {
 
     private func handleAgentAnswer(arguments: [String: Any]) async -> [String: Any] {
         // Write-gate: reject if herdr protocol not verified for writes
-        if let error = checkWritesEnabled() { return error }
+        if let error = await checkWritesEnabled() { return error }
 
         guard let agentIdStr = arguments["agent_id"] as? String, !agentIdStr.isEmpty else {
             return makeToolError("Missing required parameter: agent_id")
@@ -591,23 +597,26 @@ actor MCPServer {
                 return makeToolError("Stale state_change_seq: provided \(providedSeq), current \(currentSeq). Re-diagnose and retry.")
             }
 
+            // Record the observed status sequence so the consecutive-answer
+            // protection RESETS when the agent's status episode actually
+            // advances. Without this, three answers would permanently block
+            // further answers for this agent for the process lifetime.
+            await policy.recordStatusChange(agentId: agentIdStr, newSeq: currentSeq)
+
             // Check policy
             let policyResult = await policy.checkWriteAllowed(agentId: agentIdStr, tier: .gated)
             guard policyResult.allowed else {
                 return makeToolError("Policy denied: \(policyResult.reason ?? "unknown")")
             }
 
-            // Map choice to keys
-            let resolvedKeys: [String]
-            switch choice {
-            case "approve": resolvedKeys = ["enter"]
-            case "deny": resolvedKeys = ["esc"]
-            case "accept_once": resolvedKeys = ["down", "enter"]
-            case "select":
-                let index = arguments["index"] as? Int ?? 0
-                resolvedKeys = Array(repeating: "down", count: index) + ["enter"]
-            case "cancel": resolvedKeys = ["esc"]
-            default: resolvedKeys = ["esc"]
+            // Detect the block kind so we only answer RECOGNIZED prompts.
+            // Unknown or merely-probable blocks stay read-only — we never send
+            // keystrokes we cannot justify for the detected prompt shape.
+            let explain = try await adapter.explain(paneId: paneId)
+            let blockKind = explain.matchedRuleId.map { BlockKind.from(ruleId: $0) } ?? .unknownBlock
+
+            guard let resolvedKeys = Self.keys(forChoice: choice, index: arguments["index"] as? Int, blockKind: blockKind) else {
+                return makeToolError("Cannot answer: detected block kind '\(blockKind.rawValue)' does not permit choice '\(choice)'. Recognized prompts only; unknown/weak blocks stay read-only.")
             }
 
             try await adapter.sendKeys(paneId: paneId, keys: resolvedKeys)
@@ -645,7 +654,7 @@ actor MCPServer {
 
     private func handleAgentSay(arguments: [String: Any]) async -> [String: Any] {
         // Write-gate: reject if herdr protocol not verified for writes
-        if let error = checkWritesEnabled() { return error }
+        if let error = await checkWritesEnabled() { return error }
 
         guard let agentIdStr = arguments["agent_id"] as? String, !agentIdStr.isEmpty else {
             return makeToolError("Missing required parameter: agent_id")
@@ -688,7 +697,7 @@ actor MCPServer {
                 params["_fp_status"] = fpStatus
                 params["_fp_seq"] = "\(fpSeq)"
 
-                let actionId = await sharedActionStore.create(tool: "agent.say", params: params)
+                let actionId = try await sharedActionStore.create(tool: "agent.say", params: params)
 
                 await journal.record(JournalEntry(
                     actionId: actionId, tool: "agent.say",
@@ -702,22 +711,22 @@ actor MCPServer {
 
                 if finalState == .approved {
                     // Atomic claim gate
-                    guard let claimed = await sharedActionStore.claimExecuting(actionId: actionId) else {
-                        await sharedActionStore.markFailed(actionId, detail: "action no longer claimable")
+                    guard let claimed = try await sharedActionStore.claimExecuting(actionId: actionId) else {
+                        try? await sharedActionStore.markFailed(actionId, detail: "action no longer claimable")
                         return makeToolError("Action no longer claimable (actionId: \(actionId))")
                     }
 
                     // Revalidate pane occupant + status episode after the wait
                     do {
-                        _ = try await revalidate(action: claimed, paneId: paneId)
+                        try await revalidate(action: claimed, paneId: paneId)
                     } catch {
-                        await sharedActionStore.markFailed(actionId, detail: "revalidation failed: \(error)")
+                        try? await sharedActionStore.markFailed(actionId, detail: "revalidation failed: \(error)")
                         return makeToolError("Revalidation failed: \(error). No input sent.")
                     }
 
                     try await adapter.prompt(paneId: paneId, text: text)
                     await policy.recordWrite(agentId: agentIdStr)
-                    await sharedActionStore.markExecuted(actionId)
+                    try? await sharedActionStore.markExecuted(actionId)
 
                     await journal.record(JournalEntry(
                         actionId: actionId, tool: "agent.say",
@@ -787,7 +796,7 @@ actor MCPServer {
 
     private func handleAgentInterrupt(arguments: [String: Any]) async -> [String: Any] {
         // Write-gate: reject if herdr protocol not verified for writes
-        if let error = checkWritesEnabled() { return error }
+        if let error = await checkWritesEnabled() { return error }
 
         guard let agentIdStr = arguments["agent_id"] as? String, !agentIdStr.isEmpty else {
             return makeToolError("Missing required parameter: agent_id")
@@ -812,7 +821,7 @@ actor MCPServer {
             params["_fp_status"] = paneInfo.agentStatus
             params["_fp_seq"] = "\(paneInfo.stateChangeSeq ?? 0)"
 
-            let actionId = await sharedActionStore.create(tool: "agent.interrupt", params: params)
+            let actionId = try await sharedActionStore.create(tool: "agent.interrupt", params: params)
 
             await journal.record(JournalEntry(
                 actionId: actionId, tool: "agent.interrupt",
@@ -826,8 +835,8 @@ actor MCPServer {
 
             if finalState == .approved {
                 // Atomic claim gate
-                guard let claimed = await sharedActionStore.claimExecuting(actionId: actionId) else {
-                    await sharedActionStore.markFailed(actionId, detail: "action no longer claimable")
+                guard let claimed = try await sharedActionStore.claimExecuting(actionId: actionId) else {
+                    try? await sharedActionStore.markFailed(actionId, detail: "action no longer claimable")
                     return makeToolError("Action no longer claimable (actionId: \(actionId))")
                 }
 
@@ -835,14 +844,14 @@ actor MCPServer {
                 do {
                     _ = try await revalidate(action: claimed, paneId: paneId)
                 } catch {
-                    await sharedActionStore.markFailed(actionId, detail: "revalidation failed: \(error)")
+                    try? await sharedActionStore.markFailed(actionId, detail: "revalidation failed: \(error)")
                     return makeToolError("Revalidation failed: \(error). No input sent.")
                 }
 
                 let keys: [String] = level == "escape" ? ["esc"] : ["ctrl+c"]
                 try await adapter.sendKeys(paneId: paneId, keys: keys)
                 await policy.recordWrite(agentId: agentIdStr)
-                await sharedActionStore.markExecuted(actionId)
+                try? await sharedActionStore.markExecuted(actionId)
 
                 await journal.record(JournalEntry(
                     actionId: actionId, tool: "agent.interrupt",
@@ -877,7 +886,7 @@ actor MCPServer {
 
     private func handleAgentStop(arguments: [String: Any]) async -> [String: Any] {
         // Write-gate: reject if herdr protocol not verified for writes
-        if let error = checkWritesEnabled() { return error }
+        if let error = await checkWritesEnabled() { return error }
 
         guard let agentIdStr = arguments["agent_id"] as? String, !agentIdStr.isEmpty else {
             return makeToolError("Missing required parameter: agent_id")
@@ -899,7 +908,7 @@ actor MCPServer {
             params["_fp_status"] = paneInfo.agentStatus
             params["_fp_seq"] = "\(paneInfo.stateChangeSeq ?? 0)"
 
-            let actionId = await sharedActionStore.create(tool: "agent.stop", params: params)
+            let actionId = try await sharedActionStore.create(tool: "agent.stop", params: params)
 
             await journal.record(JournalEntry(
                 actionId: actionId, tool: "agent.stop",
@@ -914,8 +923,8 @@ actor MCPServer {
 
             if finalState == .approved {
                 // Atomic claim gate
-                guard let claimed = await sharedActionStore.claimExecuting(actionId: actionId) else {
-                    await sharedActionStore.markFailed(actionId, detail: "action no longer claimable")
+                guard let claimed = try await sharedActionStore.claimExecuting(actionId: actionId) else {
+                    try? await sharedActionStore.markFailed(actionId, detail: "action no longer claimable")
                     return makeToolError("Action no longer claimable (actionId: \(actionId))")
                 }
 
@@ -923,13 +932,13 @@ actor MCPServer {
                 do {
                     _ = try await revalidate(action: claimed, paneId: paneId)
                 } catch {
-                    await sharedActionStore.markFailed(actionId, detail: "revalidation failed: \(error)")
+                    try? await sharedActionStore.markFailed(actionId, detail: "revalidation failed: \(error)")
                     return makeToolError("Revalidation failed: \(error). No input sent.")
                 }
 
                 try await adapter.closePane(paneId: paneId)
                 await policy.recordWrite(agentId: agentIdStr)
-                await sharedActionStore.markExecuted(actionId)
+                try? await sharedActionStore.markExecuted(actionId)
 
                 await journal.record(JournalEntry(
                     actionId: actionId, tool: "agent.stop",
@@ -967,7 +976,7 @@ actor MCPServer {
 
     private func handleSessionSpawn(arguments: [String: Any]) async -> [String: Any] {
         // Write-gate: reject if herdr protocol not verified for writes
-        if let error = checkWritesEnabled() { return error }
+        if let error = await checkWritesEnabled() { return error }
 
         guard let repoPath = arguments["repo_path"] as? String, !repoPath.isEmpty else {
             return makeToolError("Missing required parameter: repo_path")
@@ -1015,7 +1024,9 @@ actor MCPServer {
         params["_fp_status"] = ""
         params["_fp_seq"] = "0"
 
-        let actionId = await sharedActionStore.create(tool: "session.spawn", params: params)
+        guard let actionId = try? await sharedActionStore.create(tool: "session.spawn", params: params) else {
+            return makeToolError("Failed to record spawn action (lock unavailable)")
+        }
 
         await journal.record(JournalEntry(
             actionId: actionId, tool: "session.spawn",
@@ -1029,8 +1040,8 @@ actor MCPServer {
 
         if finalState == .approved {
             // Atomic claim gate
-            guard await sharedActionStore.claimExecuting(actionId: actionId) != nil else {
-                await sharedActionStore.markFailed(actionId, detail: "action no longer claimable")
+            guard (try? await sharedActionStore.claimExecuting(actionId: actionId)) != nil else {
+                try? await sharedActionStore.markFailed(actionId, detail: "action no longer claimable")
                 return makeToolError("Action no longer claimable (actionId: \(actionId))")
             }
 
@@ -1046,7 +1057,7 @@ actor MCPServer {
                 }
 
                 await policy.recordWrite(agentId: paneId)
-                await sharedActionStore.markExecuted(actionId)
+                try? await sharedActionStore.markExecuted(actionId)
 
                 await journal.record(JournalEntry(
                     actionId: actionId, tool: "session.spawn",
@@ -1056,7 +1067,7 @@ actor MCPServer {
                 ))
                 return makeToolResult("{\"agentId\":\"\(paneId)\",\"space\":\"\(workspaceId)\",\"started\":true,\"actionId\":\"\(actionId)\"}")
             } catch {
-                await sharedActionStore.markFailed(actionId, detail: error.localizedDescription)
+                try? await sharedActionStore.markFailed(actionId, detail: error.localizedDescription)
                 return makeToolError("session.spawn execution failed: \(error.localizedDescription)")
             }
         } else if finalState == .denied {
@@ -1085,7 +1096,7 @@ actor MCPServer {
             return makeToolError("Missing required parameter: action_id")
         }
 
-        await sharedActionStore.expireStale()
+        try? await sharedActionStore.expireStale()
 
         if let state = await sharedActionStore.status(actionId) {
             var json = "{\"state\":\"\(state.rawValue)\""
@@ -1106,7 +1117,7 @@ actor MCPServer {
         let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
         while Date() < deadline {
             try? await Task.sleep(for: .seconds(2))
-            await sharedActionStore.expireStale()
+            try? await sharedActionStore.expireStale()
             if let state = await sharedActionStore.status(actionId) {
                 switch state {
                 case .approved:
@@ -1125,7 +1136,7 @@ actor MCPServer {
             }
         }
         // Timeout — expire stale and return expired
-        await sharedActionStore.expireStale()
+        try? await sharedActionStore.expireStale()
         return await sharedActionStore.status(actionId) ?? .expired
     }
 
@@ -1139,8 +1150,15 @@ actor MCPServer {
 
     // MARK: - Write-Gate Helper
 
-    /// Returns a tool error dict if writes are disabled, or nil if writes are allowed.
-    private func checkWritesEnabled() -> [String: Any]? {
+    /// Returns a tool error dict if writes are disabled, or nil if writes are
+    /// allowed. A fresh process has no protocol reading until its first
+    /// snapshot, so before gating we ensure a live reading exists — otherwise
+    /// the very first write would be wrongly rejected as "protocol unknown".
+    private func checkWritesEnabled() async -> [String: Any]? {
+        if adapter.health().protocolVersion == 0 {
+            try? await ensureConnected()
+            _ = try? await adapter.snapshot()
+        }
         let health = adapter.health()
         if !health.writesEnabled {
             return makeToolError("Writes not enabled: \(health.reason ?? "herdr protocol not verified for writes")")
@@ -1148,73 +1166,75 @@ actor MCPServer {
         return nil
     }
 
-    // MARK: - Occupant Fingerprint & Revalidation
+    // MARK: - Answer Key Mapping
 
-    /// Compute a stable fingerprint for the current occupant of a pane.
-    /// Combines kind + name + paneId to detect occupant changes.
-    private func occupantFingerprint(of agent: Agent) -> String {
-        let kindStr: String
-        switch agent.kind {
-        case .claude: kindStr = "claude"
-        case .codex: kindStr = "codex"
-        case .opencode: kindStr = "opencode"
-        case .aider: kindStr = "aider"
-        case .gemini: kindStr = "gemini"
-        case .custom(let s): kindStr = s
+    /// Map an answer choice to keystrokes, gated on the detected block kind.
+    /// Returns nil when the choice is not valid for the kind (or the kind is
+    /// unknown/weak), so unrecognized prompts stay read-only and we never send
+    /// a global hardcoded keystroke that the detected prompt does not warrant.
+    private static func keys(forChoice choice: String, index: Int?, blockKind: BlockKind) -> [String]? {
+        // Weak or unknown blocks: never send input.
+        switch blockKind {
+        case .unknownBlock, .probableApproval:
+            return nil
+        default:
+            break
         }
-        return "\(kindStr)|\(agent.name)|\(agent.id.raw)"
+
+        let permissionKinds: Set<BlockKind> = [.bashPermission, .toolPermission, .approval, .workflowConfirm]
+        let selectionKinds: Set<BlockKind> = [.selectionForm, .menu]
+
+        if permissionKinds.contains(blockKind) {
+            switch choice {
+            case "approve": return ["enter"]
+            case "accept_once": return ["down", "enter"]
+            case "deny", "cancel": return ["esc"]
+            default: return nil  // 'select' is meaningless on a yes/no prompt
+            }
+        }
+        if selectionKinds.contains(blockKind) {
+            switch choice {
+            case "select":
+                let idx = index ?? 0
+                return Array(repeating: "down", count: idx) + ["enter"]
+            case "approve": return ["enter"]  // accept the highlighted default
+            case "cancel", "deny": return ["esc"]
+            default: return nil  // 'accept_once' is meaningless on a list
+            }
+        }
+        return nil
     }
 
-    /// Compute fingerprint from a PaneInfo (for capture at creation time).
+    // MARK: - Occupant Fingerprint & Revalidation
+
+    /// Compute a stable fingerprint for the current occupant of a pane, keyed
+    /// on the NATIVE herdr agent-session identity (source|agent|kind|value) so
+    /// that replacing an occupant with another agent of the same kind/name in
+    /// the same pane is still detected as a change. Falls back to a
+    /// kind|name|paneId form only when no agent-session identity is present.
     private func occupantFingerprint(from paneInfo: HerdrSnapshot.PaneInfo) -> String {
-        let kindStr: String
         if let session = paneInfo.agentSession {
-            kindStr = session.agent
-        } else if let agentName = paneInfo.agent {
-            kindStr = agentName
-        } else {
-            kindStr = "unknown"
+            return "session|\(session.source)|\(session.agent)|\(session.kind)|\(session.value)|\(paneInfo.paneId)"
         }
+        let kindStr = paneInfo.agent ?? "unknown"
         let name = paneInfo.agent ?? paneInfo.terminalTitleStripped ?? ""
-        return "\(kindStr)|\(name)|\(paneInfo.paneId)"
+        return "fallback|\(kindStr)|\(name)|\(paneInfo.paneId)"
     }
 
     /// Revalidate that the pane still has the same occupant and status episode
     /// as when the action was created. Throws if mismatch.
     /// Reads fingerprint info from action.params["_fp_*"] keys.
-    private func revalidate(action: PendingAction, paneId: String) async throws -> Agent {
+    private func revalidate(action: PendingAction, paneId: String) async throws {
         let snapshot = try await adapter.snapshot()
 
         guard let paneInfo = snapshot.panes.first(where: { $0.paneId == paneId }) else {
             throw MCPRevalidationError.paneGone(paneId)
         }
 
-        // Build a temporary Agent from the paneInfo for fingerprint comparison
-        let kind: AgentKind
-        if let session = paneInfo.agentSession {
-            kind = AgentKind.custom(session.agent)
-        } else if let agentName = paneInfo.agent {
-            kind = AgentKind.custom(agentName)
-        } else {
-            kind = .custom("unknown")
-        }
-        let name = paneInfo.agent ?? paneInfo.terminalTitleStripped ?? ""
-        let status = AgentStatus(rawValue: paneInfo.agentStatus) ?? .unknown
         let seq = paneInfo.stateChangeSeq ?? 0
 
-        let currentAgent = Agent(
-            id: AgentID(paneId),
-            kind: kind,
-            name: name,
-            displayName: name,
-            status: status,
-            stateChangeSeq: seq,
-            enteredAt: Date(),
-            verdict: Self.initialVerdict(for: status)
-        )
-
-        // Compare fingerprint
-        let currentFingerprint = occupantFingerprint(of: currentAgent)
+        // Compare the NATIVE occupant fingerprint (agent-session identity).
+        let currentFingerprint = occupantFingerprint(from: paneInfo)
         let expectedFingerprint = action.params["_fp_occupant"]
         if let expectedFingerprint, !expectedFingerprint.isEmpty,
            expectedFingerprint != currentFingerprint {
@@ -1242,8 +1262,6 @@ actor MCPServer {
                 current: paneInfo.agentStatus
             )
         }
-
-        return currentAgent
     }
 
     // MARK: - Formatting (nonisolated — pure functions on Sendable inputs)

@@ -4,7 +4,11 @@ import Foundation
 
 public struct Settings: Codable, Sendable {
     public var defaultThresholdMinutes: Int = 5
-    public var agentOverrides: [String: Int] = [:]  // paneId -> threshold minutes
+    public var agentOverrides: [String: Int] = [:]  // paneId -> minutes (legacy/fallback)
+    /// Threshold overrides keyed by OCCUPANT identity (agent kind/session), so
+    /// an override follows the agent rather than the pane it happens to occupy.
+    /// Looked up before the pane-id map; defaults to empty for old settings files.
+    public var occupantOverrides: [String: Int] = [:]
     public var metadataWriteBackEnabled: Bool = true
 
     public init() {}
@@ -46,7 +50,12 @@ public actor SettingsStore {
     }
 
     /// Get the effective threshold for an agent, considering overrides.
-    public func threshold(for paneId: String) -> Int {
+    /// Occupant-keyed overrides (which follow the agent across panes) take
+    /// precedence over the legacy pane-id map; falls back to the default.
+    public func threshold(for paneId: String, occupant: String? = nil) -> Int {
+        if let occupant, let override = settings.occupantOverrides[occupant] {
+            return override
+        }
         if let override = settings.agentOverrides[paneId] {
             return override
         }
@@ -60,6 +69,17 @@ public actor SettingsStore {
 
     public func removeOverride(paneId: String) throws {
         settings.agentOverrides.removeValue(forKey: paneId)
+        try save()
+    }
+
+    /// Set a threshold override keyed by OCCUPANT identity (follows the agent).
+    public func setOverride(occupant: String, minutes: Int) throws {
+        settings.occupantOverrides[occupant] = minutes
+        try save()
+    }
+
+    public func removeOverride(occupant: String) throws {
+        settings.occupantOverrides.removeValue(forKey: occupant)
         try save()
     }
 

@@ -15,9 +15,9 @@ struct SharedActionStoreTests {
     }
 
     @Test("Create and retrieve pending action")
-    func createAndRetrieve() async {
+    func createAndRetrieve() async throws {
         let store = tempStore()
-        let id = await store.create(tool: "bash", params: ["command": "rm -rf /"])
+        let id = try await store.create(tool: "bash", params: ["command": "rm -rf /"])
         let action = await store.get(id)
         #expect(action != nil)
         #expect(action?.tool == "bash")
@@ -26,40 +26,40 @@ struct SharedActionStoreTests {
     }
 
     @Test("Approve a pending action")
-    func approve() async {
+    func approve() async throws {
         let store = tempStore()
-        let id = await store.create(tool: "bash", params: [:])
-        await store.approve(id)
+        let id = try await store.create(tool: "bash", params: [:])
+        try await store.approve(id)
         let status = await store.status(id)
         #expect(status == .approved)
     }
 
     @Test("Deny a pending action")
-    func deny() async {
+    func deny() async throws {
         let store = tempStore()
-        let id = await store.create(tool: "write", params: [:])
-        await store.deny(id)
+        let id = try await store.create(tool: "write", params: [:])
+        try await store.deny(id)
         let status = await store.status(id)
         #expect(status == .denied)
     }
 
     @Test("Cannot approve already-approved action")
-    func doubleApprove() async {
+    func doubleApprove() async throws {
         let store = tempStore()
-        let id = await store.create(tool: "bash", params: [:])
-        await store.approve(id)
+        let id = try await store.create(tool: "bash", params: [:])
+        try await store.approve(id)
         // Second approve should be a no-op (state stays approved)
-        await store.approve(id)
+        try await store.approve(id)
         let status = await store.status(id)
         #expect(status == .approved)
     }
 
     @Test("pendingActions filters to pending only")
-    func pendingActionsFilter() async {
+    func pendingActionsFilter() async throws {
         let store = tempStore()
-        let id1 = await store.create(tool: "bash", params: [:])
-        let _ = await store.create(tool: "write", params: [:])
-        await store.approve(id1)
+        let id1 = try await store.create(tool: "bash", params: [:])
+        let _ = try await store.create(tool: "write", params: [:])
+        try await store.approve(id1)
 
         let pending = await store.pendingActions()
         #expect(pending.count == 1)
@@ -67,30 +67,30 @@ struct SharedActionStoreTests {
     }
 
     @Test("expireStale marks past-due actions as expired")
-    func expireStale() async {
+    func expireStale() async throws {
         let store = tempStore()
-        let id = await store.create(tool: "bash", params: [:])
+        let id = try await store.create(tool: "bash", params: [:])
         // The action expires in 120s by default. We can't easily fast-forward,
         // but we can verify that non-expired actions stay pending.
-        await store.expireStale()
+        try await store.expireStale()
         let status = await store.status(id)
         #expect(status == .pending) // not yet expired
     }
 
     @Test("markExecuted changes state")
-    func markExecuted() async {
+    func markExecuted() async throws {
         let store = tempStore()
-        let id = await store.create(tool: "bash", params: [:])
-        await store.markExecuted(id)
+        let id = try await store.create(tool: "bash", params: [:])
+        try await store.markExecuted(id)
         let status = await store.status(id)
         #expect(status == .executed)
     }
 
     @Test("markFailed changes state with detail")
-    func markFailed() async {
+    func markFailed() async throws {
         let store = tempStore()
-        let id = await store.create(tool: "bash", params: [:])
-        await store.markFailed(id, detail: "timeout")
+        let id = try await store.create(tool: "bash", params: [:])
+        try await store.markFailed(id, detail: "timeout")
         let action = await store.get(id)
         #expect(action?.state == .failed)
         #expect(action?.failDetail == "timeout")
@@ -227,6 +227,7 @@ struct SettingsStoreTests {
         #expect(snap.defaultThresholdMinutes == 5)
         #expect(snap.metadataWriteBackEnabled == true)
         #expect(snap.agentOverrides.isEmpty)
+        #expect(snap.occupantOverrides.isEmpty)
     }
 
     @Test("Save and load roundtrip")
@@ -263,6 +264,19 @@ struct SettingsStoreTests {
         #expect(t == 20)
     }
 
+    @Test("Occupant override takes precedence over pane-id override")
+    func occupantOverridePrecedence() async throws {
+        let store = tempStore()
+        try await store.setOverride(paneId: "w1:p1", minutes: 20)
+        try await store.setOverride(occupant: "claude", minutes: 45)
+        // With an occupant supplied, the occupant override wins.
+        let byOccupant = await store.threshold(for: "w1:p1", occupant: "claude")
+        #expect(byOccupant == 45)
+        // Without an occupant, falls back to the pane-id override.
+        let byPane = await store.threshold(for: "w1:p1")
+        #expect(byPane == 20)
+    }
+
     @Test("removeOverride reverts to default")
     func removeOverride() async throws {
         let store = tempStore()
@@ -294,6 +308,8 @@ struct SettingsStoreTests {
 }
 
 // MARK: - ActionStore claimExecuting Tests
+// NOTE: ActionStore is the in-memory store; its methods do NOT throw (only the
+// file-backed SharedActionStore acquired throwing locking paths).
 
 @Suite("ActionStore.claimExecuting")
 struct ActionStoreClaimTests {
@@ -360,35 +376,35 @@ struct SharedActionStoreReapStaleTests {
     }
 
     @Test("Pending action past expiresAt becomes expired")
-    func pendingBecomesExpired() async {
+    func pendingBecomesExpired() async throws {
         let store = tempStore()
-        let id = await store.create(tool: "bash", params: [:])
+        let id = try await store.create(tool: "bash", params: [:])
         // Fast-forward: call reapStale with a now far in the future
         let future = Date().addingTimeInterval(3600)
-        await store.reapStale(now: future)
+        try await store.reapStale(now: future)
         let status = await store.status(id)
         #expect(status == .expired)
     }
 
     @Test("Terminal action older than 24h is pruned")
-    func oldTerminalPruned() async {
+    func oldTerminalPruned() async throws {
         let store = tempStore()
-        let id = await store.create(tool: "bash", params: [:])
-        await store.markExecuted(id)
+        let id = try await store.create(tool: "bash", params: [:])
+        try await store.markExecuted(id)
         // Fast-forward 25 hours
         let future = Date().addingTimeInterval(25 * 3600)
-        await store.reapStale(now: future)
+        try await store.reapStale(now: future)
         let action = await store.get(id)
         #expect(action == nil)
     }
 
     @Test("Recent terminal action survives reap")
-    func recentTerminalSurvives() async {
+    func recentTerminalSurvives() async throws {
         let store = tempStore()
-        let id = await store.create(tool: "bash", params: [:])
-        await store.markExecuted(id)
+        let id = try await store.create(tool: "bash", params: [:])
+        try await store.markExecuted(id)
         // Reap with current time — action was just created, so it should survive
-        await store.reapStale(now: Date())
+        try await store.reapStale(now: Date())
         let action = await store.get(id)
         #expect(action != nil)
         #expect(action?.state == .executed)
@@ -409,7 +425,7 @@ struct ActionIdFormatTests {
     }
 
     @Test("SharedActionStore action IDs are valid UUID strings")
-    func sharedActionIdsAreUUIDs() async {
+    func sharedActionIdsAreUUIDs() async throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -417,7 +433,7 @@ struct ActionIdFormatTests {
         let store = SharedActionStore(fileURL: fileURL)
 
         for _ in 0..<10 {
-            let id = await store.create(tool: "bash", params: [:])
+            let id = try await store.create(tool: "bash", params: [:])
             #expect(UUID(uuidString: id) != nil, "Action ID '\(id)' is not a valid UUID")
         }
     }
@@ -436,7 +452,7 @@ struct SharedActionStorePermissionsTests {
         let fileURL = dir.appendingPathComponent("pending-actions.json")
         let store = SharedActionStore(fileURL: fileURL)
 
-        _ = await store.create(tool: "bash", params: ["command": "echo hello"])
+        _ = try await store.create(tool: "bash", params: ["command": "echo hello"])
 
         let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
         let perm = attrs[.posixPermissions] as? Int
@@ -445,40 +461,33 @@ struct SharedActionStorePermissionsTests {
 
     @Test("Directory permissions are 0700 when using default init")
     func directoryPermissionsAre0700() async throws {
-        // Use the default init which creates the directory
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask
         ).first!
         let testDir = appSupport.appendingPathComponent(
             "HerdrManagerTests-\(UUID().uuidString)", isDirectory: true
         )
-        // Clean up if exists
         try? FileManager.default.removeItem(at: testDir)
 
-        // We can't easily test the default init without polluting the real app support dir,
-        // so we test the ensureDirectory behavior by creating a store with a nested path
-        // and checking the parent directory permissions after a write.
         let fileURL = testDir.appendingPathComponent("pending-actions.json")
         let store = SharedActionStore(fileURL: fileURL)
 
-        // Create the directory manually with the right permissions to simulate
         try FileManager.default.createDirectory(
             at: testDir, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
 
-        _ = await store.create(tool: "bash", params: [:])
+        _ = try await store.create(tool: "bash", params: [:])
 
         let attrs = try FileManager.default.attributesOfItem(atPath: testDir.path)
         let perm = attrs[.posixPermissions] as? Int
         #expect(perm == 0o700, "Expected dir permissions 0700, got \(String(format: "%o", perm ?? 0))")
 
-        // Cleanup
         try? FileManager.default.removeItem(at: testDir)
     }
 }
 
-// MARK: - SharedActionStore concurrency
+// MARK: - SharedActionStore concurrency (single process / actor serialization)
 
 @Suite("SharedActionStore concurrency")
 struct SharedActionStoreConcurrencyTests {
@@ -495,15 +504,15 @@ struct SharedActionStoreConcurrencyTests {
         let store = SharedActionStore(fileURL: fileURL)
 
         // Create actions from multiple concurrent tasks
-        let allIds: [String] = await withTaskGroup(of: String.self) { group in
+        let allIds: [String] = try await withThrowingTaskGroup(of: String.self) { group in
             for i in 0..<count {
                 group.addTask {
                     let tool = i.isMultiple(of: 2) ? "bash" : "write"
-                    return await store.create(tool: tool, params: [:])
+                    return try await store.create(tool: tool, params: [:])
                 }
             }
             var collected: [String] = []
-            for await id in group { collected.append(id) }
+            for try await id in group { collected.append(id) }
             return collected
         }
 
@@ -525,6 +534,75 @@ struct SharedActionStoreConcurrencyTests {
         #expect(decoded?.count == count)
 
         // Cleanup
+        try? FileManager.default.removeItem(at: dir)
+    }
+}
+
+// MARK: - SharedActionStore CROSS-PROCESS locking
+//
+// The concurrency test above exercises a single actor instance (in-process
+// serialization). This suite proves the advisory lock ALSO provides mutual
+// exclusion across REAL OS processes — the property that protects the app and
+// the MCP server when they mutate pending-actions.json simultaneously.
+
+@Suite("SharedActionStore cross-process locking")
+struct SharedActionStoreCrossProcessTests {
+
+    @Test("fcntl sidecar lock serializes real processes (no lost updates)")
+    func crossProcessLockPreventsLostUpdates() async throws {
+        let python = "/usr/bin/python3"
+        guard FileManager.default.isExecutableFile(atPath: python) else {
+            // No python3 available; cannot spawn a second process here.
+            return
+        }
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // The SAME sidecar lock path SharedActionStore uses for pending-actions.json.
+        let lockPath = dir.appendingPathComponent(".pending-actions.lock").path
+        let counterPath = dir.appendingPathComponent("counter").path
+        try "0".write(toFile: counterPath, atomically: false, encoding: .utf8)
+
+        // Each child performs N NON-ATOMIC read-modify-write increments guarded
+        // by a POSIX fcntl record lock (python fcntl.lockf == fcntl(2) F_SETLK),
+        // the SAME lock type SharedActionStore.withLock uses, on the SAME lock
+        // file. Without cross-process mutual exclusion these increments race and
+        // are lost, so the final count would fall short of processes*increments.
+        let script = """
+        import fcntl, sys, os
+        lockpath, counterpath, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+        fd = os.open(lockpath, os.O_CREAT | os.O_RDWR, 0o600)
+        for _ in range(n):
+            fcntl.lockf(fd, fcntl.LOCK_EX)
+            with open(counterpath, 'r') as f:
+                v = int(f.read().strip() or '0')
+            with open(counterpath, 'w') as f:
+                f.write(str(v + 1))
+            fcntl.lockf(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        """
+
+        let processes = 4
+        let incrementsPerProcess = 25
+        var children: [Process] = []
+        for _ in 0..<processes {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: python)
+            p.arguments = ["-c", script, lockPath, counterPath, "\(incrementsPerProcess)"]
+            try p.run()
+            children.append(p)
+        }
+        for p in children { p.waitUntilExit() }
+
+        let raw = try String(contentsOfFile: counterPath, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let final = Int(raw) ?? -1
+        #expect(
+            final == processes * incrementsPerProcess,
+            "Cross-process lock lost updates: expected \(processes * incrementsPerProcess), got \(final)"
+        )
+
         try? FileManager.default.removeItem(at: dir)
     }
 }

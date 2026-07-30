@@ -118,22 +118,21 @@ struct AgentRow: View, Equatable {
         .accessibilityLabel(accessibilityDescription)
         .accessibilityHint("Double-click to focus this agent")
         .contextMenu {
-            let paneId = agent.id.raw
             Button("Override: 5 min") {
-                Task { try? await appModel.settingsStore.setOverride(paneId: paneId, minutes: 5) }
+                appModel.setThresholdOverride(for: agent, minutes: 5)
             }
             Button("Override: 10 min") {
-                Task { try? await appModel.settingsStore.setOverride(paneId: paneId, minutes: 10) }
+                appModel.setThresholdOverride(for: agent, minutes: 10)
             }
             Button("Override: 15 min") {
-                Task { try? await appModel.settingsStore.setOverride(paneId: paneId, minutes: 15) }
+                appModel.setThresholdOverride(for: agent, minutes: 15)
             }
             Button("Override: 30 min") {
-                Task { try? await appModel.settingsStore.setOverride(paneId: paneId, minutes: 30) }
+                appModel.setThresholdOverride(for: agent, minutes: 30)
             }
             Divider()
             Button("Reset to Default") {
-                Task { try? await appModel.settingsStore.removeOverride(paneId: paneId) }
+                appModel.resetThresholdOverride(for: agent)
             }
         }
     }

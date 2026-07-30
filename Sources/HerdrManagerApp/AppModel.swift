@@ -20,6 +20,13 @@ final class AppModel {
     var pendingActions: [PendingAction] = []
     var metadataWriteBackEnabled: Bool = true
 
+    /// User-controlled notification master switch (persisted by NotificationManager).
+    /// Stored on the model so @Observable tracks it for the footer toggle; the
+    /// `didSet` pushes changes into NotificationManager (does not fire during init).
+    var notificationsEnabled: Bool = false {
+        didSet { notificationManager.setEnabled(notificationsEnabled) }
+    }
+
     /// The most recent user-visible error from resync / focus / settings /
     /// metadata / subscription paths. `nil` when everything is healthy. The
     /// panel footer renders this so failures are no longer silently swallowed.
@@ -53,6 +60,9 @@ final class AppModel {
         if notificationManager.isEnabled {
             notificationManager.requestAuthorization()
         }
+        // Seed the observable toggle from the persisted preference (didSet does
+        // not fire during initialization, so this won't re-trigger setEnabled).
+        self.notificationsEnabled = notificationManager.isEnabled
     }
 
     // MARK: - Lifecycle
@@ -93,7 +103,7 @@ final class AppModel {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard let self else { return }
-                await self.sharedActionStore.reapStale()
+                _ = try? await self.sharedActionStore.reapStale()
                 let actions = await self.sharedActionStore.pendingActions()
                 await MainActor.run {
                     self.pendingActions = actions
@@ -131,7 +141,7 @@ final class AppModel {
                     // Restore persisted dwell once after the first successful snapshot.
                     if !self.hasRestoredDwell {
                         self.hasRestoredDwell = true
-                        _ = self.dwellTracker.load(currentAgents: self.store.agents)
+                        self.store.applyRestoredDwell(self.dwellTracker.load(currentAgents: self.store.agents))
                     }
                 } catch {
                     self.lastError = "Snapshot failed: \(error.localizedDescription)"
@@ -151,7 +161,7 @@ final class AppModel {
                 self.updateDwellForAllAgents()
                 if !self.hasRestoredDwell {
                     self.hasRestoredDwell = true
-                    _ = self.dwellTracker.load(currentAgents: self.store.agents)
+                    self.store.applyRestoredDwell(self.dwellTracker.load(currentAgents: self.store.agents))
                 }
                 self.lastError = nil
             } catch {
@@ -164,6 +174,12 @@ final class AppModel {
         let paneId = agent.id.raw
         Task { [weak self] in
             guard let self else { return }
+            // Focus is a WRITE; respect the capability gate.
+            let health = self.adapter.health()
+            guard health.writesEnabled else {
+                self.lastError = "Focus skipped: \(health.reason ?? "writes disabled")"
+                return
+            }
             do {
                 try await self.adapter.focus(paneId: paneId)
                 self.lastError = nil
@@ -186,7 +202,7 @@ final class AppModel {
             updateDwellForAllAgents()
             if !hasRestoredDwell {
                 hasRestoredDwell = true
-                _ = dwellTracker.load(currentAgents: store.agents)
+                store.applyRestoredDwell(dwellTracker.load(currentAgents: store.agents))
             }
             lastError = nil
             startDiagnosisLoops()
@@ -258,7 +274,7 @@ final class AppModel {
                         self.updateDwellForAllAgents()
                         if !self.hasRestoredDwell {
                             self.hasRestoredDwell = true
-                            _ = self.dwellTracker.load(currentAgents: self.store.agents)
+                            self.store.applyRestoredDwell(self.dwellTracker.load(currentAgents: self.store.agents))
                         }
                         self.startDiagnosisLoops()
                     } catch {
@@ -308,7 +324,7 @@ final class AppModel {
 
     func approveAction(_ id: String) {
         Task {
-            await sharedActionStore.approve(id)
+            _ = try? await sharedActionStore.approve(id)
             await journal.record(JournalEntry(
                 actionId: id,
                 tool: await sharedActionStore.get(id)?.tool ?? "unknown",
@@ -323,7 +339,7 @@ final class AppModel {
 
     func denyAction(_ id: String) {
         Task {
-            await sharedActionStore.deny(id)
+            _ = try? await sharedActionStore.deny(id)
             await journal.record(JournalEntry(
                 actionId: id,
                 tool: await sharedActionStore.get(id)?.tool ?? "unknown",
@@ -333,6 +349,36 @@ final class AppModel {
                 postState: "denied",
                 outcome: "denied"
             ))
+        }
+    }
+
+    // MARK: - Threshold Overrides
+
+    /// Set a per-occupant silent-threshold override, surfacing any settings
+    /// error in `lastError` instead of swallowing it.
+    func setThresholdOverride(for agent: Agent, minutes: Int) {
+        let occupant = Self.fingerprintForAgent(agent)
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.settingsStore.setOverride(occupant: occupant, minutes: minutes)
+                self.lastError = nil
+            } catch {
+                self.lastError = "Settings save failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func resetThresholdOverride(for agent: Agent) {
+        let occupant = Self.fingerprintForAgent(agent)
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.settingsStore.removeOverride(occupant: occupant)
+                self.lastError = nil
+            } catch {
+                self.lastError = "Settings save failed: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -371,6 +417,9 @@ final class AppModel {
     // MARK: - Metadata Write-back
 
     private func reportMetadataForStuckAgents() async {
+        // Metadata write-back is a WRITE; respect the capability gate so an
+        // incompatible/unverified protocol never receives writes.
+        guard adapter.health().writesEnabled else { return }
         let stuckAgents = store.agents.values.filter {
             $0.status == .blocked || $0.status == .working
         }

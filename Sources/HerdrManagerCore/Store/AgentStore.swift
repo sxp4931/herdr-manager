@@ -136,6 +136,25 @@ public final class AgentStore {
         }
     }
 
+    /// Apply persisted dwell timestamps back onto the live agents after a
+    /// relaunch so displayed and diagnosed dwell time is not reset. Only
+    /// entries the DwellTracker validated (occupant fingerprint + seq match)
+    /// should be passed in. Restored timestamps are applied only when earlier
+    /// than the current value (dwell is never moved forward).
+    public func applyRestoredDwell(_ restored: [AgentID: DwellEntry]) {
+        for (agentId, entry) in restored {
+            guard var agent = agents[agentId] else { continue }
+            if entry.enteredAt < agent.enteredAt {
+                agent.enteredAt = entry.enteredAt
+            }
+            if let restoredOutput = entry.lastOutputAt,
+               restoredOutput > (agent.lastOutputAt ?? .distantPast) {
+                agent.lastOutputAt = restoredOutput
+            }
+            agents[agentId] = agent
+        }
+    }
+
     // MARK: - Computed Properties
 
     public var attentionAgents: [Agent] {
@@ -194,7 +213,12 @@ public final class AgentStore {
                 // SettingsStore keys overrides by pane-id (the herdr session
                 // identity). `agent.id.raw` is the full "wX:pY" form; the
                 // pane component is what the UI persists.
-                let minutes = await settings.threshold(for: agent.id.raw)
+                // Look up by occupant identity first (follows the agent across
+                // panes), falling back to the pane-id key, then the default.
+                let minutes = await settings.threshold(
+                    for: agent.id.raw,
+                    occupant: DwellTracker.fingerprint(for: agent)
+                )
                 map[agent.id.raw] = TimeInterval(minutes) * 60.0
             }
             thresholds = map

@@ -160,13 +160,14 @@ public final class DwellTracker: @unchecked Sendable {
     ///
     /// - Parameter currentAgents: The live agent map to validate against.
     ///   Typically `AgentStore.agents` at the time of restore.
-    /// - Returns: The number of entries restored (for logging / tests).
+    /// - Returns: The restored entries keyed by agent id, so callers can apply
+    ///   the persisted dwell timestamps back onto the live agents.
     @discardableResult
-    public func load(currentAgents: [AgentID: Agent]) -> Int {
+    public func load(currentAgents: [AgentID: Agent]) -> [AgentID: DwellEntry] {
         guard FileManager.default.fileExists(atPath: fileURL.path),
               let data = FileManager.default.contents(atPath: fileURL.path),
               let persisted = try? JSONDecoder().decode(PersistedDwellState.self, from: data)
-        else { return 0 }
+        else { return [:] }
 
         var restored: [AgentID: DwellEntry] = [:]
         for item in persisted.entries {
@@ -191,7 +192,7 @@ public final class DwellTracker: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         entries = restored
-        return restored.count
+        return restored
     }
 
     /// Derive a stable occupant fingerprint from an Agent. Uses the kind's

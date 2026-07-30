@@ -22,6 +22,12 @@ public enum NDJSONClientError: Error, Sendable {
 
 public final class NDJSONClient: @unchecked Sendable {
     private let socketPath: String
+    /// Socket-level send/receive timeout in seconds. `0` disables the timeout
+    /// (used by the dedicated subscription client, whose event stream is
+    /// push-based and legitimately blocks between events). A positive value
+    /// sets `SO_RCVTIMEO`/`SO_SNDTIMEO` so a stalled herdr surfaces as
+    /// `.timeout` instead of blocking the caller forever.
+    private let ioTimeoutSeconds: Int
     nonisolated(unsafe) private var fd: Int32 = -1
     private let lock = NSLock()
     // Serializes whole request/response transactions so two concurrent `send`
@@ -34,8 +40,9 @@ public final class NDJSONClient: @unchecked Sendable {
     nonisolated(unsafe) private var readBuffer = Data()
     nonisolated(unsafe) private var isConnected = false
 
-    public init(socketPath: String) {
+    public init(socketPath: String, ioTimeoutSeconds: Int = 30) {
         self.socketPath = socketPath
+        self.ioTimeoutSeconds = ioTimeoutSeconds
     }
 
     deinit {
@@ -86,6 +93,15 @@ public final class NDJSONClient: @unchecked Sendable {
         fd = s
         isConnected = true
         readBuffer = Data()
+
+        // Socket-level I/O timeout so a stalled herdr cannot block forever.
+        // A timed-out read/write returns EAGAIN/EWOULDBLOCK, mapped to
+        // `.timeout` in readLine/writeData below.
+        if ioTimeoutSeconds > 0 {
+            var tv = timeval(tv_sec: Int(ioTimeoutSeconds), tv_usec: Int32(0))
+            _ = setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            _ = setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        }
     }
 
     public func closeSocket() {
@@ -121,7 +137,7 @@ public final class NDJSONClient: @unchecked Sendable {
         defer { txLock.unlock() }
         do {
             return try sendOnce(method: method, params: params)
-        } catch NDJSONClientError.sendFailed, NDJSONClientError.connectionClosed, NDJSONClientError.readFailed {
+        } catch NDJSONClientError.sendFailed, NDJSONClientError.connectionClosed, NDJSONClientError.readFailed, NDJSONClientError.timeout {
             // herdr closes the connection after each response (one-shot protocol).
             // Reconnect and retry once — safe for idempotent reads.
             closeSocket()
@@ -193,7 +209,12 @@ public final class NDJSONClient: @unchecked Sendable {
 
     public func subscribe(subscriptions: [String]) -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
-            Task {
+            // Run the long-lived blocking read loop on a DEDICATED thread, not
+            // the cooperative pool — an event stream blocks between events by
+            // design, and parking that on a pool thread would starve Swift
+            // concurrency. The subscription client uses ioTimeoutSeconds == 0
+            // so these reads block until herdr pushes (no spurious timeouts).
+            let thread = Thread {
                 do {
                     let params: [String: Any] = [
                         "subscriptions": subscriptions.map { ["type": $0] }
@@ -210,6 +231,8 @@ public final class NDJSONClient: @unchecked Sendable {
                     continuation.finish(throwing: error)
                 }
             }
+            thread.name = "herdr-subscribe"
+            thread.start()
         }
     }
 
@@ -231,6 +254,9 @@ public final class NDJSONClient: @unchecked Sendable {
             while sent < total {
                 let n = Darwin.write(currentFd, base.advanced(by: sent), total - sent)
                 if n < 0 {
+                    if errno == EAGAIN || errno == EWOULDBLOCK {
+                        throw NDJSONClientError.timeout
+                    }
                     throw NDJSONClientError.sendFailed(errno)
                 }
                 sent += n
@@ -269,6 +295,9 @@ public final class NDJSONClient: @unchecked Sendable {
                 throw NDJSONClientError.connectionClosed
             }
             if n < 0 {
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    throw NDJSONClientError.timeout
+                }
                 throw NDJSONClientError.readFailed(errno)
             }
             
