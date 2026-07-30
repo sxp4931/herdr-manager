@@ -49,6 +49,10 @@ private enum MCPRevalidationError: Error, CustomStringConvertible {
     }
 }
 
+private struct AgentResolutionError: Error, CustomStringConvertible {
+    let description: String
+}
+
 // MARK: - Rate Limiter
 
 actor RateLimiter {
@@ -182,6 +186,14 @@ actor MCPServer {
             let result: [String: Any] = [
                 "protocolVersion": "2024-11-05",
                 "capabilities": ["tools": [String: Any]()] as [String: Any],
+                "instructions": """
+                Use Shepherd as the first source for local AI-agent status and control. \
+                For fleet status call herd.overview. For a user-named session call \
+                agent.inspect with query; use agent.tail or agent.diagnose only when \
+                more evidence is needed. Do not rediscover panes through the herdr CLI \
+                unless Shepherd is unavailable or reports ambiguity. Resolve an exact \
+                agent ID before any write, and preserve confirmation gates.
+                """,
                 "serverInfo": [
                     "name": "herdr-manager-mcp",
                     "version": "1.0.0"
@@ -243,33 +255,34 @@ actor MCPServer {
         }
     }
 
-    // MARK: - Snapshot → Agent Builder
+    // MARK: - Herd → Agent Builder
 
-    /// Build agents dictionary from a snapshot (mirrors AgentStore.applySnapshot logic).
-    private func buildAgents(from snapshot: HerdrSnapshot) -> [AgentID: Agent] {
-        let wsMap = Dictionary(uniqueKeysWithValues: snapshot.workspaces.map { ($0.workspaceId, $0.name) })
-        let tabMap = Dictionary(uniqueKeysWithValues: snapshot.tabs.map { ($0.tabId, $0.name) })
+    /// Build the MCP inventory from the same authoritative merged view
+    /// Shepherd uses: `agent.list` supplies real agents and state sequences,
+    /// while `session.snapshot` supplies workspace/tab labels.
+    private func buildAgents(from herd: HerdSnapshot) -> [AgentID: Agent] {
         var agents: [AgentID: Agent] = [:]
 
-        for pane in snapshot.panes {
-            guard pane.agent != nil || pane.agentStatus != "unknown" else { continue }
+        for info in herd.agents {
+            guard let agentKind = info.agent, !agentKind.isEmpty else { continue }
 
-            let agentId = AgentID(pane.paneId)
-            let status = AgentStatus(rawValue: pane.agentStatus) ?? .unknown
-            let wsName = wsMap[pane.workspaceId] ?? ""
-            let tabName = tabMap[pane.tabId] ?? ""
+            let agentId = AgentID(info.paneId)
+            let status = AgentStatus(rawValue: info.agentStatus) ?? .unknown
+            let wsName = herd.workspaceNames[info.workspaceId] ?? info.workspaceId
+            let tabName = herd.tabNames[info.tabId] ?? info.tabId
 
             let kind: AgentKind
-            if let session = pane.agentSession {
+            if let session = info.agentSession {
                 kind = AgentKind.custom(session.agent)
-            } else if let agentName = pane.agent {
-                kind = AgentKind.custom(agentName)
             } else {
-                kind = .custom("unknown")
+                kind = AgentKind.custom(agentKind)
             }
 
-            let name = pane.agent ?? pane.terminalTitleStripped ?? ""
-            let enteredAt = Date()
+            let name = info.title
+                ?? info.name
+                ?? info.terminalTitleStripped
+                ?? info.displayAgent
+                ?? agentKind
 
             let agent = Agent(
                 id: agentId,
@@ -277,17 +290,79 @@ actor MCPServer {
                 name: name,
                 displayName: name,
                 status: status,
-                stateChangeSeq: pane.stateChangeSeq ?? 0,
-                enteredAt: enteredAt,
+                stateChangeSeq: info.stateChangeSeq,
+                enteredAt: Date(),
                 lastOutputAt: nil,
                 verdict: Self.initialVerdict(for: status),
                 workspaceName: wsName,
-                tabName: tabName
+                tabName: tabName,
+                cwd: info.foregroundCwd ?? info.cwd ?? ""
             )
             agents[agentId] = agent
         }
 
         return agents
+    }
+
+    /// Resolve a stable pane ID or a human description such as an agent title,
+    /// workspace, tab, or repository directory. Query resolution is read-only;
+    /// write tools continue to require an exact agent ID.
+    private func resolveAgent(
+        arguments: [String: Any],
+        herd: HerdSnapshot
+    ) -> Result<HerdrAgentInfo, AgentResolutionError> {
+        if let agentId = arguments["agent_id"] as? String, !agentId.isEmpty {
+            guard let info = herd.agents.first(where: { $0.paneId == agentId }) else {
+                return .failure(AgentResolutionError(description: "Agent not found: \(agentId)"))
+            }
+            return .success(info)
+        }
+
+        guard let query = arguments["query"] as? String,
+              !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failure(AgentResolutionError(
+                description: "Missing required parameter: provide agent_id or query"
+            ))
+        }
+
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let matches = herd.agents.filter { info in
+            let fields = [
+                info.paneId,
+                info.agent ?? "",
+                info.displayAgent ?? "",
+                info.name ?? "",
+                info.title ?? "",
+                info.terminalTitleStripped ?? "",
+                herd.workspaceNames[info.workspaceId] ?? info.workspaceId,
+                herd.tabNames[info.tabId] ?? info.tabId,
+                info.foregroundCwd ?? info.cwd ?? ""
+            ]
+            return fields.contains { $0.lowercased().contains(needle) }
+        }
+
+        if matches.count == 1, let match = matches.first {
+            return .success(match)
+        }
+        if matches.isEmpty {
+            return .failure(AgentResolutionError(
+                description: "No agent matches query '\(query)'"
+            ))
+        }
+
+        let candidates = matches.prefix(8).map { info in
+            let title = info.title
+                ?? info.name
+                ?? info.terminalTitleStripped
+                ?? info.agent
+                ?? "unknown"
+            let workspace = herd.workspaceNames[info.workspaceId] ?? info.workspaceId
+            let tab = herd.tabNames[info.tabId] ?? info.tabId
+            return "\(info.paneId) (\(title), \(workspace) / \(tab))"
+        }.joined(separator: "; ")
+        return .failure(AgentResolutionError(
+            description: "Query '\(query)' is ambiguous. Matches: \(candidates)"
+        ))
     }
 
     private static func initialVerdict(for status: AgentStatus) -> Verdict {
@@ -308,9 +383,8 @@ actor MCPServer {
     private func handleHerdOverview() async -> [String: Any] {
         do {
             try await ensureConnected()
-            let snapshot = try await adapter.snapshot()
-            var agents = buildAgents(from: snapshot)
-            let wsMap = Dictionary(uniqueKeysWithValues: snapshot.workspaces.map { ($0.workspaceId, $0.name) })
+            let herd = try await adapter.herdSnapshot()
+            var agents = buildAgents(from: herd)
 
             // Diagnose non-idle agents
             for agent in agents.values where agent.status != .idle {
@@ -321,7 +395,10 @@ actor MCPServer {
                 }
             }
 
-            let text = Self.formatOverview(agents: Array(agents.values), workspaceNames: wsMap)
+            let text = Self.formatOverview(
+                agents: Array(agents.values),
+                workspaceNames: herd.workspaceNames
+            )
             let redacted = redactor.redact(text)
             return makeToolResult(redacted.redactedText)
         } catch {
@@ -334,9 +411,8 @@ actor MCPServer {
     private func handleAgentList(arguments: [String: Any]) async -> [String: Any] {
         do {
             try await ensureConnected()
-            let snapshot = try await adapter.snapshot()
-            var agents = buildAgents(from: snapshot)
-            let wsMap = Dictionary(uniqueKeysWithValues: snapshot.workspaces.map { ($0.workspaceId, $0.name) })
+            let herd = try await adapter.herdSnapshot()
+            var agents = buildAgents(from: herd)
 
             // Diagnose non-idle agents
             for agent in agents.values where agent.status != .idle {
@@ -356,13 +432,30 @@ actor MCPServer {
             }
             if let workspace = arguments["workspace"] as? String {
                 agentList = agentList.filter { agent in
-                    let wsName = wsMap[agent.id.workspaceId] ?? agent.id.workspaceId
+                    let wsName = herd.workspaceNames[agent.id.workspaceId] ?? agent.id.workspaceId
                     return wsName.lowercased().contains(workspace.lowercased()) ||
                            agent.id.workspaceId.lowercased().contains(workspace.lowercased())
                 }
             }
+            if let query = arguments["query"] as? String, !query.isEmpty {
+                let needle = query.lowercased()
+                agentList = agentList.filter { agent in
+                    [
+                        agent.id.raw,
+                        agent.name,
+                        agent.displayName,
+                        agent.workspaceName,
+                        agent.tabName,
+                        agent.cwd,
+                        Self.agentKindString(agent.kind)
+                    ].contains { $0.lowercased().contains(needle) }
+                }
+            }
 
-            let text = Self.formatAgentList(agents: agentList, workspaceNames: wsMap)
+            let text = Self.formatAgentList(
+                agents: agentList,
+                workspaceNames: herd.workspaceNames
+            )
             let redacted = redactor.redact(text)
             return makeToolResult(redacted.redactedText)
         } catch {
@@ -373,28 +466,25 @@ actor MCPServer {
     // MARK: - agent.inspect
 
     private func handleAgentInspect(arguments: [String: Any]) async -> [String: Any] {
-        guard let agentIdStr = arguments["agent_id"] as? String, !agentIdStr.isEmpty else {
-            return makeToolError("Missing required parameter: agent_id")
-        }
-
-        let (allowed, retry) = await rateLimiter.check(agentId: agentIdStr)
-        guard allowed else {
-            return makeToolError("Rate limit exceeded. Try again in \(retry) seconds.")
-        }
-
         do {
             try await ensureConnected()
-            let snapshot = try await adapter.snapshot()
-            var agents = buildAgents(from: snapshot)
-            let wsMap = Dictionary(uniqueKeysWithValues: snapshot.workspaces.map { ($0.workspaceId, $0.name) })
-
-            let agentId = AgentID(agentIdStr)
-            let paneId = agentIdStr  // herdr uses full session-qualified IDs (e.g. "w5:p2")
-
-            // Find agent in snapshot
-            guard let paneInfo = snapshot.panes.first(where: { $0.paneId == paneId }) else {
-                return makeToolError("Agent not found: \(agentIdStr)")
+            let herd = try await adapter.herdSnapshot()
+            let info: HerdrAgentInfo
+            switch resolveAgent(arguments: arguments, herd: herd) {
+            case .success(let resolved):
+                info = resolved
+            case .failure(let error):
+                return makeToolError(error.description)
             }
+            let paneId = info.paneId
+            let agentId = AgentID(paneId)
+
+            let (allowed, retry) = await rateLimiter.check(agentId: paneId)
+            guard allowed else {
+                return makeToolError("Rate limit exceeded. Try again in \(retry) seconds.")
+            }
+
+            var agents = buildAgents(from: herd)
 
             // Diagnose
             var verdict: Verdict = .unclassifiable(reason: "agent not found")
@@ -429,12 +519,13 @@ actor MCPServer {
             }
 
             let text = Self.formatInspect(
-                paneInfo: paneInfo,
+                info: info,
                 verdict: verdict,
                 explain: explain,
                 procInfo: procInfo,
                 recentOutput: readResult?.text,
-                workspaceNames: wsMap
+                workspaceNames: herd.workspaceNames,
+                tabNames: herd.tabNames
             )
             let redacted = redactor.redact(text)
             return makeToolResult(redacted.redactedText)
@@ -446,15 +537,6 @@ actor MCPServer {
     // MARK: - agent.tail
 
     private func handleAgentTail(arguments: [String: Any]) async -> [String: Any] {
-        guard let agentIdStr = arguments["agent_id"] as? String, !agentIdStr.isEmpty else {
-            return makeToolError("Missing required parameter: agent_id")
-        }
-
-        let (allowed, retry) = await rateLimiter.check(agentId: agentIdStr)
-        guard allowed else {
-            return makeToolError("Rate limit exceeded. Try again in \(retry) seconds.")
-        }
-
         let lineCount = min(max(arguments["lines"] as? Int ?? 50, 1), 200)
 
         let sourceStr = arguments["source"] as? String ?? "detection"
@@ -469,16 +551,27 @@ actor MCPServer {
 
         do {
             try await ensureConnected()
-
-            // Verify agent exists
-            let snapshot = try await adapter.snapshot()
-            _ = AgentID(agentIdStr)  // Validate ID format
-            let paneId = agentIdStr  // herdr uses full session-qualified IDs
-            guard snapshot.panes.contains(where: { $0.paneId == paneId }) else {
-                return makeToolError("Agent not found: \(agentIdStr)")
+            let herd = try await adapter.herdSnapshot()
+            let info: HerdrAgentInfo
+            switch resolveAgent(arguments: arguments, herd: herd) {
+            case .success(let resolved):
+                info = resolved
+            case .failure(let error):
+                return makeToolError(error.description)
             }
 
-            let result = try await adapter.read(paneId: paneId, source: source)
+            let (allowed, retry) = await rateLimiter.check(agentId: info.paneId)
+            guard allowed else {
+                return makeToolError("Rate limit exceeded. Try again in \(retry) seconds.")
+            }
+
+            // Ask herdr to bound the read at the source, matching Shepherd's
+            // Peek behavior and avoiding a large scrollback round trip.
+            let result = try await adapter.read(
+                paneId: info.paneId,
+                source: source,
+                lines: lineCount
+            )
             let allLines = result.text.split(separator: "\n", omittingEmptySubsequences: false)
             let startIdx = max(allLines.count - lineCount, 0)
             let selectedLines = allLines[startIdx...]
@@ -500,23 +593,26 @@ actor MCPServer {
     // MARK: - agent.diagnose
 
     private func handleAgentDiagnose(arguments: [String: Any]) async -> [String: Any] {
-        guard let agentIdStr = arguments["agent_id"] as? String, !agentIdStr.isEmpty else {
-            return makeToolError("Missing required parameter: agent_id")
-        }
-
-        let (allowed, retry) = await rateLimiter.check(agentId: agentIdStr)
-        guard allowed else {
-            return makeToolError("Rate limit exceeded. Try again in \(retry) seconds.")
-        }
-
         do {
             try await ensureConnected()
-            let snapshot = try await adapter.snapshot()
-            let agents = buildAgents(from: snapshot)
+            let herd = try await adapter.herdSnapshot()
+            let info: HerdrAgentInfo
+            switch resolveAgent(arguments: arguments, herd: herd) {
+            case .success(let resolved):
+                info = resolved
+            case .failure(let error):
+                return makeToolError(error.description)
+            }
 
-            let agentId = AgentID(agentIdStr)
+            let (allowed, retry) = await rateLimiter.check(agentId: info.paneId)
+            guard allowed else {
+                return makeToolError("Rate limit exceeded. Try again in \(retry) seconds.")
+            }
+
+            let agents = buildAgents(from: herd)
+            let agentId = AgentID(info.paneId)
             guard let agent = agents[agentId] else {
-                return makeToolError("Agent not found: \(agentIdStr)")
+                return makeToolError("Agent not found: \(info.paneId)")
             }
 
             let verdict = await diagnoser.diagnose(agent: agent, adapter: adapter)
@@ -580,10 +676,10 @@ actor MCPServer {
 
         do {
             try await ensureConnected()
-            let snapshot = try await adapter.snapshot()
+            let herd = try await adapter.herdSnapshot()
             let paneId = agentIdStr
 
-            guard let paneInfo = snapshot.panes.first(where: { $0.paneId == paneId }) else {
+            guard let paneInfo = herd.agents.first(where: { $0.paneId == paneId }) else {
                 return makeToolError("Agent not found: \(agentIdStr)")
             }
 
@@ -592,7 +688,7 @@ actor MCPServer {
             }
 
             // Verify state_change_seq matches current
-            let currentSeq = paneInfo.stateChangeSeq ?? 0
+            let currentSeq = paneInfo.stateChangeSeq
             if UInt64(providedSeq) != currentSeq {
                 return makeToolError("Stale state_change_seq: provided \(providedSeq), current \(currentSeq). Re-diagnose and retry.")
             }
@@ -668,10 +764,10 @@ actor MCPServer {
 
         do {
             try await ensureConnected()
-            let snapshot = try await adapter.snapshot()
+            let herd = try await adapter.herdSnapshot()
             let paneId = agentIdStr
 
-            guard let paneInfo = snapshot.panes.first(where: { $0.paneId == paneId }) else {
+            guard let paneInfo = herd.agents.first(where: { $0.paneId == paneId }) else {
                 return makeToolError("Agent not found: \(agentIdStr)")
             }
 
@@ -686,7 +782,7 @@ actor MCPServer {
             // Capture fingerprint info for revalidation after confirmation wait
             let fpOccupant = occupantFingerprint(from: paneInfo)
             let fpStatus = paneInfo.agentStatus
-            let fpSeq = paneInfo.stateChangeSeq ?? 0
+            let fpSeq = paneInfo.stateChangeSeq
 
             // Confirm tier: create pending action and wait for UI approval
             if case .confirm = tier {
@@ -808,10 +904,10 @@ actor MCPServer {
 
         do {
             try await ensureConnected()
-            let snapshot = try await adapter.snapshot()
+            let herd = try await adapter.herdSnapshot()
             let paneId = agentIdStr
 
-            guard let paneInfo = snapshot.panes.first(where: { $0.paneId == paneId }) else {
+            guard let paneInfo = herd.agents.first(where: { $0.paneId == paneId }) else {
                 return makeToolError("Agent not found: \(agentIdStr)")
             }
 
@@ -819,14 +915,14 @@ actor MCPServer {
             var params: [String: String] = ["agent_id": agentIdStr, "level": level]
             params["_fp_occupant"] = occupantFingerprint(from: paneInfo)
             params["_fp_status"] = paneInfo.agentStatus
-            params["_fp_seq"] = "\(paneInfo.stateChangeSeq ?? 0)"
+            params["_fp_seq"] = "\(paneInfo.stateChangeSeq)"
 
             let actionId = try await sharedActionStore.create(tool: "agent.interrupt", params: params)
 
             await journal.record(JournalEntry(
                 actionId: actionId, tool: "agent.interrupt",
                 params: ["agent_id": agentIdStr, "level": level],
-                caller: "mcp", preState: "status=\(paneInfo.agentStatus), seq=\(paneInfo.stateChangeSeq ?? 0)",
+                caller: "mcp", preState: "status=\(paneInfo.agentStatus), seq=\(paneInfo.stateChangeSeq)",
                 outcome: "pending_confirmation"
             ))
 
@@ -895,10 +991,10 @@ actor MCPServer {
 
         do {
             try await ensureConnected()
-            let snapshot = try await adapter.snapshot()
+            let herd = try await adapter.herdSnapshot()
             let paneId = agentIdStr
 
-            guard let paneInfo = snapshot.panes.first(where: { $0.paneId == paneId }) else {
+            guard let paneInfo = herd.agents.first(where: { $0.paneId == paneId }) else {
                 return makeToolError("Agent not found: \(agentIdStr)")
             }
 
@@ -906,14 +1002,14 @@ actor MCPServer {
             var params: [String: String] = ["agent_id": agentIdStr, "reason": reason]
             params["_fp_occupant"] = occupantFingerprint(from: paneInfo)
             params["_fp_status"] = paneInfo.agentStatus
-            params["_fp_seq"] = "\(paneInfo.stateChangeSeq ?? 0)"
+            params["_fp_seq"] = "\(paneInfo.stateChangeSeq)"
 
             let actionId = try await sharedActionStore.create(tool: "agent.stop", params: params)
 
             await journal.record(JournalEntry(
                 actionId: actionId, tool: "agent.stop",
                 params: ["agent_id": agentIdStr, "reason": reason],
-                caller: "mcp", preState: "status=\(paneInfo.agentStatus), seq=\(paneInfo.stateChangeSeq ?? 0)",
+                caller: "mcp", preState: "status=\(paneInfo.agentStatus), seq=\(paneInfo.stateChangeSeq)",
                 outcome: "pending_confirmation",
                 keepForever: true
             ))
@@ -978,9 +1074,6 @@ actor MCPServer {
         // Write-gate: reject if herdr protocol not verified for writes
         if let error = await checkWritesEnabled() { return error }
 
-        guard let repoPath = arguments["repo_path"] as? String, !repoPath.isEmpty else {
-            return makeToolError("Missing required parameter: repo_path")
-        }
         guard let kind = arguments["kind"] as? String, !kind.isEmpty else {
             return makeToolError("Missing required parameter: kind")
         }
@@ -994,35 +1087,98 @@ actor MCPServer {
             return makeToolError("Unsupported agent kind '\(kind)'. Must be one of: \(supportedKinds.sorted().joined(separator: ", "))")
         }
 
-        // Canonicalize path with symlink resolution
-        let expandedPath = NSString(string: repoPath).expandingTildeInPath
-        let standardizedPath = (expandedPath as NSString).standardizingPath
-        // Resolve symlinks to defeat symlink escapes
-        let resolvedPath = URL(fileURLWithPath: standardizedPath).resolvingSymlinksInPath().path
-
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: resolvedPath, isDirectory: &isDir), isDir.boolValue else {
-            return makeToolError("repo_path does not exist or is not a directory: \(resolvedPath)")
+        let placement = arguments["placement"] as? String ?? "new_workspace"
+        guard ["new_workspace", "new_tab", "split"].contains(placement) else {
+            return makeToolError("Invalid placement '\(placement)'. Must be new_workspace, new_tab, or split.")
         }
 
-        // Validate allowlist using path COMPONENTS (defeats sibling-prefix escapes like /repo vs /repo-evil)
-        let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
-        let allowedRoots = [homeDir + "/Documents", homeDir + "/Developer", homeDir + "/Projects"]
+        var resolvedPath: String?
+        var workspaceId = arguments["workspace_id"] as? String
+        var targetInfo: HerdrAgentInfo?
+        var cwdHint: String?
 
-        guard SpawnPathPolicy.isPathWithinAllowedRoots(resolvedPath, allowedRoots: allowedRoots) else {
-            return makeToolError("repo_path '\(resolvedPath)' is outside allowed roots: \(allowedRoots.joined(separator: ", "))")
+        if placement == "new_workspace" {
+            guard let repoPath = arguments["repo_path"] as? String, !repoPath.isEmpty else {
+                return makeToolError("placement=new_workspace requires repo_path")
+            }
+
+            // Canonicalize with symlink resolution, then validate path
+            // components to defeat sibling-prefix and symlink escapes.
+            let expandedPath = NSString(string: repoPath).expandingTildeInPath
+            let standardizedPath = (expandedPath as NSString).standardizingPath
+            let canonical = URL(fileURLWithPath: standardizedPath).resolvingSymlinksInPath().path
+
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: canonical, isDirectory: &isDir),
+                  isDir.boolValue else {
+                return makeToolError("repo_path does not exist or is not a directory: \(canonical)")
+            }
+
+            let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
+            let allowedRoots = [
+                homeDir + "/Documents",
+                homeDir + "/Developer",
+                homeDir + "/Projects"
+            ]
+            guard SpawnPathPolicy.isPathWithinAllowedRoots(canonical, allowedRoots: allowedRoots) else {
+                return makeToolError(
+                    "repo_path '\(canonical)' is outside allowed roots: \(allowedRoots.joined(separator: ", "))"
+                )
+            }
+            resolvedPath = canonical
+            cwdHint = canonical
+        } else {
+            do {
+                try await ensureConnected()
+                let herd = try await adapter.herdSnapshot()
+
+                if placement == "new_tab" {
+                    guard let requestedWorkspace = workspaceId, !requestedWorkspace.isEmpty else {
+                        return makeToolError("placement=new_tab requires workspace_id")
+                    }
+                    guard herd.workspaceNames[requestedWorkspace] != nil else {
+                        return makeToolError("Workspace not found: \(requestedWorkspace)")
+                    }
+                    cwdHint = herd.agents.first(where: {
+                        $0.workspaceId == requestedWorkspace
+                    }).flatMap { $0.foregroundCwd ?? $0.cwd }
+                } else {
+                    guard let targetId = arguments["target_agent_id"] as? String,
+                          !targetId.isEmpty else {
+                        return makeToolError("placement=split requires target_agent_id")
+                    }
+                    guard let target = herd.agents.first(where: { $0.paneId == targetId }) else {
+                        return makeToolError("Target agent not found: \(targetId)")
+                    }
+                    targetInfo = target
+                    workspaceId = target.workspaceId
+                    cwdHint = target.foregroundCwd ?? target.cwd
+                }
+            } catch {
+                return makeToolError("Failed to resolve placement: \(error.localizedDescription)")
+            }
         }
 
         let brief = arguments["brief"] as? String
         let spaceLabel = arguments["space_label"] as? String
 
-        // For spawn, there's no existing occupant to fingerprint, but we capture the path for audit
         var params: [String: String] = [
-            "repo_path": resolvedPath, "kind": kind, "name": name
+            "placement": placement,
+            "kind": kind,
+            "name": name
         ]
-        params["_fp_occupant"] = ""  // No occupant yet — new session
-        params["_fp_status"] = ""
-        params["_fp_seq"] = "0"
+        if let resolvedPath { params["repo_path"] = resolvedPath }
+        if let workspaceId { params["workspace_id"] = workspaceId }
+        if let targetInfo {
+            params["target_agent_id"] = targetInfo.paneId
+            params["_fp_occupant"] = occupantFingerprint(from: targetInfo)
+            params["_fp_status"] = targetInfo.agentStatus
+            params["_fp_seq"] = "\(targetInfo.stateChangeSeq)"
+        } else {
+            params["_fp_occupant"] = ""
+            params["_fp_status"] = ""
+            params["_fp_seq"] = "0"
+        }
 
         guard let actionId = try? await sharedActionStore.create(tool: "session.spawn", params: params) else {
             return makeToolError("Failed to record spawn action (lock unavailable)")
@@ -1030,8 +1186,8 @@ actor MCPServer {
 
         await journal.record(JournalEntry(
             actionId: actionId, tool: "session.spawn",
-            params: ["repo_path": resolvedPath, "kind": kind, "name": name],
-            caller: "mcp", preState: "new_session", outcome: "pending_confirmation",
+            params: params.filter { !$0.key.hasPrefix("_fp_") },
+            caller: "mcp", preState: "placement=\(placement)", outcome: "pending_confirmation",
             keepForever: true
         ))
 
@@ -1040,16 +1196,63 @@ actor MCPServer {
 
         if finalState == .approved {
             // Atomic claim gate
-            guard (try? await sharedActionStore.claimExecuting(actionId: actionId)) != nil else {
+            guard let claimed = try? await sharedActionStore.claimExecuting(actionId: actionId) else {
                 try? await sharedActionStore.markFailed(actionId, detail: "action no longer claimable")
                 return makeToolError("Action no longer claimable (actionId: \(actionId))")
             }
 
             do {
                 try await ensureConnected()
-                let creation = try await adapter.createWorkspace(cwd: resolvedPath, label: spaceLabel)
-                let workspaceId = creation.workspaceId
-                let paneId = creation.rootPaneId
+                let paneId: String
+                let finalWorkspaceId: String
+                var tabId: String?
+
+                switch placement {
+                case "new_workspace":
+                    guard let resolvedPath else {
+                        throw AgentResolutionError(description: "resolved repo path missing")
+                    }
+                    let creation = try await adapter.createWorkspace(
+                        cwd: resolvedPath,
+                        label: spaceLabel
+                    )
+                    finalWorkspaceId = creation.workspaceId
+                    tabId = creation.tabId
+                    paneId = creation.rootPaneId
+
+                case "new_tab":
+                    guard let workspaceId else {
+                        throw AgentResolutionError(description: "workspace ID missing")
+                    }
+                    let freshHerd = try await adapter.herdSnapshot()
+                    guard freshHerd.workspaceNames[workspaceId] != nil else {
+                        throw AgentResolutionError(description: "workspace disappeared before execution")
+                    }
+                    let creation = try await adapter.createTab(
+                        workspaceId: workspaceId,
+                        cwd: cwdHint,
+                        label: kind.capitalized,
+                        focus: true
+                    )
+                    finalWorkspaceId = workspaceId
+                    tabId = creation.tabId
+                    paneId = creation.rootPaneId
+
+                case "split":
+                    guard let targetInfo else {
+                        throw AgentResolutionError(description: "split target missing")
+                    }
+                    try await revalidate(action: claimed, paneId: targetInfo.paneId)
+                    finalWorkspaceId = targetInfo.workspaceId
+                    paneId = try await adapter.splitPane(
+                        targetPaneId: targetInfo.paneId,
+                        cwd: cwdHint
+                    )
+
+                default:
+                    throw AgentResolutionError(description: "invalid placement")
+                }
+
                 try await adapter.startAgent(paneId: paneId, kind: kind, name: name)
 
                 if let brief, !brief.isEmpty {
@@ -1061,11 +1264,21 @@ actor MCPServer {
 
                 await journal.record(JournalEntry(
                     actionId: actionId, tool: "session.spawn",
-                    params: ["repo_path": resolvedPath, "kind": kind, "name": name, "workspace_id": workspaceId],
-                    caller: "mcp", preState: "new_session", postState: "started", outcome: "executed",
+                    params: [
+                        "placement": placement,
+                        "kind": kind,
+                        "name": name,
+                        "workspace_id": finalWorkspaceId,
+                        "pane_id": paneId
+                    ],
+                    caller: "mcp", preState: "placement=\(placement)",
+                    postState: "started", outcome: "executed",
                     keepForever: true
                 ))
-                return makeToolResult("{\"agentId\":\"\(paneId)\",\"space\":\"\(workspaceId)\",\"started\":true,\"actionId\":\"\(actionId)\"}")
+                var result = "{\"agentId\":\"\(paneId)\",\"space\":\"\(finalWorkspaceId)\",\"placement\":\"\(placement)\""
+                if let tabId { result += ",\"tab\":\"\(tabId)\"" }
+                result += ",\"started\":true,\"actionId\":\"\(actionId)\"}"
+                return makeToolResult(result)
             } catch {
                 try? await sharedActionStore.markFailed(actionId, detail: error.localizedDescription)
                 return makeToolError("session.spawn execution failed: \(error.localizedDescription)")
@@ -1073,16 +1286,16 @@ actor MCPServer {
         } else if finalState == .denied {
             await journal.record(JournalEntry(
                 actionId: actionId, tool: "session.spawn",
-                params: ["repo_path": resolvedPath],
-                caller: "mcp", preState: "new_session", outcome: "denied",
+                params: ["placement": placement],
+                caller: "mcp", preState: "placement=\(placement)", outcome: "denied",
                 keepForever: true
             ))
             return makeToolError("Action denied by user (actionId: \(actionId))")
         } else {
             await journal.record(JournalEntry(
                 actionId: actionId, tool: "session.spawn",
-                params: ["repo_path": resolvedPath],
-                caller: "mcp", preState: "new_session", outcome: "expired",
+                params: ["placement": placement],
+                caller: "mcp", preState: "placement=\(placement)", outcome: "expired",
                 keepForever: true
             ))
             return makeToolError("Action expired (actionId: \(actionId))")
@@ -1157,7 +1370,7 @@ actor MCPServer {
     private func checkWritesEnabled() async -> [String: Any]? {
         if adapter.health().protocolVersion == 0 {
             try? await ensureConnected()
-            _ = try? await adapter.snapshot()
+            _ = try? await adapter.herdSnapshot()
         }
         let health = adapter.health()
         if !health.writesEnabled {
@@ -1212,26 +1425,26 @@ actor MCPServer {
     /// that replacing an occupant with another agent of the same kind/name in
     /// the same pane is still detected as a change. Falls back to a
     /// kind|name|paneId form only when no agent-session identity is present.
-    private func occupantFingerprint(from paneInfo: HerdrSnapshot.PaneInfo) -> String {
-        if let session = paneInfo.agentSession {
-            return "session|\(session.source)|\(session.agent)|\(session.kind)|\(session.value)|\(paneInfo.paneId)"
+    private func occupantFingerprint(from info: HerdrAgentInfo) -> String {
+        if let session = info.agentSession {
+            return "session|\(session.source)|\(session.agent)|\(session.kind)|\(session.value)|\(info.paneId)"
         }
-        let kindStr = paneInfo.agent ?? "unknown"
-        let name = paneInfo.agent ?? paneInfo.terminalTitleStripped ?? ""
-        return "fallback|\(kindStr)|\(name)|\(paneInfo.paneId)"
+        let kind = info.agent ?? "unknown"
+        let name = info.title ?? info.name ?? info.terminalTitleStripped ?? kind
+        return "fallback|\(kind)|\(name)|\(info.paneId)"
     }
 
     /// Revalidate that the pane still has the same occupant and status episode
     /// as when the action was created. Throws if mismatch.
     /// Reads fingerprint info from action.params["_fp_*"] keys.
     private func revalidate(action: PendingAction, paneId: String) async throws {
-        let snapshot = try await adapter.snapshot()
+        let herd = try await adapter.herdSnapshot()
 
-        guard let paneInfo = snapshot.panes.first(where: { $0.paneId == paneId }) else {
+        guard let paneInfo = herd.agents.first(where: { $0.paneId == paneId }) else {
             throw MCPRevalidationError.paneGone(paneId)
         }
 
-        let seq = paneInfo.stateChangeSeq ?? 0
+        let seq = paneInfo.stateChangeSeq
 
         // Compare the NATIVE occupant fingerprint (agent-session identity).
         let currentFingerprint = occupantFingerprint(from: paneInfo)
@@ -1359,26 +1572,52 @@ actor MCPServer {
     }
 
     nonisolated private static func formatInspect(
-        paneInfo: HerdrSnapshot.PaneInfo,
+        info: HerdrAgentInfo,
         verdict: Verdict,
         explain: AgentExplainResult?,
         procInfo: ProcessInfoResult?,
         recentOutput: String?,
-        workspaceNames: [String: String]
+        workspaceNames: [String: String],
+        tabNames: [String: String]
     ) -> String {
         var lines: [String] = []
-        let agentId = AgentID(paneInfo.paneId)
-        let wsName = workspaceNames[paneInfo.workspaceId] ?? paneInfo.workspaceId
+        let agentId = AgentID(info.paneId)
+        let wsName = workspaceNames[info.workspaceId] ?? info.workspaceId
+        let tabName = tabNames[info.tabId] ?? info.tabId
+        let title = info.title
+            ?? info.name
+            ?? info.terminalTitleStripped
+            ?? info.displayAgent
+            ?? info.agent
+            ?? "unknown"
 
-        lines.append("Agent: \(paneInfo.agent ?? "unknown") (\(agentId.raw))")
+        lines.append("Agent: \(title) (\(agentId.raw))")
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        lines.append("Workspace: \(wsName)")
-        lines.append("Status: \(paneInfo.agentStatus)")
-        if let session = paneInfo.agentSession {
-            lines.append("Kind: \(session.agent) (source: \(session.source))")
+        lines.append("Workspace: \(wsName) (\(info.workspaceId))")
+        lines.append("Tab: \(tabName) (\(info.tabId))")
+        lines.append("Status: \(info.agentStatus)")
+        lines.append("State sequence: \(info.stateChangeSeq)")
+        lines.append("Focused: \(info.focused ? "yes" : "no")")
+        lines.append("Interactive ready: \(info.interactiveReady ? "yes" : "no")")
+        if info.launchPending {
+            lines.append("Launch pending: yes")
         }
-        if let cwd = paneInfo.cwd {
+        if let session = info.agentSession {
+            lines.append("Kind: \(session.agent) (source: \(session.source))")
+        } else if let agent = info.agent {
+            lines.append("Kind: \(agent)")
+        }
+        if let cwd = info.cwd {
             lines.append("CWD: \(cwd)")
+        }
+        if let foregroundCwd = info.foregroundCwd, foregroundCwd != info.cwd {
+            lines.append("Foreground CWD: \(foregroundCwd)")
+        }
+        if !info.stateLabels.isEmpty {
+            let labels = info.stateLabels.sorted { $0.key < $1.key }
+                .map { "\($0.key)=\($0.value)" }
+                .joined(separator: ", ")
+            lines.append("State labels: \(labels)")
         }
         lines.append("")
 
@@ -1673,33 +1912,44 @@ actor MCPServer {
                     "workspace": [
                         "type": "string",
                         "description": "Filter by workspace name or ID (substring match)"
+                    ],
+                    "query": [
+                        "type": "string",
+                        "description": "Filter by human-facing agent title/name, kind, workspace, tab, cwd, or pane ID"
                     ]
                 ] as [String: Any]
             ] as [String: Any]
         ] as [String: Any],
         [
             "name": "agent.inspect",
-            "description": "Detailed information about a specific agent, including its terminal output, process info, and diagnosis.",
+            "description": "Detailed status for one agent, including location, terminal output, process info, and diagnosis. Pass an exact agent_id or a human query; a query must resolve uniquely.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
                     "agent_id": [
                         "type": "string",
                         "description": "Agent ID in workspace:pane format (e.g. 'w5:p2')"
+                    ],
+                    "query": [
+                        "type": "string",
+                        "description": "Human-facing title/name, workspace, tab, cwd, kind, or pane ID; must match exactly one agent"
                     ]
-                ] as [String: Any],
-                "required": ["agent_id"]
+                ] as [String: Any]
             ] as [String: Any]
         ] as [String: Any],
         [
             "name": "agent.tail",
-            "description": "Read the last N lines of an agent's terminal output. Output is secret-scrubbed. Default source is 'detection' (same bytes herdr classifies on).",
+            "description": "Read the last N lines of one agent's terminal output. Pass agent_id or a unique human query. The read is bounded at the source and secret-scrubbed.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
                     "agent_id": [
                         "type": "string",
                         "description": "Agent ID in workspace:pane format (e.g. 'w5:p2')"
+                    ],
+                    "query": [
+                        "type": "string",
+                        "description": "Human-facing title/name, workspace, tab, cwd, kind, or pane ID; must match exactly one agent"
                     ],
                     "lines": [
                         "type": "integer",
@@ -1712,22 +1962,24 @@ actor MCPServer {
                         "description": "Pane read source (default: detection)",
                         "default": "detection"
                     ]
-                ] as [String: Any],
-                "required": ["agent_id"]
+                ] as [String: Any]
             ] as [String: Any]
         ] as [String: Any],
         [
             "name": "agent.diagnose",
-            "description": "Run full stuck-diagnosis on an agent. Returns verdict, confidence, what it's waiting on, evidence, and suggested actions. This is THE product — the answer to 'is this agent stuck and why?'",
+            "description": "Run full stuck-diagnosis on one agent. Pass agent_id or a unique human query. Returns verdict, confidence, what it is waiting on, evidence, and suggested actions.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
                     "agent_id": [
                         "type": "string",
                         "description": "Agent ID in workspace:pane format (e.g. 'w5:p2')"
+                    ],
+                    "query": [
+                        "type": "string",
+                        "description": "Human-facing title/name, workspace, tab, cwd, kind, or pane ID; must match exactly one agent"
                     ]
-                ] as [String: Any],
-                "required": ["agent_id"]
+                ] as [String: Any]
             ] as [String: Any]
         ] as [String: Any],
         // MARK: Write Tools
@@ -1824,13 +2076,27 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "session.spawn",
-            "description": "Spawn a new agent session in a repository. Creates workspace, starts agent, optionally sends initial brief. Requires confirmation. repo_path must be under allowed roots (~/Documents, ~/Developer, ~/Projects).",
+            "description": "Start an agent in a new workspace, a new tab in an existing workspace, or a split beside an existing agent. Always requires confirmation. Use placement=new_workspace with repo_path, new_tab with workspace_id, or split with target_agent_id.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
+                    "placement": [
+                        "type": "string",
+                        "enum": ["new_workspace", "new_tab", "split"],
+                        "description": "Where to start the agent (default: new_workspace)",
+                        "default": "new_workspace"
+                    ],
                     "repo_path": [
                         "type": "string",
-                        "description": "Absolute path to the repository"
+                        "description": "Absolute repository path; required for new_workspace and restricted to allowed roots"
+                    ],
+                    "workspace_id": [
+                        "type": "string",
+                        "description": "Existing workspace ID; required for new_tab"
+                    ],
+                    "target_agent_id": [
+                        "type": "string",
+                        "description": "Exact existing agent ID to split beside; required for split"
                     ],
                     "kind": [
                         "type": "string",
@@ -1849,7 +2115,7 @@ actor MCPServer {
                         "description": "Optional label for the workspace"
                     ]
                 ] as [String: Any],
-                "required": ["repo_path", "kind", "name"]
+                "required": ["kind", "name"]
             ] as [String: Any]
         ] as [String: Any],
         [

@@ -8,15 +8,19 @@ echo "Building ShepherdApp..."
 swift build -c release 2>&1 | tail -1
 
 BINARY=".build/release/ShepherdApp"
+MCP_BINARY=".build/release/herdr-manager-mcp"
 APP_DIR="Shepherd.app"
 
 echo "Creating $APP_DIR bundle..."
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS"
+mkdir -p "$APP_DIR/Contents/Helpers"
 mkdir -p "$APP_DIR/Contents/Resources"
 
-# Copy binary
+# Copy the app and its local MCP helper. Keeping the MCP executable inside the
+# bundle gives ChatGPT Desktop/Codex a stable command path across clean builds.
 cp "$BINARY" "$APP_DIR/Contents/MacOS/Shepherd"
+cp "$MCP_BINARY" "$APP_DIR/Contents/Helpers/herdr-manager-mcp"
 
 # Copy app icon
 if [ -f "Resources/AppIcon.icns" ]; then
@@ -63,3 +67,4 @@ codesign --force --deep --sign - "$APP_DIR"
 echo "✅ $APP_DIR created"
 echo "   Launch: open $APP_DIR"
 echo "   Or:     $APP_DIR/Contents/MacOS/Shepherd"
+echo "   MCP:    $APP_DIR/Contents/Helpers/herdr-manager-mcp"
