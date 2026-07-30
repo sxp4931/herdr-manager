@@ -7,7 +7,8 @@ struct ApplicationHostResolverTests {
     func resolvesTerminalHost() {
         let processes = [
             HostProcess(pid: 473, parentPID: 1, executableName: "Terminal", isForegroundApplication: true),
-            HostProcess(pid: 609, parentPID: 473, executableName: "login", isForegroundApplication: false),
+            // macOS denies proc_name for the setuid login intermediary.
+            HostProcess(pid: 609, parentPID: 473, executableName: "", isForegroundApplication: false),
             HostProcess(pid: 637, parentPID: 609, executableName: "zsh", isForegroundApplication: false),
             HostProcess(pid: 1_947, parentPID: 637, executableName: "herdr", isForegroundApplication: false),
         ]

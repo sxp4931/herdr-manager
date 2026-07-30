@@ -11,14 +11,26 @@ enum HerdrHostActivator {
     /// process ancestry finds Terminal, iTerm, Ghostty, or an IDE terminal host
     /// without hard-coding a particular app.
     static func activate() -> Bool {
-        let processes = ProcessSnapshot.capture()
+        let applications = NSWorkspace.shared.runningApplications
+        let applicationsByPID = Dictionary(
+            applications.map { ($0.processIdentifier, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let foregroundApplicationPIDs = Set(
+            applications
+                .filter { $0.activationPolicy == .regular }
+                .map(\.processIdentifier)
+        )
+        let processes = ProcessSnapshot.capture(
+            foregroundApplicationPIDs: foregroundApplicationPIDs
+        )
         let hostPIDs = ApplicationHostResolver.applicationProcessIDs(
             hostingExecutableNamed: "herdr",
             in: processes
         )
 
         for pid in hostPIDs {
-            guard let application = NSRunningApplication(processIdentifier: pid) else {
+            guard let application = applicationsByPID[pid] else {
                 continue
             }
             if application.activate(options: [.activateAllWindows]) {
@@ -31,7 +43,7 @@ enum HerdrHostActivator {
 }
 
 private enum ProcessSnapshot {
-    static func capture() -> [HostProcess] {
+    static func capture(foregroundApplicationPIDs: Set<pid_t>) -> [HostProcess] {
         let capacity = max(Int(proc_listallpids(nil, 0)), 1)
         var pids = [pid_t](repeating: 0, count: capacity)
         let count = pids.withUnsafeMutableBytes {
@@ -43,26 +55,23 @@ private enum ProcessSnapshot {
             guard pid > 0, let parentPID = parentPID(of: pid) else { return nil }
 
             var nameBuffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-            guard proc_name(pid, &nameBuffer, UInt32(nameBuffer.count)) > 0 else {
-                return nil
-            }
-
-            let runningApplication = NSRunningApplication(processIdentifier: pid)
-            let nameBytes = nameBuffer
-                .prefix { $0 != 0 }
-                .map { UInt8(bitPattern: $0) }
+            let nameLength = proc_name(pid, &nameBuffer, UInt32(nameBuffer.count))
+            let nameBytes = nameLength > 0
+                ? nameBuffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+                : []
             return HostProcess(
                 pid: pid,
                 parentPID: parentPID,
                 executableName: String(decoding: nameBytes, as: UTF8.self),
-                isForegroundApplication: runningApplication?.activationPolicy == .regular
+                isForegroundApplication: foregroundApplicationPIDs.contains(pid)
             )
         }
     }
 
-    /// `proc_pidinfo` cannot inspect macOS's setuid `login` intermediary.
-    /// `sysctl(KERN_PROC_PID)` can, which keeps the ancestry intact between a
-    /// terminal-hosted Herdr process and Terminal.app.
+    /// `proc_name` cannot inspect macOS's setuid `login` intermediary, but
+    /// `sysctl(KERN_PROC_PID)` can still resolve its parent. Keeping that
+    /// unnamed process in the snapshot preserves the chain from Herdr to its
+    /// terminal host.
     private static func parentPID(of pid: pid_t) -> pid_t? {
         var query = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
         var process = kinfo_proc()
