@@ -403,6 +403,28 @@ struct FocusParamsTests {
     }
 }
 
+@Suite("LiveHerdrAdapter prompt submission")
+struct PromptSubmissionTests {
+
+    @Test("Nudge text uses bracketed-paste-aware pane input")
+    func textRequest() {
+        let params = LiveHerdrAdapter.promptTextParams(
+            paneId: "wE:p5", text: "Run the focused tests"
+        )
+        #expect(params["pane_id"] as? String == "wE:p5")
+        #expect(params["text"] as? String == "Run the focused tests")
+        #expect(params["target"] == nil)
+    }
+
+    @Test("Nudge submission sends Enter as a separate agent key event")
+    func enterRequest() {
+        let params = LiveHerdrAdapter.promptEnterParams(paneId: "wE:p5")
+        #expect(params["target"] as? String == "wE:p5")
+        #expect(params["keys"] as? [String] == ["enter"])
+        #expect(params["pane_id"] == nil)
+    }
+}
+
 // MARK: - WorkspaceCreation decoding
 
 @Suite("WorkspaceCreation Codable")
@@ -448,5 +470,130 @@ struct WorkspaceCreationTests {
     func tabIdOptional() throws {
         let creation = WorkspaceCreation(workspaceId: "w1", rootPaneId: "w1:p1")
         #expect(creation.tabId == nil)
+    }
+}
+
+// MARK: - Response Envelopes
+
+/// Live herdr nests these results one level below the response envelope.
+/// Reading the fields off the envelope silently produced empty text (blank
+/// Peek) and a nil shell pid (dead process-gone diagnosis), so the nesting is
+/// pinned here against the real protocol-17 shapes.
+@Suite("HerdrAdapter response envelopes")
+struct ResponseEnvelopeTests {
+
+    @Test("pane.read unwraps the nested `read` object")
+    func paneReadNested() throws {
+        let response: [String: Any] = [
+            "type": "pane_read",
+            "read": [
+                "pane_id": "wE:p5",
+                "workspace_id": "wE",
+                "tab_id": "wE:t3",
+                "source": "detection",
+                "format": "text",
+                "text": "line one\nline two",
+                "revision": 609,
+                "truncated": false
+            ] as [String: Any]
+        ]
+        let result = LiveHerdrAdapter.parsePaneRead(response, requested: .detection)
+        #expect(result.text == "line one\nline two")
+        #expect(result.source == "detection")
+    }
+
+    @Test("pane.read still accepts a flat result")
+    func paneReadFlat() throws {
+        let response: [String: Any] = ["text": "flat", "source": "recent"]
+        let result = LiveHerdrAdapter.parsePaneRead(response, requested: .detection)
+        #expect(result.text == "flat")
+        #expect(result.source == "recent")
+    }
+
+    @Test("pane.read falls back to the requested source when absent")
+    func paneReadSourceFallback() throws {
+        let result = LiveHerdrAdapter.parsePaneRead(["read": [String: Any]()], requested: .recent)
+        #expect(result.text.isEmpty)
+        #expect(result.source == "recent")
+    }
+
+    @Test("pane.process_info unwraps the nested `process_info` object")
+    func processInfoNested() throws {
+        let response: [String: Any] = [
+            "type": "pane_process_info",
+            "process_info": [
+                "pane_id": "wE:p5",
+                "shell_pid": 71997,
+                "foreground_processes": [
+                    [
+                        "pid": 72004,
+                        "name": "codex",
+                        "argv0": "codex",
+                        "cmdline": "codex",
+                        "cwd": "/Users/admin/Documents/Herdr Manager"
+                    ] as [String: Any]
+                ]
+            ] as [String: Any]
+        ]
+        let info = LiveHerdrAdapter.parseProcessInfo(response)
+        #expect(info.shellPid == 71997)
+        #expect(info.foregroundProcesses.count == 1)
+        #expect(info.foregroundProcesses.first?.pid == 72004)
+        #expect(info.foregroundProcesses.first?.name == "codex")
+    }
+
+    @Test("pane.process_info still accepts a flat result")
+    func processInfoFlat() throws {
+        let response: [String: Any] = ["shell_pid": 42, "foreground_processes": [[String: Any]]()]
+        let info = LiveHerdrAdapter.parseProcessInfo(response)
+        #expect(info.shellPid == 42)
+        #expect(info.foregroundProcesses.isEmpty)
+    }
+}
+
+@Suite("LiveHerdrAdapter pane reads and splits")
+struct PaneReadAndSplitTests {
+
+    @Test("Bounded pane read includes the requested line count")
+    func boundedReadParams() {
+        let params = LiveHerdrAdapter.readParams(
+            paneId: "wE:p5", source: .detection, lines: 20
+        )
+        #expect(params["pane_id"] as? String == "wE:p5")
+        #expect(params["source"] as? String == "detection")
+        #expect(params["lines"] as? Int == 20)
+    }
+
+    @Test("Unbounded pane read omits line count")
+    func unboundedReadParams() {
+        let params = LiveHerdrAdapter.readParams(
+            paneId: "wE:p5", source: .recent, lines: nil
+        )
+        #expect(params["lines"] == nil)
+    }
+
+    @Test("pane.split targets an existing pane and focuses the result")
+    func splitParams() {
+        let params = LiveHerdrAdapter.splitPaneParams(
+            targetPaneId: "wE:p1", cwd: "/tmp/project"
+        )
+        #expect(params["target_pane_id"] as? String == "wE:p1")
+        #expect(params["direction"] as? String == "right")
+        #expect(params["focus"] as? Bool == true)
+        #expect(params["cwd"] as? String == "/tmp/project")
+    }
+
+    @Test("pane.split unwraps the returned pane_info envelope")
+    func splitResponse() throws {
+        let response: [String: Any] = [
+            "type": "pane_info",
+            "pane": [
+                "pane_id": "wE:p9",
+                "workspace_id": "wE",
+                "tab_id": "wE:t1"
+            ] as [String: Any]
+        ]
+        let paneId = try LiveHerdrAdapter.parsePaneInfoID(response)
+        #expect(paneId == "wE:p9")
     }
 }

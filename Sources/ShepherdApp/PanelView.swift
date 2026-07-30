@@ -542,8 +542,24 @@ struct PanelView: View {
         } else {
             Menu(kind.capitalized) {
                 ForEach(appModel.workspaceOptions) { ws in
-                    Button(ws.name) {
-                        appModel.startNewAgent(kind: kind, workspaceId: ws.id)
+                    Menu(ws.name) {
+                        Button("New tab") {
+                            appModel.startNewAgent(kind: kind, workspaceId: ws.id)
+                        }
+                        let placements = appModel.placementOptions(forWorkspace: ws.id)
+                        if !placements.isEmpty {
+                            Divider()
+                            Text("Split in existing tab")
+                            ForEach(placements) { placement in
+                                Button(placement.label) {
+                                    appModel.startNewAgent(
+                                        kind: kind,
+                                        workspaceId: ws.id,
+                                        targetPaneId: placement.id
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -735,15 +751,22 @@ struct PanelView: View {
         let paneId = agent.id.raw // herdr uses full session-qualified IDs (e.g. "w5:p2")
         Task {
             do {
-                var result = try await appModel.adapter.read(paneId: paneId, source: .detection)
+                var result = try await appModel.adapter.read(
+                    paneId: paneId, source: .detection, lines: 20
+                )
                 if result.text.isEmpty {
-                    result = try await appModel.adapter.read(paneId: paneId, source: .recent)
+                    result = try await appModel.adapter.read(
+                        paneId: paneId, source: .recent, lines: 20
+                    )
                 }
                 let lines = result.text.split(separator: "\n", omittingEmptySubsequences: false)
                 let last20 = lines.suffix(20).joined(separator: "\n")
+                let content = last20.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "(No terminal output is available yet.)"
+                    : last20
                 await MainActor.run {
                     guard appModel.selectedAgentId == agent.id else { return }
-                    expansion = .peek(last20)
+                    expansion = .peek(content)
                 }
             } catch {
                 await MainActor.run {

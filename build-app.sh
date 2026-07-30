@@ -57,6 +57,9 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
+echo "Signing $APP_DIR for local use..."
+codesign --force --deep --sign - "$APP_DIR"
+
 echo "✅ $APP_DIR created"
 echo "   Launch: open $APP_DIR"
 echo "   Or:     $APP_DIR/Contents/MacOS/Shepherd"

@@ -30,6 +30,13 @@ struct WorkspaceOption: Identifiable, Equatable {
     let name: String
 }
 
+/// An existing tab the New Agent menu can add a split to. `id` is one occupied
+/// target pane in that tab; a terminal pane still hosts only one agent.
+struct AgentPlacementOption: Identifiable, Equatable {
+    let id: String
+    let label: String
+}
+
 // MARK: - NewAgentState
 
 /// Transient state for the footer's "New agent" flow, surfaced so the
@@ -101,6 +108,7 @@ final class AppModel {
     /// `Agent` the store publishes (carries `focused`/`foregroundCwd`), used
     /// to seed the "New agent" flow's cwd guess.
     private var lastHerdAgents: [HerdrAgentInfo] = []
+    private var lastTabNames: [String: String] = [:]
 
     // MARK: - Init
 
@@ -147,6 +155,7 @@ final class AppModel {
     private func applyHerd(_ snapshot: HerdSnapshot) {
         store.applyHerdSnapshot(snapshot)
         lastHerdAgents = snapshot.agents
+        lastTabNames = snapshot.tabNames
         workspaceOptions = snapshot.workspaceNames
             .map { WorkspaceOption(id: $0.key, name: $0.value) }
             .sorted { $0.name < $1.name }
@@ -552,17 +561,36 @@ final class AppModel {
         return candidate?.foregroundCwd ?? candidate?.cwd
     }
 
-    /// `tab.create` -> `agent.start`. `agent.start` requires the new pane to
-    /// be sitting at an interactive shell prompt, which a freshly created tab
-    /// satisfies. Surfaces a distinct error if the tab was created but the
-    /// agent failed to start, rather than leaving the user guessing.
-    func startNewAgent(kind: String, workspaceId: String) {
+    func placementOptions(forWorkspace workspaceId: String) -> [AgentPlacementOption] {
+        let byTab = Dictionary(
+            grouping: lastHerdAgents.filter { $0.workspaceId == workspaceId },
+            by: \.tabId
+        )
+        return byTab.compactMap { tabId, agents in
+            guard let target = agents.first(where: { $0.focused }) ?? agents.first else {
+                return nil
+            }
+            let tab = lastTabNames[tabId] ?? tabId
+            let shortTab = String(tab.prefix(18))
+            let count = agents.count
+            return AgentPlacementOption(
+                id: target.paneId,
+                label: "\(shortTab) · \(count) agent\(count == 1 ? "" : "s")"
+            )
+        }
+            .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+    }
+
+    private func cwdHint(forPane paneId: String) -> String? {
+        guard let pane = lastHerdAgents.first(where: { $0.paneId == paneId }) else { return nil }
+        return pane.foregroundCwd ?? pane.cwd
+    }
+
+    /// Start in either a new tab or a split beside `targetPaneId`. Both paths
+    /// yield a fresh interactive shell before calling `agent.start`.
+    func startNewAgent(kind: String, workspaceId: String, targetPaneId: String? = nil) {
         Task { [weak self] in
             guard let self else { return }
-            // Creating a tab and launching an agent are WRITES; respect the
-            // capability gate like every other action here. Without this an
-            // incompatible herdr would still get a live `tab.create` +
-            // `agent.start` even while the panel warns that writes are disabled.
             let health = self.adapter.health()
             guard health.writesEnabled else {
                 self.setLastError("New agent skipped: \(health.reason ?? "writes disabled")")
@@ -571,19 +599,28 @@ final class AppModel {
             self.newAgentState = .starting(kind: kind)
             defer { self.newAgentState = .idle }
 
-            let cwd = self.cwdHint(forWorkspace: workspaceId)
+            let cwd = targetPaneId
+                .flatMap { self.cwdHint(forPane: $0) }
+                ?? self.cwdHint(forWorkspace: workspaceId)
             do {
-                let (_, rootPaneId) = try await self.adapter.createTab(
-                    workspaceId: workspaceId, cwd: cwd, label: kind.capitalized, focus: true
-                )
+                let rootPaneId: String
+                if let targetPaneId {
+                    rootPaneId = try await self.adapter.splitPane(targetPaneId: targetPaneId, cwd: cwd)
+                } else {
+                    (_, rootPaneId) = try await self.adapter.createTab(
+                        workspaceId: workspaceId, cwd: cwd, label: kind.capitalized, focus: true
+                    )
+                }
                 do {
                     try await self.adapter.startAgent(paneId: rootPaneId, kind: kind, name: kind)
                     self.setLastError(nil)
                 } catch {
-                    self.setLastError("Tab created, but \(kind) did not start: \(error.localizedDescription)")
+                    let location = targetPaneId == nil ? "Tab" : "Split pane"
+                    self.setLastError("\(location) created, but \(kind) did not start: \(error.localizedDescription)")
                 }
             } catch {
-                self.setLastError("Failed to create a tab for \(kind): \(error.localizedDescription)")
+                let location = targetPaneId == nil ? "tab" : "split pane"
+                self.setLastError("Failed to create a \(location) for \(kind): \(error.localizedDescription)")
             }
             self.resync()
         }

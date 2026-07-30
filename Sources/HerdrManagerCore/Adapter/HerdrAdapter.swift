@@ -118,16 +118,43 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     }
 
     public func read(paneId: String, source: PaneReadSource) async throws -> PaneReadResult {
+        try await read(paneId: paneId, source: source, lines: nil)
+    }
+
+    /// Bounded pane read for compact UI previews. The protocol requirement
+    /// keeps the unbounded form above for diagnosis/MCP callers, while
+    /// Shepherd's Peek can ask herdr to do the truncation at the source.
+    public func read(paneId: String, source: PaneReadSource, lines: Int?) async throws -> PaneReadResult {
         try await onIO { [reqClient] in
-            let params: [String: Any] = [
-                "pane_id": paneId,
-                "source": source.rawValue
-            ]
+            let params = LiveHerdrAdapter.readParams(paneId: paneId, source: source, lines: lines)
             let result = try reqClient.sendRead(method: "pane.read", params: params)
-            let text = result["text"] as? String ?? ""
-            let src = result["source"] as? String ?? source.rawValue
-            return PaneReadResult(text: text, source: src)
+            return LiveHerdrAdapter.parsePaneRead(result, requested: source)
         }
+    }
+
+    internal static func readParams(
+        paneId: String,
+        source: PaneReadSource,
+        lines: Int?
+    ) -> [String: Any] {
+        var params: [String: Any] = [
+            "pane_id": paneId,
+            "source": source.rawValue
+        ]
+        if let lines { params["lines"] = lines }
+        return params
+    }
+
+    /// `pane.read` -> `{"type":"pane_read","read":{...PaneReadResult...}}`.
+    /// The fields live one level down; reading `text` off the envelope returned
+    /// an empty string on every call, which is what made Peek render a blank
+    /// box. The flat shape is still accepted so older fixtures keep parsing.
+    internal static func parsePaneRead(_ dict: [String: Any], requested: PaneReadSource) -> PaneReadResult {
+        let payload = (dict["read"] as? [String: Any]) ?? dict
+        return PaneReadResult(
+            text: payload["text"] as? String ?? "",
+            source: payload["source"] as? String ?? requested.rawValue
+        )
     }
 
     public func explain(paneId: String) async throws -> AgentExplainResult {
@@ -163,21 +190,32 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         try await onIO { [reqClient] in
             let params: [String: Any] = ["pane_id": paneId]
             let result = try reqClient.sendRead(method: "pane.process_info", params: params)
-            let shellPid = result["shell_pid"] as? Int32
-            var procs: [ForegroundProcess] = []
-            if let fgList = result["foreground_processes"] as? [[String: Any]] {
-                for p in fgList {
-                    procs.append(ForegroundProcess(
-                        pid: p["pid"] as? Int32 ?? 0,
-                        name: p["name"] as? String ?? "",
-                        argv0: p["argv0"] as? String,
-                        cmdline: p["cmdline"] as? String,
-                        cwd: p["cwd"] as? String
-                    ))
-                }
-            }
-            return ProcessInfoResult(shellPid: shellPid, foregroundProcesses: procs)
+            return LiveHerdrAdapter.parseProcessInfo(result)
         }
+    }
+
+    /// `pane.process_info` -> `{"type":"pane_process_info","process_info":{...}}`
+    /// — the same envelope trap as `pane.read`. Reading the fields off the
+    /// envelope produced a nil `shell_pid` and an empty process list, which
+    /// silently disabled the process-gone diagnosis.
+    internal static func parseProcessInfo(_ dict: [String: Any]) -> ProcessInfoResult {
+        let payload = (dict["process_info"] as? [String: Any]) ?? dict
+        // Via `Int`: an NSNumber off the wire bridges to either, but a native
+        // Swift `Int` (as in a hand-written fixture) only casts to `Int`.
+        let shellPid = (payload["shell_pid"] as? Int).map(Int32.init(truncatingIfNeeded:))
+        var procs: [ForegroundProcess] = []
+        if let fgList = payload["foreground_processes"] as? [[String: Any]] {
+            for p in fgList {
+                procs.append(ForegroundProcess(
+                    pid: (p["pid"] as? Int).map(Int32.init(truncatingIfNeeded:)) ?? 0,
+                    name: p["name"] as? String ?? "",
+                    argv0: p["argv0"] as? String,
+                    cmdline: p["cmdline"] as? String,
+                    cwd: p["cwd"] as? String
+                ))
+            }
+        }
+        return ProcessInfoResult(shellPid: shellPid, foregroundProcesses: procs)
     }
 
     public func focus(paneId: String) async throws {
@@ -206,12 +244,40 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     public func prompt(paneId: String, text: String) async throws {
         try await onIO { [reqClient] in
-            let params: [String: Any] = [
-                "target": paneId,
-                "text": text
-            ]
-            _ = try reqClient.sendWrite(method: "agent.prompt", params: params)
+            // Keep Nudge as one user action, but send text and Enter as two
+            // ordered herdr writes. `agent.prompt` is documented as an atomic
+            // submission, yet some live agent TUIs only accepted its paste
+            // portion. Separate channel messages preserve bracketed-paste
+            // handling while making the Enter key unambiguous.
+            _ = try reqClient.sendWrite(
+                method: "pane.send_input",
+                params: Self.promptTextParams(paneId: paneId, text: text)
+            )
+            do {
+                _ = try reqClient.sendWrite(
+                    method: "agent.send_keys",
+                    params: Self.promptEnterParams(paneId: paneId)
+                )
+            } catch {
+                throw NDJSONClientError.invalidResponse(
+                    "text was inserted, but Enter failed: \(String(describing: error))"
+                )
+            }
         }
+    }
+
+    internal static func promptTextParams(paneId: String, text: String) -> [String: Any] {
+        [
+            "pane_id": paneId,
+            "text": text
+        ]
+    }
+
+    internal static func promptEnterParams(paneId: String) -> [String: Any] {
+        [
+            "target": paneId,
+            "keys": ["enter"]
+        ]
     }
 
     public func closePane(paneId: String) async throws {
@@ -336,6 +402,34 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             }
             return (tabId: tabId, rootPaneId: paneId)
         }
+    }
+
+    /// Split beside an existing pane in the same tab and return the new shell
+    /// pane. `agent.start` can then launch into that interactive shell.
+    public func splitPane(targetPaneId: String, cwd: String?) async throws -> String {
+        try await onIO { [reqClient] in
+            let params = LiveHerdrAdapter.splitPaneParams(targetPaneId: targetPaneId, cwd: cwd)
+            let result = try reqClient.sendWrite(method: "pane.split", params: params)
+            return try LiveHerdrAdapter.parsePaneInfoID(result)
+        }
+    }
+
+    internal static func splitPaneParams(targetPaneId: String, cwd: String?) -> [String: Any] {
+        var params: [String: Any] = [
+            "target_pane_id": targetPaneId,
+            "direction": "right",
+            "focus": true
+        ]
+        if let cwd { params["cwd"] = cwd }
+        return params
+    }
+
+    internal static func parsePaneInfoID(_ dict: [String: Any]) throws -> String {
+        let payload = (dict["pane"] as? [String: Any]) ?? dict
+        guard let paneId = payload["pane_id"] as? String, !paneId.isEmpty else {
+            throw NDJSONClientError.invalidResponse("pane.split missing pane.pane_id")
+        }
+        return paneId
     }
 
     /// `workspace.focus` -> `{workspace_id}` (schema `WorkspaceTarget`).
