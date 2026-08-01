@@ -20,26 +20,33 @@ struct PanelView: View {
 
     /// Workspace groups the user has folded away (All scope only).
     @State private var collapsedGroups: Set<String> = []
+    @State private var showUsageDashboard = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            Divider()
-            filterBar
-            Divider()
-            if !appModel.pendingActions.isEmpty {
-                PendingActionsView()
-                Divider()
+        Group {
+            if showUsageDashboard {
+                UsageDashboardView(onBack: { showUsageDashboard = false })
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    header
+                    Divider()
+                    filterBar
+                    Divider()
+                    if !appModel.pendingActions.isEmpty {
+                        PendingActionsView()
+                        Divider()
+                    }
+                    content
+                    Divider()
+                    if let errorText = appModel.lastError {
+                        errorBanner(errorText)
+                    }
+                    if let health = appModel.adapterHealth, !health.compatible || !health.writesEnabled {
+                        healthBanner(health)
+                    }
+                    footer
+                }
             }
-            content
-            Divider()
-            if let errorText = appModel.lastError {
-                errorBanner(errorText)
-            }
-            if let health = appModel.adapterHealth, !health.compatible || !health.writesEnabled {
-                healthBanner(health)
-            }
-            footer
         }
         // Width is fixed; height is whatever the content adds up to. A
         // `minHeight`/`maxHeight` pair here is actively harmful: the
@@ -50,6 +57,10 @@ struct PanelView: View {
         .fixedSize(horizontal: false, vertical: true)
         .background(panelBackground)
         .onKeyPress(.escape) {
+            if showUsageDashboard {
+                showUsageDashboard = false
+                return .handled
+            }
             if searchFocused {
                 searchFocused = false
                 return .handled
@@ -105,6 +116,7 @@ struct PanelView: View {
         static let emptyStateHeight: CGFloat = 210
         static let rowBaseHeight: CGFloat = 64
         static let rowReasonHeight: CGFloat = 17
+        static let rowCostHeight: CGFloat = 16
         static let rowActionsHeight: CGFloat = 40
         static let rowPeekHeight: CGFloat = 228
         static let rowInlineHeight: CGFloat = 36
@@ -125,6 +137,9 @@ struct PanelView: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
+            iconButton(system: "chart.line.uptrend.xyaxis", help: "Usage & cost (⌘U)", shortcut: "u") {
+                showUsageDashboard = true
+            }
             iconButton(system: "arrow.clockwise", help: "Resync (⌘R)", shortcut: "r") {
                 appModel.resync()
             }
@@ -289,6 +304,9 @@ struct PanelView: View {
     private func rowHeight(_ agent: Agent) -> CGFloat {
         var height = Layout.rowBaseHeight
         if agent.verdict.reasonText != nil { height += Layout.rowReasonHeight }
+        if appModel.usageSnapshot.agentSummary(for: agent.id, window: .day).hasUsage {
+            height += Layout.rowCostHeight
+        }
         guard appModel.selectedAgentId == agent.id else { return height }
 
         height += Layout.rowActionsHeight
@@ -363,6 +381,7 @@ struct PanelView: View {
         let isSelected = appModel.selectedAgentId == agent.id
         return AgentRow(
             agent: agent,
+            dailyCost: appModel.usageSnapshot.agentSummary(for: agent.id, window: .day),
             isSelected: isSelected,
             expansion: isSelected ? expansion : .none,
             nudgeText: $nudgeText,

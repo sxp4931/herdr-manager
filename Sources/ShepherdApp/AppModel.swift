@@ -58,6 +58,7 @@ final class AppModel {
     let settingsStore = SettingsStore()
     let journal = Journal()
     let dwellTracker = DwellTracker()
+    let tokenMeter = LocalTokenMeter()
 
     /// Persisted on the model (not `@AppStorage`) so it survives the panel
     /// closing and reopening within one app run, per the triage-picker spec.
@@ -90,6 +91,11 @@ final class AppModel {
     /// successful snapshot so protocol/version mismatches surface quickly.
     var adapterHealth: AdapterHealth?
 
+    /// Read-only local usage data. The snapshot contains all locally readable
+    /// provider activity plus best-effort attribution to the current herd.
+    private(set) var usageSnapshot: TokenMeterSnapshot = .empty
+    private(set) var tokenMeterPriceBook: TokenMeterPriceBook = .defaults
+
     // MARK: - Private
 
     private let notificationManager = NotificationManager()
@@ -101,6 +107,7 @@ final class AppModel {
     private var pendingActionsTask: Task<Void, Never>?
     private var metadataTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
+    private var usageTask: Task<Void, Never>?
     private var hasStarted = false
     private var hasRestoredDwell = false
     private var hasLoadedAgentKinds = false
@@ -184,10 +191,17 @@ final class AppModel {
                 if self.metadataWriteBackEnabled != snap.metadataWriteBackEnabled {
                     self.metadataWriteBackEnabled = snap.metadataWriteBackEnabled
                 }
+                let loadedPriceBook = TokenMeterPriceBook(entries: snap.tokenMeterPrices)
+                if self.tokenMeterPriceBook != loadedPriceBook {
+                    self.tokenMeterPriceBook = loadedPriceBook
+                    await self.refreshUsage()
+                }
             } catch {
                 self.setLastError("Settings load failed: \(error.localizedDescription)")
             }
         }
+
+        startUsageLoop()
 
         eventTask?.cancel()
         eventTask = Task { [weak self] in
@@ -336,6 +350,81 @@ final class AppModel {
         heartbeatTask = nil
         diagnosisTask?.cancel()
         diagnosisTask = nil
+    }
+
+    // MARK: - Token usage
+
+    private func startUsageLoop() {
+        usageTask?.cancel()
+        usageTask = Task { [weak self] in
+            guard let self else { return }
+            await self.refreshUsage()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                guard !Task.isCancelled else { return }
+                await self.refreshUsage()
+            }
+        }
+    }
+
+    private func refreshUsage() async {
+        let snapshot = await tokenMeter.snapshot(
+            agents: Array(store.agents.values),
+            priceBook: tokenMeterPriceBook,
+            now: Date()
+        )
+        if snapshot != usageSnapshot {
+            usageSnapshot = snapshot
+        }
+    }
+
+    func refreshUsageNow() {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.refreshUsage()
+        }
+    }
+
+    /// Saves a provider-level fallback price. Model-specific entries remain in
+    /// the price book and continue to win when the log contains a model id.
+    func updateTokenMeterPricing(
+        provider: TokenMeterProvider,
+        pricing: TokenMeterPricing
+    ) {
+        tokenMeterPriceBook.setProviderPricing(pricing, for: provider)
+        let updatedBook = tokenMeterPriceBook
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.settingsStore.setTokenMeterPriceBook(updatedBook)
+                await self.refreshUsage()
+                self.setLastError(nil)
+            } catch {
+                self.setLastError("Usage pricing save failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Saves a model-specific price. This is preferred whenever the local log
+    /// contains a model id; the provider fallback is reserved for records
+    /// whose CLI omitted the model.
+    func updateTokenMeterModelPricing(
+        provider: TokenMeterProvider,
+        model: String,
+        pricing: TokenMeterPricing
+    ) {
+        tokenMeterPriceBook.setModelPricing(pricing, for: provider, model: model)
+        let updatedBook = tokenMeterPriceBook
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.settingsStore.setTokenMeterPriceBook(updatedBook)
+                await self.refreshUsage()
+                self.setLastError(nil)
+            } catch {
+                self.setLastError("Usage model pricing save failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     private func runDiagnosisAndNotify() async {

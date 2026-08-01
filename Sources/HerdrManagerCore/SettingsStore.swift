@@ -10,8 +10,40 @@ public struct Settings: Codable, Sendable {
     /// Looked up before the pane-id map; defaults to empty for old settings files.
     public var occupantOverrides: [String: Int] = [:]
     public var metadataWriteBackEnabled: Bool = true
+    /// Editable API-equivalent prices. Old settings files predate the usage
+    /// meter, so decoding falls back to the bundled price book.
+    public var tokenMeterPrices: [String: TokenMeterPricing] = TokenMeterPriceBook.defaults.entries
 
     public init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case defaultThresholdMinutes
+        case agentOverrides
+        case occupantOverrides
+        case metadataWriteBackEnabled
+        case tokenMeterPrices
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        defaultThresholdMinutes = try container.decodeIfPresent(Int.self, forKey: .defaultThresholdMinutes) ?? 5
+        agentOverrides = try container.decodeIfPresent([String: Int].self, forKey: .agentOverrides) ?? [:]
+        occupantOverrides = try container.decodeIfPresent([String: Int].self, forKey: .occupantOverrides) ?? [:]
+        metadataWriteBackEnabled = try container.decodeIfPresent(Bool.self, forKey: .metadataWriteBackEnabled) ?? true
+        tokenMeterPrices = try container.decodeIfPresent(
+            [String: TokenMeterPricing].self,
+            forKey: .tokenMeterPrices
+        ) ?? TokenMeterPriceBook.defaults.entries
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(defaultThresholdMinutes, forKey: .defaultThresholdMinutes)
+        try container.encode(agentOverrides, forKey: .agentOverrides)
+        try container.encode(occupantOverrides, forKey: .occupantOverrides)
+        try container.encode(metadataWriteBackEnabled, forKey: .metadataWriteBackEnabled)
+        try container.encode(tokenMeterPrices, forKey: .tokenMeterPrices)
+    }
 }
 
 // MARK: - SettingsStore
@@ -85,6 +117,11 @@ public actor SettingsStore {
 
     public func setMetadataWriteBack(_ enabled: Bool) throws {
         settings.metadataWriteBackEnabled = enabled
+        try save()
+    }
+
+    public func setTokenMeterPriceBook(_ priceBook: TokenMeterPriceBook) throws {
+        settings.tokenMeterPrices = priceBook.entries
         try save()
     }
 

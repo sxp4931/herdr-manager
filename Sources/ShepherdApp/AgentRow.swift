@@ -15,6 +15,7 @@ enum RowExpansion: Equatable {
 struct AgentRow: View, Equatable {
     @Environment(AppModel.self) private var appModel
     let agent: Agent
+    let dailyCost: TokenMeterSummary
     let isSelected: Bool
     let expansion: RowExpansion
     @Binding var nudgeText: String
@@ -32,6 +33,7 @@ struct AgentRow: View, Equatable {
 
     nonisolated static func == (lhs: AgentRow, rhs: AgentRow) -> Bool {
         lhs.agent == rhs.agent
+            && lhs.dailyCost == rhs.dailyCost
             && lhs.isSelected == rhs.isSelected
             && (lhs.isSelected ? lhs.expansion == rhs.expansion : true)
     }
@@ -87,7 +89,8 @@ struct AgentRow: View, Equatable {
 
     private var accessibilityDescription: String {
         let reason = agent.verdict.reasonText ?? "no issues"
-        return "\(titleText), \(kindLabel), \(stateLabel), \(dwellString), \(reason)"
+        let cost = dailyCost.hasUsage ? ", today \(UsageFormatter.cost(dailyCost)) API equivalent" : ""
+        return "\(titleText), \(kindLabel), \(stateLabel), \(dwellString)\(cost), \(reason)"
     }
 
     /// The state as a tinted chip rather than plain grey text — at a glance the
@@ -151,6 +154,16 @@ struct AgentRow: View, Equatable {
                         .font(.system(size: 11.5))
                         .foregroundStyle(reasonColor)
                         .lineLimit(2)
+                }
+
+                if dailyCost.hasUsage {
+                    HStack(spacing: 5) {
+                        Image(systemName: "chart.line.uptrend.xyaxis")
+                        Text("Today \(UsageFormatter.cost(dailyCost)) API equivalent")
+                            .lineLimit(1)
+                    }
+                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Brand.amber.opacity(0.9))
                 }
 
                 if isSelected {
