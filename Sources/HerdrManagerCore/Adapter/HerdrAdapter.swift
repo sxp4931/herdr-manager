@@ -305,13 +305,42 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     }
 
     public func startAgent(paneId: String, kind: String, name: String) async throws {
+        try await startAgent(paneId: paneId, kind: kind, name: name, timeoutMs: nil)
+    }
+
+    /// Start an agent with an explicit Herdr startup-readiness timeout.
+    /// The overload keeps the existing adapter protocol and UI call sites
+    /// source-compatible while allowing MCP session creation to wait for a
+    /// freshly-created shell instead of failing on the default short probe.
+    public func startAgent(paneId: String, kind: String, name: String, timeoutMs: Int?) async throws {
         try await onIO { [reqClient] in
-            let params: [String: Any] = [
+            var params: [String: Any] = [
                 "pane_id": paneId,
                 "kind": kind,
                 "name": name
             ]
+            if let timeoutMs { params["timeout_ms"] = timeoutMs }
             _ = try reqClient.sendWrite(method: "agent.start", params: params)
+        }
+    }
+
+    /// Wait until a newly-created pane is registered as an interactive shell.
+    /// `pane.split`/`tab.create` can return before the terminal host has
+    /// finished publishing the pane; launching an agent in that small window
+    /// otherwise fails with "not an available shell".
+    public func waitForShell(paneId: String, timeoutMs: Int = 10_000) async throws -> Bool {
+        let deadline = Date().addingTimeInterval(Double(max(timeoutMs, 0)) / 1000.0)
+        while true {
+            do {
+                let result = try await read(paneId: paneId, source: .detection)
+                if !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return true
+                }
+            } catch {
+                // The pane can exist before its terminal process is ready.
+            }
+            guard Date() < deadline else { return false }
+            try await Task.sleep(nanoseconds: 100_000_000)
         }
     }
 
@@ -323,7 +352,17 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                 "timeout_ms": timeoutMs
             ]
             let result = try reqClient.sendWrite(method: "agent.wait", params: params)
-            return result["status"] != nil || result["settled"] != nil
+            if let settled = result["settled"] as? Bool {
+                if settled { return true }
+            }
+            if let status = result["status"] as? String {
+                if until.contains(status) { return true }
+            }
+            if let agent = result["agent"] as? [String: Any],
+               let status = agent["agent_status"] as? String {
+                return until.contains(status)
+            }
+            return false
         }
     }
 

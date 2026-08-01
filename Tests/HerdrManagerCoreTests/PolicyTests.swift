@@ -34,6 +34,31 @@ struct SharedActionStoreTests {
         #expect(status == .approved)
     }
 
+    @Test("MCP session spawn can claim a pending action without UI approval")
+    func claimAutoExecuting() async throws {
+        let store = tempStore()
+        let id = try await store.create(tool: "session.spawn", params: ["kind": "claude"])
+
+        let claimed = try await store.claimAutoExecuting(actionId: id)
+
+        #expect(claimed?.state == .executing)
+        #expect(claimed?.actionId == id)
+        #expect(await store.status(id) == .executing)
+        #expect(await store.pendingActions().isEmpty)
+    }
+
+    @Test("Auto-allowed claim does not bypass an already transitioned action")
+    func claimAutoExecutingRequiresPending() async throws {
+        let store = tempStore()
+        let id = try await store.create(tool: "session.spawn", params: [:])
+        try await store.approve(id)
+
+        let claimed = try await store.claimAutoExecuting(actionId: id)
+
+        #expect(claimed == nil)
+        #expect(await store.status(id) == .approved)
+    }
+
     @Test("Deny a pending action")
     func deny() async throws {
         let store = tempStore()

@@ -192,7 +192,8 @@ actor MCPServer {
                 agent.inspect with query; use agent.tail or agent.diagnose only when \
                 more evidence is needed. Do not rediscover panes through the herdr CLI \
                 unless Shepherd is unavailable or reports ambiguity. Resolve an exact \
-                agent ID before any write, and preserve confirmation gates.
+                agent ID before any write. MCP session.spawn is auto-allowed for
+                unattended callers; preserve confirmation gates for other writes.
                 """,
                 "serverInfo": [
                     "name": "herdr-manager-mcp",
@@ -1086,6 +1087,8 @@ actor MCPServer {
             let supportedKinds = SpawnPathPolicy.supportedKinds
             return makeToolError("Unsupported agent kind '\(kind)'. Must be one of: \(supportedKinds.sorted().joined(separator: ", "))")
         }
+        let agentKind = kind.lowercased()
+        let agentName = SpawnPathPolicy.canonicalAgentName(name, fallback: agentKind)
 
         let placement = arguments["placement"] as? String ?? "new_workspace"
         guard ["new_workspace", "new_tab", "split"].contains(placement) else {
@@ -1164,9 +1167,12 @@ actor MCPServer {
 
         var params: [String: String] = [
             "placement": placement,
-            "kind": kind,
-            "name": name
+            "kind": agentKind,
+            "name": agentName
         ]
+        if agentName != name {
+            params["requested_name"] = name
+        }
         if let resolvedPath { params["repo_path"] = resolvedPath }
         if let workspaceId { params["workspace_id"] = workspaceId }
         if let targetInfo {
@@ -1184,121 +1190,121 @@ actor MCPServer {
             return makeToolError("Failed to record spawn action (lock unavailable)")
         }
 
+        // MCP session creation is explicitly auto-allowed. Keep the action in
+        // the shared store for audit/status visibility, but claim it directly
+        // instead of waiting for a menu-bar approval that the MCP caller may
+        // not be able to observe.
+        guard let claimed = try? await sharedActionStore.claimAutoExecuting(actionId: actionId) else {
+            try? await sharedActionStore.markFailed(actionId, detail: "auto-allowed action no longer claimable")
+            return makeToolError("Auto-allowed spawn action no longer claimable (actionId: \(actionId))")
+        }
+
         await journal.record(JournalEntry(
             actionId: actionId, tool: "session.spawn",
             params: params.filter { !$0.key.hasPrefix("_fp_") },
-            caller: "mcp", preState: "placement=\(placement)", outcome: "pending_confirmation",
-            keepForever: true
+            caller: "mcp", preState: "pending", postState: "executing",
+            outcome: "auto_allowed", keepForever: true
         ))
 
-        // Poll for approval from menu-bar UI
-        let finalState = await waitForConfirmation(actionId: actionId)
+        do {
+            try await ensureConnected()
+            let paneId: String
+            let finalWorkspaceId: String
+            var tabId: String?
 
-        if finalState == .approved {
-            // Atomic claim gate
-            guard let claimed = try? await sharedActionStore.claimExecuting(actionId: actionId) else {
-                try? await sharedActionStore.markFailed(actionId, detail: "action no longer claimable")
-                return makeToolError("Action no longer claimable (actionId: \(actionId))")
+            switch placement {
+            case "new_workspace":
+                guard let resolvedPath else {
+                    throw AgentResolutionError(description: "resolved repo path missing")
+                }
+                let creation = try await adapter.createWorkspace(
+                    cwd: resolvedPath,
+                    label: spaceLabel
+                )
+                finalWorkspaceId = creation.workspaceId
+                tabId = creation.tabId
+                paneId = creation.rootPaneId
+
+            case "new_tab":
+                guard let workspaceId else {
+                    throw AgentResolutionError(description: "workspace ID missing")
+                }
+                let freshHerd = try await adapter.herdSnapshot()
+                guard freshHerd.workspaceNames[workspaceId] != nil else {
+                    throw AgentResolutionError(description: "workspace disappeared before execution")
+                }
+                let creation = try await adapter.createTab(
+                    workspaceId: workspaceId,
+                    cwd: cwdHint,
+                    label: agentKind.capitalized,
+                    focus: true
+                )
+                finalWorkspaceId = workspaceId
+                tabId = creation.tabId
+                paneId = creation.rootPaneId
+
+            case "split":
+                guard let targetInfo else {
+                    throw AgentResolutionError(description: "split target missing")
+                }
+                try await revalidate(action: claimed, paneId: targetInfo.paneId)
+                finalWorkspaceId = targetInfo.workspaceId
+                paneId = try await adapter.splitPane(
+                    targetPaneId: targetInfo.paneId,
+                    cwd: cwdHint
+                )
+
+            default:
+                throw AgentResolutionError(description: "invalid placement")
             }
 
-            do {
-                try await ensureConnected()
-                let paneId: String
-                let finalWorkspaceId: String
-                var tabId: String?
-
-                switch placement {
-                case "new_workspace":
-                    guard let resolvedPath else {
-                        throw AgentResolutionError(description: "resolved repo path missing")
-                    }
-                    let creation = try await adapter.createWorkspace(
-                        cwd: resolvedPath,
-                        label: spaceLabel
-                    )
-                    finalWorkspaceId = creation.workspaceId
-                    tabId = creation.tabId
-                    paneId = creation.rootPaneId
-
-                case "new_tab":
-                    guard let workspaceId else {
-                        throw AgentResolutionError(description: "workspace ID missing")
-                    }
-                    let freshHerd = try await adapter.herdSnapshot()
-                    guard freshHerd.workspaceNames[workspaceId] != nil else {
-                        throw AgentResolutionError(description: "workspace disappeared before execution")
-                    }
-                    let creation = try await adapter.createTab(
-                        workspaceId: workspaceId,
-                        cwd: cwdHint,
-                        label: kind.capitalized,
-                        focus: true
-                    )
-                    finalWorkspaceId = workspaceId
-                    tabId = creation.tabId
-                    paneId = creation.rootPaneId
-
-                case "split":
-                    guard let targetInfo else {
-                        throw AgentResolutionError(description: "split target missing")
-                    }
-                    try await revalidate(action: claimed, paneId: targetInfo.paneId)
-                    finalWorkspaceId = targetInfo.workspaceId
-                    paneId = try await adapter.splitPane(
-                        targetPaneId: targetInfo.paneId,
-                        cwd: cwdHint
-                    )
-
-                default:
-                    throw AgentResolutionError(description: "invalid placement")
-                }
-
-                try await adapter.startAgent(paneId: paneId, kind: kind, name: name)
-
-                if let brief, !brief.isEmpty {
-                    try await adapter.prompt(paneId: paneId, text: brief)
-                }
-
-                await policy.recordWrite(agentId: paneId)
-                try? await sharedActionStore.markExecuted(actionId)
-
-                await journal.record(JournalEntry(
-                    actionId: actionId, tool: "session.spawn",
-                    params: [
-                        "placement": placement,
-                        "kind": kind,
-                        "name": name,
-                        "workspace_id": finalWorkspaceId,
-                        "pane_id": paneId
-                    ],
-                    caller: "mcp", preState: "placement=\(placement)",
-                    postState: "started", outcome: "executed",
-                    keepForever: true
-                ))
-                var result = "{\"agentId\":\"\(paneId)\",\"space\":\"\(finalWorkspaceId)\",\"placement\":\"\(placement)\""
-                if let tabId { result += ",\"tab\":\"\(tabId)\"" }
-                result += ",\"started\":true,\"actionId\":\"\(actionId)\"}"
-                return makeToolResult(result)
-            } catch {
-                try? await sharedActionStore.markFailed(actionId, detail: error.localizedDescription)
-                return makeToolError("session.spawn execution failed: \(error.localizedDescription)")
+            let shellReady = try await adapter.waitForShell(paneId: paneId)
+            guard shellReady else {
+                throw AgentResolutionError(description: "agent target pane \(paneId) did not become an available shell")
             }
-        } else if finalState == .denied {
+            try await adapter.startAgent(
+                paneId: paneId,
+                kind: agentKind,
+                name: agentName,
+                timeoutMs: 30_000
+            )
+
+            if let brief, !brief.isEmpty {
+                let ready = try await adapter.waitStatus(
+                    paneId: paneId,
+                    until: ["idle", "working", "blocked", "done"],
+                    timeoutMs: 30_000
+                )
+                guard ready else {
+                    throw AgentResolutionError(description: "agent \(paneId) did not become ready before the brief timeout")
+                }
+                try await adapter.prompt(paneId: paneId, text: brief)
+            }
+
+            await policy.recordWrite(agentId: paneId)
+            try? await sharedActionStore.markExecuted(actionId)
+
             await journal.record(JournalEntry(
                 actionId: actionId, tool: "session.spawn",
-                params: ["placement": placement],
-                caller: "mcp", preState: "placement=\(placement)", outcome: "denied",
+                params: [
+                    "placement": placement,
+                    "kind": agentKind,
+                    "name": agentName,
+                    "workspace_id": finalWorkspaceId,
+                    "pane_id": paneId
+                ],
+                caller: "mcp", preState: "placement=\(placement)",
+                postState: "started", outcome: "executed",
                 keepForever: true
             ))
-            return makeToolError("Action denied by user (actionId: \(actionId))")
-        } else {
-            await journal.record(JournalEntry(
-                actionId: actionId, tool: "session.spawn",
-                params: ["placement": placement],
-                caller: "mcp", preState: "placement=\(placement)", outcome: "expired",
-                keepForever: true
-            ))
-            return makeToolError("Action expired (actionId: \(actionId))")
+            var result = "{\"agentId\":\"\(paneId)\",\"space\":\"\(finalWorkspaceId)\",\"placement\":\"\(placement)\""
+            if let tabId { result += ",\"tab\":\"\(tabId)\"" }
+            result += ",\"started\":true,\"actionId\":\"\(actionId)\"}"
+            return makeToolResult(result)
+        } catch {
+            let detail = String(describing: error)
+            try? await sharedActionStore.markFailed(actionId, detail: detail)
+            return makeToolError("session.spawn execution failed: \(detail)")
         }
     }
 
@@ -2076,7 +2082,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "session.spawn",
-            "description": "Start an agent in a new workspace, a new tab in an existing workspace, or a split beside an existing agent. Always requires confirmation. Use placement=new_workspace with repo_path, new_tab with workspace_id, or split with target_agent_id.",
+            "description": "Start an agent in a new workspace, a new tab in an existing workspace, or a split beside an existing agent. MCP callers are auto-allowed without menu-bar confirmation; other destructive writes remain confirmation-gated. Use placement=new_workspace with repo_path, new_tab with workspace_id, or split with target_agent_id.",
             "inputSchema": [
                 "type": "object",
                 "properties": [

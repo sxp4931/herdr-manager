@@ -163,6 +163,27 @@ public actor SharedActionStore {
         }
     }
 
+    /// Atomically claim a new MCP `session.spawn` action without a UI
+    /// confirmation. Spawning a new agent is explicitly auto-allowed for MCP
+    /// callers; the action still passes through the shared store so the
+    /// journal/status path remains auditable and the claim is race-safe.
+    ///
+    /// This is intentionally separate from `claimExecuting`: confirmation-
+    /// gated actions must still transition through `.approved` first.
+    public func claimAutoExecuting(actionId: String) throws -> PendingAction? {
+        return try withLock {
+            var actions = loadActions()
+            guard let idx = actions.firstIndex(where: { $0.actionId == actionId }) else {
+                return nil
+            }
+            guard actions[idx].state == .pending else { return nil }
+            guard Date() <= actions[idx].expiresAt else { return nil }
+            actions[idx].state = .executing
+            writeActions(actions)
+            return actions[idx]
+        }
+    }
+
     /// Expire pending actions past their `expiresAt` and prune terminal actions
     /// (`.executed`, `.failed`, `.denied`, `.expired`) whose `createdAt` is older
     /// than 24 hours. Additive — callers may invoke this periodically.

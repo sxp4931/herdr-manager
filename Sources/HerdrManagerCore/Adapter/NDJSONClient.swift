@@ -8,7 +8,7 @@ import Glibc
 
 // MARK: - NDJSONClientError
 
-public enum NDJSONClientError: Error, Sendable {
+public enum NDJSONClientError: Error, Sendable, CustomStringConvertible {
     case socketCreationFailed(Int32)
     case connectFailed(String, Int32)
     case sendFailed(Int32)
@@ -16,6 +16,25 @@ public enum NDJSONClientError: Error, Sendable {
     case connectionClosed
     case invalidResponse(String)
     case timeout
+
+    public var description: String {
+        switch self {
+        case .socketCreationFailed(let code):
+            return "socket creation failed (errno \(code))"
+        case .connectFailed(let path, let code):
+            return "connect failed for \(path) (errno \(code))"
+        case .sendFailed(let code):
+            return "send failed (errno \(code))"
+        case .readFailed(let code):
+            return "read failed (errno \(code))"
+        case .connectionClosed:
+            return "connection closed"
+        case .invalidResponse(let detail):
+            return "invalid response: \(detail)"
+        case .timeout:
+            return "socket I/O timed out"
+        }
+    }
 }
 
 // MARK: - NDJSONClient
@@ -79,11 +98,14 @@ public final class NDJSONClient: @unchecked Sendable {
             }
         }
 
-        let connectResult = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                Darwin.connect(s, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+        var connectResult: Int32
+        repeat {
+            connectResult = withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                    Darwin.connect(s, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
             }
-        }
+        } while connectResult < 0 && errno == EINTR
 
         guard connectResult == 0 else {
             close(s)
@@ -281,6 +303,9 @@ public final class NDJSONClient: @unchecked Sendable {
             while sent < total {
                 let n = Darwin.write(currentFd, base.advanced(by: sent), total - sent)
                 if n < 0 {
+                    if errno == EINTR {
+                        continue
+                    }
                     if errno == EAGAIN || errno == EWOULDBLOCK {
                         throw NDJSONClientError.timeout
                     }
@@ -322,6 +347,9 @@ public final class NDJSONClient: @unchecked Sendable {
                 throw NDJSONClientError.connectionClosed
             }
             if n < 0 {
+                if errno == EINTR {
+                    continue
+                }
                 if errno == EAGAIN || errno == EWOULDBLOCK {
                     throw NDJSONClientError.timeout
                 }

@@ -49,6 +49,35 @@ struct SpawnPathPolicySupportedKindTests {
     }
 }
 
+@Suite("SpawnPathPolicy.canonicalAgentName")
+struct SpawnPathPolicyAgentNameTests {
+
+    @Test("Normalizes a human-facing MCP name")
+    func normalizesHumanFacingName() {
+        let result = SpawnPathPolicy.canonicalAgentName(
+            "Cuedora website media upgrade",
+            fallback: "claude"
+        )
+        #expect(result == "cuedora-website-media-upgrade")
+    }
+
+    @Test("Prefixes names that do not start with a letter")
+    func prefixesInvalidStart() {
+        let result = SpawnPathPolicy.canonicalAgentName("5th pass", fallback: "claude")
+        #expect(result == "agent-5th-pass")
+    }
+
+    @Test("Uses the fallback for an empty name and caps length")
+    func fallbackAndLength() {
+        #expect(SpawnPathPolicy.canonicalAgentName("  ", fallback: "claude") == "claude")
+
+        let longName = String(repeating: "a", count: 64)
+        let result = SpawnPathPolicy.canonicalAgentName(longName, fallback: "claude")
+        #expect(result.count == 32)
+        #expect(result.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" })
+    }
+}
+
 @Suite("SpawnPathPolicy.isPathWithinAllowedRoots")
 struct SpawnPathPolicyPathTests {
 

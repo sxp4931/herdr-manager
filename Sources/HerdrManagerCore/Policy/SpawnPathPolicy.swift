@@ -25,6 +25,48 @@ public enum SpawnPathPolicy: Sendable {
         return supportedKinds.contains(kind.lowercased())
     }
 
+    /// Convert a human-facing MCP session name into the name grammar Herdr
+    /// accepts for an agent: lowercase, starts with a letter, and contains
+    /// only ASCII letters, digits, hyphens, or underscores (max 32 chars).
+    public static func canonicalAgentName(_ name: String, fallback: String) -> String {
+        var result = ""
+        var previousWasSeparator = false
+
+        for scalar in name.lowercased().unicodeScalars {
+            let isLetter = scalar.value >= 97 && scalar.value <= 122
+            let isDigit = scalar.value >= 48 && scalar.value <= 57
+            let isUnderscore = scalar.value == 95
+
+            if isLetter || isDigit || isUnderscore {
+                result.unicodeScalars.append(scalar)
+                previousWasSeparator = false
+            } else if !result.isEmpty && !previousWasSeparator {
+                result.append("-")
+                previousWasSeparator = true
+            }
+        }
+
+        while result.last == "-" {
+            result.removeLast()
+        }
+
+        if result.isEmpty {
+            result = fallback.lowercased()
+        }
+
+        if let first = result.unicodeScalars.first,
+           !(first.value >= 97 && first.value <= 122) {
+            result = "agent-" + result
+        }
+
+        result = String(result.prefix(32))
+        while result.last == "-" {
+            result.removeLast()
+        }
+
+        return result.isEmpty ? "agent" : result
+    }
+
     /// True iff `path` resolves (with symlinks expanded) to a location that
     /// sits within one of the `allowedRoots`.
     ///
