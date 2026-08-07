@@ -371,9 +371,10 @@ struct PanelView: View {
     /// off-screen. Roomier screens keep the 540pt ceiling, and the list never
     /// collapses below a few visible rows. Mirrors the dashboard's
     /// screen-aware `panelHeight` (a `MenuBarExtra` window can appear on any
-    /// screen, and `NSScreen.main` is the screen the panel opens on).
+    /// screen, so the screen under the mouse at open time is used, falling
+    /// back to `NSScreen.main`).
     private var listMaxHeight: CGFloat {
-        let screen = NSScreen.main?.visibleFrame.height ?? 900
+        let screen = PanelLayout.panelScreen?.visibleFrame.height ?? 900
         var chrome = Layout.fixedChromeHeight
         if !appModel.pendingActions.isEmpty {
             chrome += Layout.pendingHeaderHeight
@@ -451,7 +452,7 @@ struct PanelView: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(Brand.secondaryText)
                     .rotationEffect(.degrees(collapsed ? 0 : 90))
                 Text(group.name.uppercased())

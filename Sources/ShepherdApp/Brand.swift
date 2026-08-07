@@ -17,6 +17,18 @@ import HerdrManagerCore
 enum Brand {
     // MARK: Adaptive body palette
 
+    /// Whether the system "Increase contrast" accessibility setting is on. The
+    /// adaptive provider pushes light variants darker and dark variants
+    /// brighter so the synthetic palette keeps pace with the system's
+    /// increased-contrast amplification instead of staying flat at the AA
+    /// floor (system colors do this automatically; our tokens must too).
+    private static var increaseContrast: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+    }
+
+    /// How far to push a variant while "Increase contrast" is enabled.
+    private static let contrastBoost: Double = 0.10
+
     /// An adaptive color that resolves to a light/dark variant based on the
     /// current appearance. Both variants are chosen to keep text ≥4.5:1.
     private static func adaptive(
@@ -25,7 +37,15 @@ enum Brand {
     ) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
             let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            let c = isDark ? rgbD : rgbL
+            var c = isDark ? rgbD : rgbL
+            if increaseContrast {
+                // Darken on light, brighten on dark: text contrast rises in
+                // both directions and fills stand off the material more. The
+                // direction is safe for approveFill's white label — contrast
+                // goes up on light, and stays ≥4.5:1 on dark.
+                let boost = isDark ? 1 + contrastBoost : 1 - contrastBoost
+                c = (min(c.0 * boost, 1), min(c.1 * boost, 1), min(c.2 * boost, 1))
+            }
             return NSColor(red: c.0, green: c.1, blue: c.2, alpha: 1)
         })
     }

@@ -25,7 +25,7 @@ struct UsageDashboardView: View {
     /// a small or scaled display never clips the pricing section behind the
     /// window edge. The inner ScrollView absorbs the remaining height.
     private var panelHeight: CGFloat {
-        let screen = NSScreen.main?.visibleFrame.height ?? 900
+        let screen = PanelLayout.panelScreen?.visibleFrame.height ?? 900
         return min(620, max(400, screen - 60))
     }
 

@@ -1,4 +1,5 @@
 import CoreGraphics
+import AppKit
 
 /// Shared geometry tokens for the surfaces presented in the menu-bar window.
 ///
@@ -34,4 +35,13 @@ enum PanelLayout {
     /// Full expanded height of the peek: inset + copy header + gap + body.
     static let peekHeight: CGFloat =
         peekTopInset + peekCopyHeight + peekGap + peekBodyHeight
+
+    /// The screen the menu-bar window will open on: the screen under the mouse
+    /// (where the menu-bar click happened), falling back to the main screen.
+    /// `NSScreen.main` alone is the screen holding the *key window*, which is
+    /// not guaranteed to be the clicked screen on a multi-display setup.
+    static var panelScreen: NSScreen? {
+        let mouse = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
+    }
 }
