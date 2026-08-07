@@ -269,6 +269,21 @@ struct LocalTokenMeterTests {
         let opencodeAgent = snapshot.agentSummary(for: agent.id, window: .day)
         #expect(opencodeAgent.usage.totalTokens == 1700 + 150 + 2000 + 300)
         #expect(snapshot.ambiguousAttributionCount == 0)
+
+        // Per-model dimension splits totals by the recorded model id.
+        let deepseekModel = snapshot.modelSummary(for: "deepseek-v4-flash-0731", window: .day)
+        #expect(deepseekModel.usage.inputTokens == 1700)
+        #expect(deepseekModel.usage.outputTokens == 150)
+        #expect(deepseekModel.costIsEstimated == false)
+
+        let qwenModel = snapshot.modelSummary(for: "qwen3.8-max", window: .day)
+        #expect(qwenModel.usage.inputTokens == 2000)
+        #expect(qwenModel.usage.outputTokens == 300)
+        #expect(
+            snapshot.models(withUsageIn: .day)
+                == ["deepseek-v4-flash-0731", "qwen3.8-max"]
+        )
+        #expect(snapshot.modelSummary(for: "unknown-model", window: .day).hasUsage == false)
     }
 
     private func writeOpenCodeDatabase(to url: URL) throws {

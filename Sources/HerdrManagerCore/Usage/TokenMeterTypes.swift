@@ -695,6 +695,7 @@ public struct TokenMeterSnapshot: Equatable, Sendable {
     public let overall: [UsageWindow: TokenMeterSummary]
     public let providers: [TokenMeterProvider: [UsageWindow: TokenMeterSummary]]
     public let agents: [AgentID: [UsageWindow: TokenMeterSummary]]
+    public let models: [String: [UsageWindow: TokenMeterSummary]]
     public let ambiguousAttributionCount: Int
 
     public init(
@@ -702,12 +703,14 @@ public struct TokenMeterSnapshot: Equatable, Sendable {
         overall: [UsageWindow: TokenMeterSummary],
         providers: [TokenMeterProvider: [UsageWindow: TokenMeterSummary]],
         agents: [AgentID: [UsageWindow: TokenMeterSummary]],
+        models: [String: [UsageWindow: TokenMeterSummary]] = [:],
         ambiguousAttributionCount: Int = 0
     ) {
         self.generatedAt = generatedAt
         self.overall = overall
         self.providers = providers
         self.agents = agents
+        self.models = models
         self.ambiguousAttributionCount = ambiguousAttributionCount
     }
 
@@ -715,7 +718,8 @@ public struct TokenMeterSnapshot: Equatable, Sendable {
         generatedAt: .distantPast,
         overall: [:],
         providers: [:],
-        agents: [:]
+        agents: [:],
+        models: [:]
     )
 
     public func overallSummary(for window: UsageWindow) -> TokenMeterSummary {
@@ -734,6 +738,17 @@ public struct TokenMeterSnapshot: Equatable, Sendable {
         window: UsageWindow
     ) -> TokenMeterSummary {
         agents[agentID]?[window] ?? TokenMeterSummary()
+    }
+
+    public func modelSummary(for model: String, window: UsageWindow) -> TokenMeterSummary {
+        models[model]?[window] ?? TokenMeterSummary()
+    }
+
+    /// Model ids that have usage in the given window, sorted alphabetically.
+    public func models(withUsageIn window: UsageWindow) -> [String] {
+        models.compactMap { model, summaries in
+            summaries[window]?.hasUsage == true ? model : nil
+        }.sorted()
     }
 
     public func knownModels(for provider: TokenMeterProvider) -> [String] {

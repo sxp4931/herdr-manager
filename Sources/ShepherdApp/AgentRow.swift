@@ -94,7 +94,7 @@ struct AgentRow: View, Equatable {
         case .danger: return Brand.blocked
         case .warn: return Brand.silent
         case .info: return Brand.done
-        case .neutral: return .secondary
+        case .neutral: return Brand.secondaryText
         }
     }
 
@@ -149,7 +149,7 @@ struct AgentRow: View, Equatable {
                     statePill(accent: accent, text: Brand.pillText(for: agent))
                     Text(dwellString)
                         .font(.system(size: 11.5, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Brand.secondaryText)
                 }
 
                 // Line 2: workspace · tab · ~cwd-basename.
@@ -276,7 +276,7 @@ Text(locationLine)
         case .peekLoading:
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
-                Text("Reading…").font(.system(size: 11.5)).foregroundStyle(.secondary)
+                Text("Reading…").font(.system(size: 11.5)).foregroundStyle(Brand.secondaryText)
             }
             .padding(.top, 4)
         case .peek(let content):
@@ -340,8 +340,8 @@ Text(locationLine)
                 }
                 if !nudgeText.isEmpty {
                     Text("\(nudgeText.count)/\(NudgeLimits.maxLength)")
-                        .font(.system(size: 9.5, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(Brand.secondaryText)
                         .monospacedDigit()
                 }
             }

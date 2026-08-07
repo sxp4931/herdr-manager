@@ -625,6 +625,7 @@ private enum TokenMeterAggregator {
         var overall = makeAccumulatorMap(windows: windows)
         var providerAccumulators: [TokenMeterProvider: [UsageWindow: TokenMeterAccumulator]] = [:]
         var agentAccumulators: [AgentID: [UsageWindow: TokenMeterAccumulator]] = [:]
+        var modelAccumulators: [String: [UsageWindow: TokenMeterAccumulator]] = [:]
         var ambiguous = 0
 
         for event in events where event.date <= now {
@@ -637,6 +638,12 @@ private enum TokenMeterAggregator {
                 var providerMap = providerAccumulators[event.provider] ?? makeAccumulatorMap(windows: windows)
                 providerMap[window, default: TokenMeterAccumulator()].add(event, priceBook: priceBook)
                 providerAccumulators[event.provider] = providerMap
+
+                if let model = event.model, !model.isEmpty {
+                    var modelMap = modelAccumulators[model] ?? makeAccumulatorMap(windows: windows)
+                    modelMap[window, default: TokenMeterAccumulator()].add(event, priceBook: priceBook)
+                    modelAccumulators[model] = modelMap
+                }
 
                 if let agentID = attribution.agentID {
                     var agentMap = agentAccumulators[agentID] ?? makeAccumulatorMap(windows: windows)
@@ -651,6 +658,7 @@ private enum TokenMeterAggregator {
             overall: overall.mapValues { $0.summary() },
             providers: providerAccumulators.mapValues { $0.mapValues { $0.summary() } },
             agents: agentAccumulators.mapValues { $0.mapValues { $0.summary() } },
+            models: modelAccumulators.mapValues { $0.mapValues { $0.summary() } },
             ambiguousAttributionCount: ambiguous
         )
     }

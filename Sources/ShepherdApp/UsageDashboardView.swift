@@ -8,6 +8,7 @@ struct UsageDashboardView: View {
     let onBack: () -> Void
 
     @State private var window: UsageWindow = .day
+    @State private var modelFilter: String?
     @State private var showPricing = false
     @State private var pricingProvider: TokenMeterProvider = .codex
     @State private var pricingModelKey = ""
@@ -33,10 +34,12 @@ struct UsageDashboardView: View {
             header
             Divider()
             windowPicker
+            modelPicker
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     overallCard
+                    modelSection
                     providerSection
                     agentSection
                     pricingSection
@@ -50,6 +53,9 @@ struct UsageDashboardView: View {
         .onAppear {
             loadPricingFields()
             appModel.refreshUsageNow()
+        }
+        .onChange(of: window) { _, _ in
+            modelFilter = nil
         }
         .onChange(of: pricingProvider) { _, _ in
             pricingModelKey = ""
@@ -74,7 +80,7 @@ struct UsageDashboardView: View {
                     .font(.system(size: 15, weight: .bold))
                 Text("API-equivalent list-price estimate")
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Brand.secondaryText)
             }
             Spacer(minLength: 8)
             Button {
@@ -105,16 +111,66 @@ struct UsageDashboardView: View {
         .padding(.vertical, 10)
     }
 
+    /// Models with usage in the current window, sorted by cost descending.
+    private var modelsInWindow: [String] {
+        appModel.usageSnapshot.models(withUsageIn: window)
+            .sorted { left, right in
+                let leftCost = appModel.usageSnapshot
+                    .modelSummary(for: left, window: window).costUSD ?? 0
+                let rightCost = appModel.usageSnapshot
+                    .modelSummary(for: right, window: window).costUSD ?? 0
+                return leftCost > rightCost
+            }
+    }
+
+    private var modelPicker: some View {
+        let models = modelsInWindow
+        return HStack(spacing: 8) {
+            Image(systemName: "cube")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Picker("Model", selection: $modelFilter) {
+                Text("All models").tag(String?.none)
+                ForEach(models, id: \.self) { model in
+                    Text(model).tag(Optional(model))
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let modelFilter {
+                Button {
+                    self.modelFilter = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Clear model filter")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 10)
+    }
+
     private var overallCard: some View {
-        let summary = appModel.usageSnapshot.overallSummary(for: window)
+        let summary: TokenMeterSummary
+        if let modelFilter {
+            summary = appModel.usageSnapshot.modelSummary(for: modelFilter, window: window)
+        } else {
+            summary = appModel.usageSnapshot.overallSummary(for: window)
+        }
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("All local activity")
+                    Text(modelFilter ?? "All local activity")
                         .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                     Text(window.longLabel)
                         .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Brand.secondaryText)
                 }
                 Spacer()
                 Text(UsageFormatter.cost(summary))
@@ -123,7 +179,7 @@ struct UsageDashboardView: View {
             }
             Text("Estimate — not a bill")
                 .font(.system(size: 10))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Brand.secondaryText)
             HStack(spacing: 12) {
                 Label(UsageFormatter.tokens(summary.usage.totalTokens), systemImage: "number")
                 Label("\(summary.sessions) sessions", systemImage: "rectangle.stack")
@@ -132,7 +188,7 @@ struct UsageDashboardView: View {
                 }
             }
             .font(.system(size: 11))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Brand.secondaryText)
             if summary.hasUsage {
                 Text(UsageFormatter.tokenBreakdown(summary))
                     .font(.system(size: 10.5, design: .monospaced))
@@ -151,7 +207,7 @@ struct UsageDashboardView: View {
             } else {
                 Text("No supported local session usage found in this window.")
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Brand.secondaryText)
             }
         }
         .padding(12)
@@ -165,6 +221,29 @@ struct UsageDashboardView: View {
         )
     }
 
+    private var modelSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            sectionTitle("Models")
+            let models = modelsInWindow
+            if models.isEmpty {
+                Text("Per-model totals appear when a session log records a model id.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Brand.secondaryText)
+                    .padding(.vertical, 4)
+            } else {
+                ForEach(models, id: \.self) { model in
+                    UsageSummaryRow(
+                        title: model,
+                        subtitle: UsageFormatter.tokenBreakdown(
+                            appModel.usageSnapshot.modelSummary(for: model, window: window)
+                        ),
+                        summary: appModel.usageSnapshot.modelSummary(for: model, window: window)
+                    )
+                }
+            }
+        }
+    }
+
     private var providerSection: some View {
         VStack(alignment: .leading, spacing: 7) {
             sectionTitle("Providers")
@@ -174,7 +253,7 @@ struct UsageDashboardView: View {
             if providers.isEmpty {
                 Text("Claude, Codex, DeepSeek, Qwen, Kimi, and Grok logs will appear here when available.")
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Brand.secondaryText)
                     .padding(.vertical, 4)
             } else {
                 ForEach(providers) { provider in
@@ -203,7 +282,7 @@ struct UsageDashboardView: View {
             if agents.isEmpty {
                 Text("Per-agent totals appear when a session log's working directory matches an active pane.")
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Brand.secondaryText)
                     .padding(.vertical, 4)
             } else {
                 ForEach(agents) { agent in
@@ -219,7 +298,7 @@ struct UsageDashboardView: View {
                     systemImage: "questionmark.circle"
                 )
                 .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Brand.secondaryText)
             }
         }
     }
@@ -250,7 +329,7 @@ struct UsageDashboardView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Detected models")
                             .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Brand.secondaryText)
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 5) {
                                 ForEach(detectedModels, id: \.self) { model in
@@ -276,7 +355,7 @@ struct UsageDashboardView: View {
                 HStack {
                     Text("USD per 1M tokens · unknown logged models remain n/a")
                         .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Brand.secondaryText)
                     if let saveError {
                         Text(saveError)
                             .font(.system(size: 10))
@@ -298,7 +377,7 @@ struct UsageDashboardView: View {
                 .font(.system(size: 11.5, weight: .semibold))
             Text("Reads local CLI logs only. A tilde means the source logged totals without an input/output split; “partial” means a model price is missing. Subscription marginal cost is still $0—the dollar figure is what the same tokens would cost at the configured API list rates.")
                 .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Brand.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.top, 3)
@@ -308,14 +387,14 @@ struct UsageDashboardView: View {
         Text(text.uppercased())
             .font(.system(size: 10.5, weight: .bold, design: .rounded))
             .tracking(0.6)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Brand.secondaryText)
     }
 
     private func priceField(_ label: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label)
                 .font(.system(size: 10))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Brand.secondaryText)
                 .lineLimit(1)
             TextField("0", text: text)
                 .textFieldStyle(.roundedBorder)
@@ -389,7 +468,7 @@ private struct UsageSummaryRow: View {
                     .help(title)
                 Text(subtitle)
                     .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Brand.secondaryText)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(subtitle)

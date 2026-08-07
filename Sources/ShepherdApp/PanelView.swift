@@ -137,7 +137,7 @@ struct PanelView: View {
                     .font(.system(size: 15, weight: .bold))
                 Text(headerSubtitle)
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Brand.secondaryText)
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
@@ -207,7 +207,7 @@ struct PanelView: View {
         HStack(spacing: 7) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Brand.secondaryText)
             // Custom placeholder: the system placeholder colour drops to ~4.3:1
             // in dark mode, so render our own at an adaptive ≥4.5:1 grey.
             ZStack(alignment: .leading) {
@@ -230,7 +230,7 @@ struct PanelView: View {
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Brand.secondaryText)
                 }
                 .buttonStyle(.borderless)
                 .help("Clear filter")
@@ -384,18 +384,18 @@ struct PanelView: View {
             HStack(spacing: 6) {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Brand.secondaryText)
                     .rotationEffect(.degrees(collapsed ? 0 : 90))
                 Text(group.name.uppercased())
                     .font(.system(size: 11, weight: .bold, design: .rounded))
                     .tracking(0.7)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Brand.secondaryText)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(group.name)
                 Text("\(group.agents.count)")
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Brand.secondaryText)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
                     .background(Capsule().fill(Color.primary.opacity(0.08)))
@@ -523,7 +523,7 @@ struct PanelView: View {
             if case .starting(let kind) = appModel.newAgentState {
                 Text("Starting \(kind)…")
                     .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Brand.secondaryText)
             }
             Spacer(minLength: 6)
             notificationToggle
@@ -550,12 +550,12 @@ struct PanelView: View {
         case .connected:
             HStack(spacing: 4) {
                 Circle().fill(.green).frame(width: 7, height: 7)
-                Text("connected").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("connected").font(.system(size: 11)).foregroundStyle(Brand.secondaryText)
             }
         case .connecting:
             HStack(spacing: 4) {
                 Circle().fill(Brand.warn).frame(width: 7, height: 7)
-                Text("connecting…").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("connecting…").font(.system(size: 11)).foregroundStyle(Brand.secondaryText)
             }
         case .reconnecting, .disconnected:
             // Calm, steady indicator while the background poll keeps retrying
@@ -563,7 +563,7 @@ struct PanelView: View {
             // flips to "connected" exactly once on the next successful poll.
             HStack(spacing: 4) {
                 Circle().fill(Color.secondary).frame(width: 7, height: 7)
-                Text("disconnected").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("disconnected").font(.system(size: 11)).foregroundStyle(Brand.secondaryText)
             }
         }
     }
@@ -706,7 +706,7 @@ struct PanelView: View {
                 .font(.system(size: 15, weight: .semibold))
             Text("Looked for it at:")
                 .font(.system(size: 12.5))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Brand.secondaryText)
             Text(LiveHerdrAdapter.resolveSocketPath())
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(Brand.secondaryText)
@@ -725,7 +725,7 @@ struct PanelView: View {
                 .font(.system(size: 15, weight: .semibold))
             Text("Start one below to get going.")
                 .font(.system(size: 12.5))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Brand.secondaryText)
             newAgentMenu(label: "New agent", prominent: true)
                 .padding(.top, 2)
         }
@@ -741,7 +741,7 @@ struct PanelView: View {
                 .font(.system(size: 15, weight: .semibold))
             Text(subtitle)
                 .font(.system(size: 12.5))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Brand.secondaryText)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
         }

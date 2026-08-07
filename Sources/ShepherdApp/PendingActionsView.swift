@@ -59,7 +59,7 @@ struct PendingActionsView: View {
                         if let observed = action.observedStatus, !observed.isEmpty {
                             Text("observed: \(observed)")
                                 .font(.system(size: 10.5, design: .monospaced))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(Brand.secondaryText)
                                 .lineLimit(1)
                         }
                         if !expiresText.isEmpty {
@@ -87,7 +87,7 @@ struct PendingActionsView: View {
                                 let value = action.params[key] ?? ""
                                 Text("\(key): \(value)")
                                     .font(.system(size: 10.5, design: .monospaced))
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Brand.secondaryText)
                                     .lineLimit(1)
                                     .help("\(key): \(value)")
                                     .textSelection(.enabled)
