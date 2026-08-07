@@ -72,6 +72,7 @@ struct UsageDashboardView: View {
             }
             .buttonStyle(.borderless)
             .help("Back to agents")
+            .accessibilityLabel("Back to agents")
 
             Image(systemName: "chart.line.uptrend.xyaxis")
                 .foregroundStyle(Brand.amber)
@@ -92,6 +93,7 @@ struct UsageDashboardView: View {
             }
             .buttonStyle(.borderless)
             .help("Refresh usage")
+            .accessibilityLabel("Refresh usage")
         }
         .padding(.horizontal, 14)
         .padding(.top, 13)

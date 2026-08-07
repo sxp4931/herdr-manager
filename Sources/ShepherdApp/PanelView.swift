@@ -97,6 +97,10 @@ struct PanelView: View {
             return .handled
         }
         .focusable()
+        // Keyboard-first: the panel opens with the filter field focused so
+        // "type to filter" works immediately; Esc drops to arrow-key triage
+        // (the .onKeyPress handlers below already gate on searchFocused).
+        .defaultFocus($searchFocused, true)
         .onChange(of: appModel.selectedAgentId) { _, _ in
             resetExpansion()
         }
@@ -186,10 +190,10 @@ struct PanelView: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
-            iconButton(system: "chart.line.uptrend.xyaxis", help: "Usage & cost (⌘U)", shortcut: "u") {
+            iconButton(system: "chart.line.uptrend.xyaxis", help: "Usage & cost (⌘U)", label: "Usage & cost", shortcut: "u") {
                 showUsageDashboard = true
             }
-            iconButton(system: "arrow.clockwise", help: "Resync (⌘R)", shortcut: "r") {
+            iconButton(system: "arrow.clockwise", help: "Resync (⌘R)", label: "Resync", shortcut: "r") {
                 appModel.resync()
             }
             Menu {
@@ -205,6 +209,7 @@ struct PanelView: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .help("More")
+            .accessibilityLabel("More")
         }
         .padding(.horizontal, Layout.gutter)
         .padding(.top, 13)
@@ -212,7 +217,7 @@ struct PanelView: View {
     }
 
     private func iconButton(
-        system: String, help: String, shortcut: Character, action: @escaping () -> Void
+        system: String, help: String, label: String, shortcut: Character, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             Image(systemName: system)
@@ -222,6 +227,7 @@ struct PanelView: View {
         }
         .buttonStyle(.borderless)
         .help(help)
+        .accessibilityLabel(label)
         .keyboardShortcut(KeyEquivalent(shortcut), modifiers: .command)
     }
 
@@ -279,6 +285,7 @@ struct PanelView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Clear filter")
+                .accessibilityLabel("Clear filter")
             }
         }
         .padding(.horizontal, 9)
@@ -603,6 +610,7 @@ struct PanelView: View {
         .toggleStyle(.button)
         .controlSize(.regular)
         .help(appModel.notificationsEnabled ? "Notifications on" : "Notifications off — click to opt in")
+        .accessibilityLabel("Notifications")
     }
 
     @ViewBuilder
