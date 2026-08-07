@@ -10,6 +10,8 @@ public enum TokenMeterProvider: String, Codable, CaseIterable, Hashable, Identif
     case codex
     case kimi
     case grok
+    case deepseek
+    case qwen
 
     public var id: Self { self }
 
@@ -19,6 +21,8 @@ public enum TokenMeterProvider: String, Codable, CaseIterable, Hashable, Identif
         case .codex: return "Codex / OpenAI"
         case .kimi: return "Kimi"
         case .grok: return "Grok"
+        case .deepseek: return "DeepSeek"
+        case .qwen: return "Qwen / Alibaba"
         }
     }
 
@@ -33,6 +37,8 @@ public enum TokenMeterProvider: String, Codable, CaseIterable, Hashable, Identif
         case "codex", "openai": self = .codex
         case "kimi", "kimi-code", "kimi_code": self = .kimi
         case "grok", "xai": self = .grok
+        case "deepseek", "deepseek-r1", "deepseek_v3": self = .deepseek
+        case "qwen", "alibaba", "dashscope", "qwen-coder": self = .qwen
         default: return nil
         }
     }
@@ -175,9 +181,17 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             }
 
             let providerKeys = Set(TokenMeterProvider.allCases.map(\.rawValue))
+            // Exclude provider-scoped keys (e.g. "codex:gpt-5"), which are
+            // handled by the scoped match above, and bare provider fallback
+            // keys. Unscoped id entries may legitimately contain colons (e.g.
+            // the OpenRouter "tencent/hy3:free" free model), so only prefixes
+            // belonging to a provider are filtered rather than any colon.
+            let providerScopedPrefixes = Set(
+                TokenMeterProvider.allCases.map { "\($0.rawValue):" }
+            )
             let legacyMatches = normalizedEntries
                 .filter { key, _ in
-                    !key.contains(":")
+                    !providerScopedPrefixes.contains { key.hasPrefix($0) }
                         && !providerKeys.contains(key)
                         && (modelKey == key || modelKey.contains(key))
                 }
@@ -260,6 +274,20 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             cacheWrite1hPerMillion: 10.0,
             outputPerMillion: 25.0
         ),
+        "claude-fable-5": TokenMeterPricing(
+            inputPerMillion: 10.0,
+            cacheReadPerMillion: 1.0,
+            cacheWrite5mPerMillion: 12.50,
+            cacheWrite1hPerMillion: 20.0,
+            outputPerMillion: 50.0
+        ),
+        "claude-mythos-5": TokenMeterPricing(
+            inputPerMillion: 10.0,
+            cacheReadPerMillion: 1.0,
+            cacheWrite5mPerMillion: 12.50,
+            cacheWrite1hPerMillion: 20.0,
+            outputPerMillion: 50.0
+        ),
         "claude-opus-4.5": TokenMeterPricing(
             inputPerMillion: 5.0,
             cacheReadPerMillion: 0.50,
@@ -296,8 +324,10 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             outputPerMillion: 15.0
         ),
 
-        // OpenAI model rates. Codex sessions often omit the model id, so the
-        // provider fallback uses GPT-5.6 Terra until the user changes it.
+        // OpenAI / Codex model rates (short-context), verified against
+        // https://platform.openai.com/docs/pricing on 2026-08-06. Codex
+        // sessions often omit the model id, so the provider fallback uses
+        // the GPT-5.6 Terra rate.
         "gpt-5.6-sol": TokenMeterPricing(
             inputPerMillion: 5.0,
             cacheReadPerMillion: 0.50,
@@ -306,39 +336,67 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             outputPerMillion: 30.0
         ),
         "gpt-5.6-terra": TokenMeterPricing(
-            inputPerMillion: 2.50,
-            cacheReadPerMillion: 0.25,
-            cacheWrite5mPerMillion: 3.125,
-            cacheWrite1hPerMillion: 3.125,
-            outputPerMillion: 15.0
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.20,
+            cacheWrite5mPerMillion: 2.50,
+            cacheWrite1hPerMillion: 2.50,
+            outputPerMillion: 12.0
         ),
         "gpt-5.6-luna": TokenMeterPricing(
-            inputPerMillion: 1.0,
-            cacheReadPerMillion: 0.10,
-            cacheWrite5mPerMillion: 1.25,
-            cacheWrite1hPerMillion: 1.25,
-            outputPerMillion: 6.0
+            inputPerMillion: 0.20,
+            cacheReadPerMillion: 0.02,
+            cacheWrite5mPerMillion: 0.25,
+            cacheWrite1hPerMillion: 0.25,
+            outputPerMillion: 1.20
+        ),
+        "gpt-5.5": TokenMeterPricing(
+            inputPerMillion: 5.0,
+            cacheReadPerMillion: 0.50,
+            cacheWrite5mPerMillion: 5.0,
+            cacheWrite1hPerMillion: 5.0,
+            outputPerMillion: 30.0
+        ),
+        "gpt-5.5-pro": TokenMeterPricing(
+            inputPerMillion: 30.0,
+            cacheReadPerMillion: 30.0,
+            cacheWrite5mPerMillion: 30.0,
+            cacheWrite1hPerMillion: 30.0,
+            outputPerMillion: 180.0
         ),
         "gpt-5.4": TokenMeterPricing(
             inputPerMillion: 2.50,
             cacheReadPerMillion: 0.25,
-            cacheWrite5mPerMillion: 3.125,
-            cacheWrite1hPerMillion: 3.125,
+            cacheWrite5mPerMillion: 2.50,
+            cacheWrite1hPerMillion: 2.50,
             outputPerMillion: 15.0
         ),
         "gpt-5.4-mini": TokenMeterPricing(
             inputPerMillion: 0.75,
             cacheReadPerMillion: 0.075,
-            cacheWrite5mPerMillion: 0.9375,
-            cacheWrite1hPerMillion: 0.9375,
+            cacheWrite5mPerMillion: 0.75,
+            cacheWrite1hPerMillion: 0.75,
             outputPerMillion: 4.50
         ),
         "gpt-5.4-nano": TokenMeterPricing(
             inputPerMillion: 0.20,
             cacheReadPerMillion: 0.02,
-            cacheWrite5mPerMillion: 0.25,
-            cacheWrite1hPerMillion: 0.25,
+            cacheWrite5mPerMillion: 0.20,
+            cacheWrite1hPerMillion: 0.20,
             outputPerMillion: 1.25
+        ),
+        "gpt-5.4-pro": TokenMeterPricing(
+            inputPerMillion: 30.0,
+            cacheReadPerMillion: 30.0,
+            cacheWrite5mPerMillion: 30.0,
+            cacheWrite1hPerMillion: 30.0,
+            outputPerMillion: 180.0
+        ),
+        "gpt-5.3-codex": TokenMeterPricing(
+            inputPerMillion: 1.75,
+            cacheReadPerMillion: 0.175,
+            cacheWrite5mPerMillion: 1.75,
+            cacheWrite1hPerMillion: 1.75,
+            outputPerMillion: 14.0
         ),
         "gpt-5": TokenMeterPricing(
             inputPerMillion: 1.25,
@@ -347,12 +405,136 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             cacheWrite1hPerMillion: 1.5625,
             outputPerMillion: 10.0
         ),
+        // codex-auto-review has no separately published fee; it is a Codex
+        // agent that consumes the same token budget, priced like GPT-5.6 Terra.
+        "codex-auto-review": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.20,
+            cacheWrite5mPerMillion: 2.50,
+            cacheWrite1hPerMillion: 2.50,
+            outputPerMillion: 12.0
+        ),
         "codex": TokenMeterPricing(
-            inputPerMillion: 2.50,
-            cacheReadPerMillion: 0.25,
-            cacheWrite5mPerMillion: 3.125,
-            cacheWrite1hPerMillion: 3.125,
-            outputPerMillion: 15.0
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.20,
+            cacheWrite5mPerMillion: 2.50,
+            cacheWrite1hPerMillion: 2.50,
+            outputPerMillion: 12.0
+        ),
+
+        // DeepSeek rates, verified against
+        // https://api-docs.deepseek.com/quick_start/pricing on 2026-08-06.
+        // DeepSeek has no separate cache-write tier; writes bill at the cache
+        // miss (input) rate. A price increase has been announced but with no
+        // date or amount yet.
+        "deepseek-v4-flash": TokenMeterPricing(
+            inputPerMillion: 0.14,
+            cacheReadPerMillion: 0.0028,
+            cacheWrite5mPerMillion: 0.14,
+            cacheWrite1hPerMillion: 0.14,
+            outputPerMillion: 0.28
+        ),
+        // The -0731 suffix is the versioned snapshot id recorded in opencode's
+        // DB; it prices identically to v4-flash.
+        "deepseek-v4-flash-0731": TokenMeterPricing(
+            inputPerMillion: 0.14,
+            cacheReadPerMillion: 0.0028,
+            cacheWrite5mPerMillion: 0.14,
+            cacheWrite1hPerMillion: 0.14,
+            outputPerMillion: 0.28
+        ),
+        "deepseek-v4-pro": TokenMeterPricing(
+            inputPerMillion: 0.435,
+            cacheReadPerMillion: 0.003625,
+            cacheWrite5mPerMillion: 0.435,
+            cacheWrite1hPerMillion: 0.435,
+            outputPerMillion: 0.87
+        ),
+        "deepseek": TokenMeterPricing(
+            inputPerMillion: 0.14,
+            cacheReadPerMillion: 0.0028,
+            cacheWrite5mPerMillion: 0.14,
+            cacheWrite1hPerMillion: 0.14,
+            outputPerMillion: 0.28
+        ),
+
+        // Qwen / Alibaba Model Studio rates (Global regions), verified against
+        // https://www.alibabacloud.com/help/en/model-studio/qwen3-8-max on
+        // 2026-08-03. The provider fallback uses the balanced qwen3.7-plus
+        // rate.
+        "qwen3.8-max": TokenMeterPricing(
+            inputPerMillion: 1.65,
+            cacheReadPerMillion: 0.206,
+            cacheWrite5mPerMillion: 2.063,
+            cacheWrite1hPerMillion: 2.063,
+            outputPerMillion: 4.951
+        ),
+        // Alias: no separately priced page for the preview snapshot.
+        "qwen3.8-max-preview": TokenMeterPricing(
+            inputPerMillion: 1.65,
+            cacheReadPerMillion: 0.206,
+            cacheWrite5mPerMillion: 2.063,
+            cacheWrite1hPerMillion: 2.063,
+            outputPerMillion: 4.951
+        ),
+        "qwen3.7-max": TokenMeterPricing(
+            inputPerMillion: 1.65,
+            cacheReadPerMillion: 0.33,
+            cacheWrite5mPerMillion: 2.063,
+            cacheWrite1hPerMillion: 2.063,
+            outputPerMillion: 4.951
+        ),
+        "qwen3.7-plus": TokenMeterPricing(
+            inputPerMillion: 0.276,
+            cacheReadPerMillion: 0.056,
+            cacheWrite5mPerMillion: 0.344,
+            cacheWrite1hPerMillion: 0.344,
+            outputPerMillion: 1.101
+        ),
+        "qwen3.6-flash": TokenMeterPricing(
+            inputPerMillion: 0.165,
+            cacheReadPerMillion: 0.017,
+            cacheWrite5mPerMillion: 0.206,
+            cacheWrite1hPerMillion: 0.206,
+            outputPerMillion: 0.99
+        ),
+        "glm-5.2": TokenMeterPricing(
+            inputPerMillion: 1.10,
+            cacheReadPerMillion: 0.275,
+            cacheWrite5mPerMillion: 1.10,
+            cacheWrite1hPerMillion: 1.10,
+            outputPerMillion: 3.851
+        ),
+        "qwen": TokenMeterPricing(
+            inputPerMillion: 0.276,
+            cacheReadPerMillion: 0.056,
+            cacheWrite5mPerMillion: 0.344,
+            cacheWrite1hPerMillion: 0.344,
+            outputPerMillion: 1.101
+        ),
+
+        // Free / local models — priced at $0 so they show as $0 instead of
+        // "price missing".
+        "tencent/hy3:free": TokenMeterPricing(
+            inputPerMillion: 0.0,
+            cacheReadPerMillion: 0.0,
+            cacheWrite5mPerMillion: 0.0,
+            cacheWrite1hPerMillion: 0.0,
+            outputPerMillion: 0.0
+        ),
+        "deepseek-v4-flash-free": TokenMeterPricing(
+            inputPerMillion: 0.0,
+            cacheReadPerMillion: 0.0,
+            cacheWrite5mPerMillion: 0.0,
+            cacheWrite1hPerMillion: 0.0,
+            outputPerMillion: 0.0
+        ),
+        "qwen3.6-35b-a3b": TokenMeterPricing(
+            inputPerMillion: 0.0,
+            cacheReadPerMillion: 0.0,
+            cacheWrite5mPerMillion: 0.0,
+            cacheWrite1hPerMillion: 0.0,
+            outputPerMillion: 0.0
         ),
 
         // xAI rates used by TokenMeter's total-only Grok adapter.

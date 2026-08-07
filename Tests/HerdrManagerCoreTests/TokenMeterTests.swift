@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import Testing
 @testable import HerdrManagerCore
 
@@ -49,7 +50,7 @@ struct TokenMeterPricingTests {
         #expect(sonnet?.outputPerMillion == 15.0)
         #expect(opus?.outputPerMillion == 25.0)
         #expect(book.pricing(for: .claude, model: "claude-future-9") == nil)
-        #expect(book.pricing(for: .codex, model: nil)?.outputPerMillion == 15.0)
+        #expect(book.pricing(for: .codex, model: nil)?.outputPerMillion == 12.0)
     }
 
     @Test("Supports provider-scoped custom model overrides")
@@ -60,6 +61,64 @@ struct TokenMeterPricingTests {
 
         #expect(book.pricing(for: .kimi, model: "kimi-k2.5-20260101") == pricing)
         #expect(book.pricing(for: .grok, model: "kimi-k2.5-20260101") == nil)
+    }
+
+    @Test("Uses verified official DeepSeek and Qwen prices")
+    func officialPricesForDeepSeekAndQwen() {
+        let book = TokenMeterPriceBook.defaults
+
+        let deepseek = book.pricing(for: .deepseek, model: "deepseek-v4-flash-0731")
+        #expect(deepseek?.inputPerMillion == 0.14)
+        #expect(deepseek?.outputPerMillion == 0.28)
+        #expect(deepseek?.cacheReadPerMillion == 0.0028)
+
+        let qwenMax = book.pricing(for: .qwen, model: "qwen3.8-max")
+        #expect(qwenMax?.inputPerMillion == 1.65)
+        #expect(qwenMax?.outputPerMillion == 4.951)
+
+        let qwenPreview = book.pricing(for: .qwen, model: "qwen3.8-max-preview")
+        #expect(qwenPreview?.inputPerMillion == 1.65)
+
+        // The local LM Studio model must hit its $0 entry, not the qwen fallback.
+        let local = book.pricing(for: .qwen, model: "qwen3.6-35b-a3b")
+        #expect(local?.outputPerMillion == 0.0)
+
+        let glm = book.pricing(for: .qwen, model: "glm-5.2")
+        #expect(glm?.inputPerMillion == 1.10)
+    }
+
+    @Test("Uses verified official OpenAI and Codex prices")
+    func officialOpenAIPrices() {
+        let book = TokenMeterPriceBook.defaults
+
+        #expect(book.pricing(for: .codex, model: "gpt-5.6-terra")?.inputPerMillion == 2.0)
+        #expect(book.pricing(for: .codex, model: "gpt-5.6-terra")?.outputPerMillion == 12.0)
+        #expect(book.pricing(for: .codex, model: "gpt-5.6-luna")?.inputPerMillion == 0.20)
+        #expect(book.pricing(for: .codex, model: "gpt-5.6-luna")?.outputPerMillion == 1.20)
+        #expect(book.pricing(for: .codex, model: "gpt-5.3-codex")?.inputPerMillion == 1.75)
+        #expect(book.pricing(for: .codex, model: "gpt-5.3-codex")?.outputPerMillion == 14.0)
+        #expect(book.pricing(for: .codex, model: "codex-auto-review")?.inputPerMillion == 2.0)
+        #expect(book.pricing(for: .codex, model: nil)?.inputPerMillion == 2.0)
+    }
+
+    @Test("Uses verified official Claude prices")
+    func claudeOfficialPrices() {
+        let book = TokenMeterPriceBook.defaults
+
+        #expect(book.pricing(for: .claude, model: "claude-sonnet-5")?.inputPerMillion == 2.0)
+        #expect(book.pricing(for: .claude, model: "claude-sonnet-5")?.outputPerMillion == 10.0)
+        #expect(book.pricing(for: .claude, model: "claude-opus-5")?.outputPerMillion == 25.0)
+        #expect(book.pricing(for: .claude, model: "claude-fable-5")?.inputPerMillion == 10.0)
+        #expect(book.pricing(for: .claude, model: "claude-fable-5")?.outputPerMillion == 50.0)
+        #expect(book.pricing(for: .claude, model: "claude-haiku-4.5")?.inputPerMillion == 1.0)
+    }
+
+    @Test("Free and local models price at zero")
+    func freeModelsAreZero() {
+        let book = TokenMeterPriceBook.defaults
+
+        #expect(book.pricing(for: .qwen, model: "tencent/hy3:free")?.outputPerMillion == 0.0)
+        #expect(book.pricing(for: .deepseek, model: "deepseek-v4-flash-free")?.outputPerMillion == 0.0)
     }
 }
 
@@ -168,6 +227,143 @@ struct LocalTokenMeterTests {
         #expect(snapshot.agentSummary(for: first.id, window: .day).hasUsage == false)
         #expect(snapshot.agentSummary(for: second.id, window: .day).hasUsage == false)
         #expect(snapshot.providerSummary(for: .codex, window: .day).hasUsage)
+    }
+
+    @Test("Reads opencode SQLite sessions and attributes the opencode agent")
+    func readsOpenCodeDatabase() async throws {
+        let home = try makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let dbURL = home
+            .appendingPathComponent(".local/share/opencode", isDirectory: true)
+            .appendingPathComponent("opencode.db")
+        try writeOpenCodeDatabase(to: dbURL)
+
+        let agent = Agent(
+            id: AgentID("w1:opencode"),
+            kind: .opencode,
+            enteredAt: date("2026-01-15T10:00:00Z"),
+            cwd: "/repo"
+        )
+        let meter = LocalTokenMeter(homeDirectory: home)
+        let snapshot = await meter.snapshot(
+            agents: [agent],
+            priceBook: TokenMeterPriceBook.defaults,
+            now: date("2026-01-15T13:00:00Z"),
+            calendar: utcCalendar()
+        )
+
+        let deepseek = snapshot.providerSummary(for: .deepseek, window: .day)
+        // input = 1000 + 200 (write) + 500 (read) = 1700
+        #expect(deepseek.usage.inputTokens == 1700)
+        // output = 100 + 50 (reasoning) = 150
+        #expect(deepseek.usage.outputTokens == 150)
+        #expect(deepseek.usage.cacheReadTokens == 500)
+        #expect(deepseek.usage.cacheWrite5mTokens == 200)
+        #expect(deepseek.costUSD != nil)
+        #expect(deepseek.costIsEstimated == false) // model was recorded
+
+        let qwen = snapshot.providerSummary(for: .qwen, window: .day)
+        #expect(qwen.usage.inputTokens == 2000)
+        #expect(qwen.usage.outputTokens == 300)
+
+        let opencodeAgent = snapshot.agentSummary(for: agent.id, window: .day)
+        #expect(opencodeAgent.usage.totalTokens == 1700 + 150 + 2000 + 300)
+        #expect(snapshot.ambiguousAttributionCount == 0)
+    }
+
+    private func writeOpenCodeDatabase(to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        var db: OpaquePointer?
+        guard sqlite3_open(url.path, &db) == SQLITE_OK, let db else {
+            throw TestingError.dbOpenFailed
+        }
+        defer { sqlite3_close(db) }
+
+        let create = """
+        CREATE TABLE session (
+            id TEXT PRIMARY KEY,
+            model TEXT,
+            agent TEXT,
+            directory TEXT,
+            tokens_input INTEGER,
+            tokens_output INTEGER,
+            tokens_cache_read INTEGER,
+            tokens_cache_write INTEGER,
+            tokens_reasoning INTEGER,
+            time_created INTEGER
+        );
+        """
+        #expect(sqlite3_exec(db, create, nil, nil, nil) == SQLITE_OK)
+
+        let deepseekModel = #"{"id":"deepseek-v4-flash-0731","providerID":"alibaba-token-plan","variant":"max"}"#
+        let deepseekTime = Int64(date("2026-01-15T11:00:00Z").timeIntervalSince1970 * 1000)
+        let qwenModel = #"{"id":"qwen3.8-max","providerID":"alibaba-token-plan"}"#
+        let qwenTime = Int64(date("2026-01-15T12:00:00Z").timeIntervalSince1970 * 1000)
+
+        insertOpenCodeRow(
+            db,
+            id: "sess-deepseek",
+            model: deepseekModel,
+            directory: "/repo",
+            input: 1000,
+            output: 100,
+            cacheRead: 500,
+            cacheWrite: 200,
+            reasoning: 50,
+            timeCreated: deepseekTime
+        )
+        insertOpenCodeRow(
+            db,
+            id: "sess-qwen",
+            model: qwenModel,
+            directory: "/repo",
+            input: 2000,
+            output: 300,
+            cacheRead: 0,
+            cacheWrite: 0,
+            reasoning: 0,
+            timeCreated: qwenTime
+        )
+    }
+
+    private func insertOpenCodeRow(
+        _ db: OpaquePointer,
+        id: String,
+        model: String,
+        directory: String,
+        input: Int,
+        output: Int,
+        cacheRead: Int,
+        cacheWrite: Int,
+        reasoning: Int,
+        timeCreated: Int64
+    ) {
+        let sql = """
+        INSERT INTO session (id, model, agent, directory, tokens_input, tokens_output, \
+        tokens_cache_read, tokens_cache_write, tokens_reasoning, time_created) \
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, (id as NSString).utf8String, -1, nil)
+        sqlite3_bind_text(stmt, 2, (model as NSString).utf8String, -1, nil)
+        sqlite3_bind_text(stmt, 3, nil, -1, nil)
+        sqlite3_bind_text(stmt, 4, (directory as NSString).utf8String, -1, nil)
+        sqlite3_bind_int64(stmt, 5, Int64(input))
+        sqlite3_bind_int64(stmt, 6, Int64(output))
+        sqlite3_bind_int64(stmt, 7, Int64(cacheRead))
+        sqlite3_bind_int64(stmt, 8, Int64(cacheWrite))
+        sqlite3_bind_int64(stmt, 9, Int64(reasoning))
+        sqlite3_bind_int64(stmt, 10, timeCreated)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { return }
+    }
+
+    private enum TestingError: Error {
+        case dbOpenFailed
     }
 
     private func makeTemporaryHome() throws -> URL {

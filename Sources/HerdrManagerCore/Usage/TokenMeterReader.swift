@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 
 /// Reads the local session logs used by the supported coding-agent CLIs.
 ///
@@ -32,6 +33,7 @@ public actor LocalTokenMeter {
         events.append(contentsOf: scanCodex())
         events.append(contentsOf: scanKimi())
         events.append(contentsOf: scanGrok())
+        events.append(contentsOf: scanOpenCode())
 
         return TokenMeterAggregator.snapshot(
             events: events,
@@ -387,6 +389,110 @@ public actor LocalTokenMeter {
         }.sorted { $0.date < $1.date }
     }
 
+    // MARK: - Helpers
+
+    /// Maps an opencode DB model id to a TokenMeter provider for grouping.
+    ///
+    /// DeepSeek ids start with "deepseek"; Qwen / Alibaba and GLM ids start
+    /// with "qwen"/"glm". Everything else (tencent/hy3:free, local LM Studio
+    /// models, OpenRouter gateways) is grouped under Qwen / Alibaba as an
+    /// "other gateway / local" bucket. Free and local models still price at
+    /// $0 because the price book's unscoped model entries match regardless of
+    /// provider, so this choice only affects the provider summary grouping.
+    private static func provider(forOpenCodeModelID id: String) -> TokenMeterProvider {
+        let lower = id.lowercased()
+        if lower.hasPrefix("deepseek") { return .deepseek }
+        if lower.hasPrefix("qwen") || lower.hasPrefix("glm") { return .qwen }
+        return .qwen
+    }
+
+    // MARK: - OpenCode SQLite log
+
+    private func scanOpenCode() -> [TokenUsageEvent] {
+        let dbPath = homeDirectory
+            .appendingPathComponent(".local/share/opencode/opencode.db", isDirectory: false)
+            .path
+        guard FileManager.default.fileExists(atPath: dbPath) else { return [] }
+
+        var db: OpaquePointer?
+        let openResult = sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, nil)
+        guard openResult == SQLITE_OK, let db else { return [] }
+        defer { sqlite3_close(db) }
+
+        let sql = """
+        SELECT rowid, id, model, agent, directory, tokens_input, tokens_output, \
+        tokens_cache_read, tokens_cache_write, tokens_reasoning, time_created \
+        FROM session WHERE model IS NOT NULL AND model != ''
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
+            return []
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        var events: [TokenUsageEvent] = []
+
+        // Column layout: 0=rowid, 1=id, 2=model, 3=agent, 4=directory,
+        // 5..=token counts, 10=time_created.
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let rowID = sqlite3_column_int64(stmt, 0)
+            guard let modelID = sqliteModelJSONID(stmt, index: 2),
+                  let sessionID = sqliteText(stmt, index: 1),
+                  !sessionID.isEmpty else { continue }
+
+            let input = sqliteInteger(stmt, index: 5)
+            let output = sqliteInteger(stmt, index: 6)
+            let cacheRead = sqliteInteger(stmt, index: 7)
+            let cacheWrite = sqliteInteger(stmt, index: 8)
+            let reasoning = sqliteInteger(stmt, index: 9)
+            let timeCreated = sqliteInteger(stmt, index: 10)
+
+            let tokenUsage = TokenUsage(
+                inputTokens: input + cacheWrite + cacheRead,
+                cacheReadTokens: cacheRead,
+                cacheWrite5mTokens: cacheWrite,
+                cacheWrite1hTokens: 0,
+                outputTokens: output + reasoning
+            )
+            guard tokenUsage.totalTokens > 0 else { continue }
+
+            let date = Date(timeIntervalSince1970: Double(timeCreated) / 1_000.0)
+            let cwd = normalizedPath(sqliteText(stmt, index: 4))
+            events.append(TokenUsageEvent(
+                id: "opencode:\(sessionID):\(rowID)",
+                sessionID: sessionID,
+                provider: Self.provider(forOpenCodeModelID: modelID),
+                model: modelID,
+                cwd: cwd,
+                date: date,
+                usage: tokenUsage
+            ))
+        }
+        return events
+    }
+
+    private func sqliteInteger(_ stmt: OpaquePointer, index: Int32) -> Int64 {
+        sqlite3_column_int64(stmt, index)
+    }
+
+    private func sqliteText(_ stmt: OpaquePointer, index: Int32) -> String? {
+        guard let cString = sqlite3_column_text(stmt, index) else { return nil }
+        return String(cString: cString)
+    }
+
+    /// Parses the `model` column, which is a JSON object like
+    /// `{"id":"deepseek-v4-flash-0731","providerID":"alibaba-token-plan"}`.
+    /// Returns the `id` value if present, otherwise nil (row skipped).
+    private func sqliteModelJSONID(_ stmt: OpaquePointer, index: Int32) -> String? {
+        guard let text = sqliteText(stmt, index: index),
+              let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dict = object as? [String: Any],
+              let id = dict["id"] as? String,
+              !id.isEmpty else { return nil }
+        return id
+    }
+
     // MARK: - File and JSON helpers
 
     private func jsonlFiles(in root: URL) -> [URL] {
@@ -563,7 +669,13 @@ private enum TokenMeterAggregator {
             return (nil, false)
         }
         let matches = agents.filter { agent in
-            TokenMeterProvider(agentKind: agent.kind) == event.provider
+            if agent.kind == .opencode {
+                // opencode is one CLI that can run deepseek/qwen/local models,
+                // so it matches any priced event whose working directory
+                // matches, regardless of the event's provider.
+                return normalizedAgentCWD(agent.cwd) == eventCWD
+            }
+            return TokenMeterProvider(agentKind: agent.kind) == event.provider
                 && normalizedAgentCWD(agent.cwd) == eventCWD
         }
         if matches.count == 1 { return (matches[0].id, false) }
