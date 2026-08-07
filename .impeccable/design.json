@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-07T00:00:00Z",
+  "title": "Design System: Shepherd",
+  "extensions": {
+    "colorMeta": {
+      "amber": { "role": "primary", "displayName": "Warm Amber", "canonical": "#8A5A00", "darkVariant": "#FFC94D", "tonalRamp": ["#3A2600", "#4F3300", "#644000", "#8A5A00", "#B87700", "#E6A000", "#FFC94D", "#FFE3A0"] },
+      "amber-deep": { "role": "tertiary", "displayName": "Amber Deep", "canonical": "#6B4500", "darkVariant": "#F5B24A", "tonalRamp": ["#2E1E00", "#3F2A00", "#503600", "#6B4500", "#8F5C00", "#B37400", "#D68F00", "#F5B24A"] },
+      "blocked": { "role": "status", "displayName": "Blocked Red", "canonical": "#B3261E", "darkVariant": "#FF6B6B", "tonalRamp": ["#4A0E0B", "#66140F", "#821A14", "#B3261E", "#D8453C", "#F06A61", "#FF6B6B", "#FFB0AB"] },
+      "silent": { "role": "status", "displayName": "Silent Amber", "canonical": "#8A5A00", "darkVariant": "#FFC94D", "tonalRamp": ["#3A2600", "#4F3300", "#644000", "#8A5A00", "#B87700", "#E6A000", "#FFC94D", "#FFE3A0"] },
+      "done": { "role": "status", "displayName": "Done Blue", "canonical": "#1E4BD2", "darkVariant": "#6CA6FF", "tonalRamp": ["#0C1F59", "#112B80", "#1638A8", "#1E4BD2", "#3F6CE8", "#5F8AFB", "#6CA6FF", "#B8D1FF"] },
+      "working": { "role": "status", "displayName": "Working Green", "canonical": "#1E7138", "darkVariant": "#54D98E", "tonalRamp": ["#0C3018", "#104721", "#145126", "#1E7138", "#2B934E", "#3CB565", "#54D98E", "#9BEBC0"] },
+      "idle": { "role": "status", "displayName": "Idle Grey", "canonical": "#5B6B64", "darkVariant": "#8FA8A0", "tonalRamp": ["#262E2B", "#333D39", "#454F4B", "#5B6B64", "#74847D", "#8FA8A0", "#A9BCB6", "#D3DEDA"] },
+      "unknown": { "role": "status", "displayName": "Unknown Grey", "canonical": "#5F666B", "darkVariant": "#929A9F", "tonalRamp": ["#272B2E", "#34393C", "#464C50", "#5F666B", "#7A8287", "#929A9F", "#AAB2B7", "#D4D8DB"] },
+      "warn": { "role": "operational", "displayName": "Warning Orange", "canonical": "#C2410C", "darkVariant": "#FFA726", "tonalRamp": ["#521B05", "#6E2507", "#8A2F09", "#C2410C", "#E05A1F", "#F97A38", "#FFA726", "#FFCD8A"] },
+      "approve-fill": { "role": "operational", "displayName": "Approve Fill", "canonical": "#1E7138", "darkVariant": "#145126", "tonalRamp": ["#0C3018", "#104721", "#145126", "#1E7138", "#2B934E", "#3CB565", "#54D98E", "#9BEBC0"] },
+      "pill-blocked": { "role": "pill", "displayName": "Pill Blocked", "canonical": "#991A12", "darkVariant": "#FF8C8C", "tonalRamp": ["#3F0B07", "#551008", "#6B150B", "#991A12", "#BC2A20", "#E04A40", "#FF8C8C", "#FFC4C0"] },
+      "pill-silent": { "role": "pill", "displayName": "Pill Silent", "canonical": "#6B4500", "darkVariant": "#FFD873", "tonalRamp": ["#2E1E00", "#3F2A00", "#503600", "#6B4500", "#8F5C00", "#B37400", "#D69A00", "#FFD873"] },
+      "pill-done": { "role": "pill", "displayName": "Pill Done", "canonical": "#17389E", "darkVariant": "#8AB8FF", "tonalRamp": ["#0A173F", "#0E205C", "#122A79", "#17389E", "#2B4EC4", "#4A6FE8", "#6E92FF", "#8AB8FF"] },
+      "pill-working": { "role": "pill", "displayName": "Pill Working", "canonical": "#145126", "darkVariant": "#70E6A1", "tonalRamp": ["#0A2110", "#0D2E16", "#113D1E", "#145126", "#1F6B34", "#2C8A47", "#4FB96E", "#70E6A1"] },
+      "pill-idle": { "role": "pill", "displayName": "Pill Idle", "canonical": "#3E4A45", "darkVariant": "#A8C2BA", "tonalRamp": ["#1A211E", "#232C28", "#2D3833", "#3E4A45", "#54625D", "#6E7E78", "#8AA099", "#A8C2BA"] },
+      "pill-unknown": { "role": "pill", "displayName": "Pill Unknown", "canonical": "#43474C", "darkVariant": "#A8B0B8", "tonalRamp": ["#1C1F22", "#272B2F", "#32363B", "#43474C", "#5A5F65", "#74797F", "#90969D", "#A8B0B8"] },
+      "secondary-text": { "role": "neutral", "displayName": "Secondary Text", "canonical": "#5A5F64", "darkVariant": "#B3B8BD", "tonalRamp": ["#25282B", "#303438", "#3C4145", "#5A5F64", "#7A8086", "#999FA5", "#B3B8BD", "#D5D9DC"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "The one big number — overall cost in the usage card. SF Pro Rounded bold." },
+      "title": { "displayName": "Title", "purpose": "Panel and dashboard titles." },
+      "body": { "displayName": "Body", "purpose": "Agent titles, reasons, action summaries." },
+      "label": { "displayName": "Label", "purpose": "Data labels, section titles, pills (uppercased)." },
+      "mono": { "displayName": "Mono", "purpose": "Anything measured: dwell, cost, params, paths, peek." }
+    },
+    "shadows": [
+      { "name": "status-glow-rest", "value": "0 0 1.5px rgba(0,0,0,0.25)", "purpose": "Soft halo on the status rail/dot at rest." },
+      { "name": "status-glow-active", "value": "0 0 5px rgba(0,0,0,0.75)", "purpose": "Brightened halo while an agent is working or alarmed." }
+    ],
+    "motion": [
+      { "name": "none", "value": "static", "purpose": "No continuous animation inside the MenuBarExtra window — a known cause of panel flicker." }
+    ],
+    "breakpoints": [
+      { "name": "panel", "value": "500px", "purpose": "Fixed panel width; height is content-driven (list capped at 540px)." },
+      { "name": "dashboard", "value": "500px x 620px max", "purpose": "Dashboard capped to screen height on small/scaled displays." }
+    ],
+    "namedRules": [
+      { "name": "The One Accent Rule", "body": "Amber is the single accent, used sparingly (selection strokes, cost figures, the mark). Status colors carry information; they are not decoration.", "section": "colors" },
+      { "name": "The AA Floor Rule", "body": "Every text color holds ≥4.5:1 in both appearances. Pill text uses the strong pill variants because the tinted fill pulls the background toward the text colour.", "section": "colors" },
+      { "name": "The Fixed Badge Rule", "body": "The menu-bar attention badge uses fixed NSColor.system* colors, never adaptive ones — adaptive colors resolve against the wrong appearance (panel vs bar).", "section": "colors" },
+      { "name": "The Measured-Data Rule", "body": "Anything measured is monospaced: dwell durations, token costs, params, paths. The display cost figure is the one exception — it is a statement, not a measurement.", "section": "typography" },
+      { "name": "The Flat-By-Default Rule", "body": "Surfaces are flat at rest. The only shadows are the status glows, appearing as a response to state (working/alarmed), not ambient furniture.", "section": "elevation" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Approve Button",
+      "kind": "button",
+      "refersTo": "button-approve",
+      "description": "Affirmative action (approve an agent or pending action). Dark green fill holds white text at AA in both appearances.",
+      "html": "<button class=\"ds-btn-approve\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 12 12\" fill=\"none\" aria-hidden=\"true\"><path d=\"M2 6.5L4.5 9L10 3\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>Approve</button>",
+      "css": ".ds-btn-approve { display: inline-flex; align-items: center; gap: 6px; background: #1E7138; color: #fff; border: none; border-radius: 7px; padding: 6px 14px; font: 600 12px -apple-system, 'SF Pro Text', sans-serif; transition: background 0.15s ease; } .ds-btn-approve:hover { background: #2B934E; } .ds-btn-approve:focus-visible { outline: 2px solid #8A5A00; outline-offset: 2px; } @media (prefers-color-scheme: dark) { .ds-btn-approve { background: #145126; } .ds-btn-approve:hover { background: #1F6B34; } }"
+    },
+    {
+      "name": "Bordered Button",
+      "kind": "button",
+      "refersTo": "button-bordered",
+      "description": "Secondary action (Peek, Jump, Nudge, Retry, Cancel). System bordered style.",
+      "html": "<button class=\"ds-btn-bordered\">Peek</button>",
+      "css": ".ds-btn-bordered { display: inline-flex; align-items: center; background: transparent; color: #5A5F64; border: 1px solid rgba(90,95,100,0.35); border-radius: 7px; padding: 6px 14px; font: 500 12px -apple-system, 'SF Pro Text', sans-serif; } .ds-btn-bordered:hover { background: rgba(90,95,100,0.08); } .ds-btn-bordered:focus-visible { outline: 2px solid #8A5A00; outline-offset: 2px; } @media (prefers-color-scheme: dark) { .ds-btn-bordered { color: #B3B8BD; border-color: rgba(179,184,189,0.35); } }"
+    },
+    {
+      "name": "State Pill",
+      "kind": "chip",
+      "refersTo": "state-pill",
+      "description": "The agent's state as an uppercased capsule chip, tinted with the status accent and strong pill text for AA on the tinted fill.",
+      "html": "<span class=\"ds-state-pill\">BLOCKED</span>",
+      "css": ".ds-state-pill { display: inline-flex; align-items: center; text-transform: uppercase; letter-spacing: 0.4px; font: 600 10.5px -apple-system, 'SF Pro Text', sans-serif; color: #991A12; background: rgba(179,38,30,0.14); border: 0.5px solid rgba(179,38,30,0.28); border-radius: 999px; padding: 2.5px 7px; } @media (prefers-color-scheme: dark) { .ds-state-pill { color: #FF8C8C; } }"
+    },
+    {
+      "name": "Agent Row Card",
+      "kind": "card",
+      "refersTo": "agent-row-card",
+      "description": "One agent in the triage list: resting 2.5% primary fill, 1pt accent-tinted border, 3.5pt status rail on the left.",
+      "html": "<div class=\"ds-row\"><div class=\"ds-row-rail\"></div><div class=\"ds-row-body\"><div class=\"ds-row-title\">claude</div><div class=\"ds-row-sub\">workspace · tab · ~cwd</div></div></div>",
+      "css": ".ds-row { display: flex; gap: 11px; background: rgba(0,0,0,0.025); border: 1px solid rgba(0,0,0,0.14); border-radius: 10px; padding: 10px 12px; } .ds-row-rail { width: 3.5px; border-radius: 999px; background: #B3261E; box-shadow: 0 0 5px rgba(179,38,30,0.75); } .ds-row-body { flex: 1; } .ds-row-title { font: 600 13.5px -apple-system, 'SF Pro Text', sans-serif; color: #000; } .ds-row-sub { font: 500 10.5px -apple-system, 'SF Pro Text', sans-serif; color: #5A5F64; margin-top: 4px; } @media (prefers-color-scheme: dark) { .ds-row { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.14); } .ds-row-title { color: #fff; } .ds-row-sub { color: #B3B8BD; } .ds-row-rail { background: #FF6B6B; } }"
+    },
+    {
+      "name": "Search Field",
+      "kind": "input",
+      "refersTo": "search-field",
+      "description": "The panel filter. 5% primary fill, 1pt border that turns amber on focus, custom AA-safe placeholder.",
+      "html": "<div class=\"ds-search\"><svg width=\"11\" height=\"11\" viewBox=\"0 0 11 11\" fill=\"none\" aria-hidden=\"true\"><circle cx=\"4.5\" cy=\"4.5\" r=\"3.5\" stroke=\"currentColor\" stroke-width=\"1.2\"/><path d=\"M7.5 7.5L10 10\" stroke=\"currentColor\" stroke-width=\"1.2\" stroke-linecap=\"round\"/></svg><input class=\"ds-search-input\" placeholder=\"Filter by name, kind, workspace…\" aria-label=\"Filter agents\"></div>",
+      "css": ".ds-search { display: flex; align-items: center; gap: 7px; background: rgba(0,0,0,0.05); border: 1px solid rgba(0,0,0,0.10); border-radius: 7px; padding: 6px 9px; color: #5A5F64; } .ds-search:focus-within { border-color: #8A5A00; color: #8A5A00; } .ds-search-input { border: none; background: none; outline: none; flex: 1; font: 500 12px -apple-system, 'SF Pro Text', sans-serif; color: #000; } .ds-search-input::placeholder { color: #5A5F64; } @media (prefers-color-scheme: dark) { .ds-search { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.12); color: #B3B8BD; } .ds-search:focus-within { border-color: #FFC94D; color: #FFC94D; } .ds-search-input { color: #fff; } .ds-search-input::placeholder { color: #B3B8BD; } }"
+    },
+    {
+      "name": "Usage Card",
+      "kind": "card",
+      "refersTo": "usage-card",
+      "description": "The headline cost figure in the dashboard: 9% amber fill, 1pt amber border, big rounded display number. Honest framing: 'Estimate — not a bill'.",
+      "html": "<div class=\"ds-usage\"><div class=\"ds-usage-label\">All local activity</div><div class=\"ds-usage-value\">$1.24</div><div class=\"ds-usage-note\">Estimate — not a bill</div></div>",
+      "css": ".ds-usage { background: rgba(138,90,0,0.09); border: 1px solid rgba(138,90,0,0.25); border-radius: 10px; padding: 12px; } .ds-usage-label { font: 600 12px -apple-system, 'SF Pro Text', sans-serif; color: #000; } .ds-usage-value { font: 700 22px -apple-system, 'SF Pro Rounded', sans-serif; color: #6B4500; margin-top: 4px; } .ds-usage-note { font: 500 10px -apple-system, 'SF Pro Text', sans-serif; color: #5A5F64; margin-top: 2px; } @media (prefers-color-scheme: dark) { .ds-usage { background: rgba(255,201,77,0.09); border-color: rgba(255,201,77,0.25); } .ds-usage-label { color: #fff; } .ds-usage-value { color: #FFC94D; } .ds-usage-note { color: #B3B8BD; } }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Calm Herd",
+    "overview": "Shepherd is a shepherd's watch over a herd of AI coding agents: a single glance at the menu bar answers 'does anything need me?', and the panel turns that glance into one or two decisive actions. The design language is a clean native macOS utility — quiet, warm, and honest — built on one amber accent and a herd of small status lights. Visual authority comes from the platform itself: system materials, SF Symbols, and adaptive colors that respect both appearances, with AA-tuned contrast as a hard floor rather than a hope. The interface earns the glance. The menu bar is the attention signal (worst-state wins, rendered as a fixed system color so it reads on any bar); the panel is a dense but calm triage desk where the colour IS the state — a status rail, a status dot, and a state pill all speak the same one-color-per-state vocabulary. Nothing pulses, spins, or animates: inside a MenuBarExtra window, continuous motion is a known cause of the panel flickering open and closed, so emphasis is static and calm. Density is deliberate. Rows are compact (64pt base), the panel is a fixed 500pt, and every line of type earns its place. The voice is domain-native and honest: exact dwell figures, 'estimate, not a bill', 'Needs you' instead of marketing. The system never fabricates state — degraded is shown as degraded, with a reason.",
+    "keyCharacteristics": [
+      "One warm amber accent; status colors are information, not decoration",
+      "Calm static emphasis — no continuous animations anywhere",
+      "WCAG AA (≥4.5:1) for every text color in both light and dark appearances",
+      "Native macOS materials, controls, and SF Symbols throughout",
+      "A single status-light vocabulary running menu bar → rail → pill → dot"
+    ],
+    "rules": [
+      { "name": "The One Accent Rule", "body": "Amber is the single accent, used sparingly (selection strokes, cost figures, the mark). Status colors carry information; they are not decoration.", "section": "colors" },
+      { "name": "The AA Floor Rule", "body": "Every text color holds ≥4.5:1 in both appearances. Pill text uses the strong pill variants because the tinted fill pulls the background toward the text colour.", "section": "colors" },
+      { "name": "The Fixed Badge Rule", "body": "The menu-bar attention badge uses fixed NSColor.system* colors, never adaptive ones — adaptive colors resolve against the wrong appearance (panel vs bar).", "section": "colors" },
+      { "name": "The Measured-Data Rule", "body": "Anything measured is monospaced: dwell durations, token costs, params, paths. The display cost figure is the one exception — it is a statement, not a measurement.", "section": "typography" },
+      { "name": "The Flat-By-Default Rule", "body": "Surfaces are flat at rest. The only shadows are the status glows, appearing as a response to state (working/alarmed), not ambient furniture.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do use the Brand.* token layer for every color — never raw hex in views; the tokens encode the AA floor and both appearances.",
+      "Do keep one status-light vocabulary: the same color means the same thing in the menu bar, rail, dot, and pill.",
+      "Do use system materials, controls, and SF Symbols; this is a native macOS utility, not a web page.",
+      "Do keep all measured data in SF Mono (dwell, cost, params, paths).",
+      "Do use the amber accent sparingly — selection strokes, cost figures, the mark. Rarity is the point."
+    ],
+    "donts": [
+      "Don't ship system .green, .orange, .secondary, or .tertiary for text — they fail AA in light mode; use approveFill, warn, secondaryText instead.",
+      "Don't mix icon sets or use unicode glyphs (⋯) where an SF Symbol exists; one symbol family, one stroke.",
+      "Don't add continuous animation inside the MenuBarExtra window — it is a known cause of the panel flickering open and closed; emphasis is static.",
+      "Don't ever fabricate state: degraded is shown as degraded with a reason; the menu bar shows a steady indicator, never a flapping per-attempt counter.",
+      "Don't invent new greys — one secondary-text token, one vocabulary."
+    ]
+  }
+}
