@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import HerdrManagerCore
 
 struct UsageDashboardView: View {
@@ -19,6 +20,14 @@ struct UsageDashboardView: View {
 
     private let panelWidth: CGFloat = 500
 
+    /// The dashboard is taller than the triage panel; cap it to the screen so
+    /// a small or scaled display never clips the pricing section behind the
+    /// window edge. The inner ScrollView absorbs the remaining height.
+    private var panelHeight: CGFloat {
+        let screen = NSScreen.main?.visibleFrame.height ?? 900
+        return min(620, max(400, screen - 60))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -37,7 +46,7 @@ struct UsageDashboardView: View {
             }
             .frame(maxHeight: .infinity)
         }
-        .frame(width: panelWidth, height: 620)
+        .frame(width: panelWidth, height: panelHeight)
         .onAppear {
             loadPricingFields()
             appModel.refreshUsageNow()
@@ -52,8 +61,8 @@ struct UsageDashboardView: View {
         HStack(spacing: 9) {
             Button(action: onBack) {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 25, height: 25)
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 30, height: 30)
             }
             .buttonStyle(.borderless)
             .help("Back to agents")
@@ -72,8 +81,8 @@ struct UsageDashboardView: View {
                 appModel.refreshUsageNow()
             } label: {
                 Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 25, height: 25)
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 30, height: 30)
             }
             .buttonStyle(.borderless)
             .help("Refresh usage")

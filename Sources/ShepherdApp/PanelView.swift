@@ -115,12 +115,16 @@ struct PanelView: View {
         static let listMaxHeight: CGFloat = 540
         static let emptyStateHeight: CGFloat = 210
         static let rowBaseHeight: CGFloat = 64
-        static let rowReasonHeight: CGFloat = 17
         static let rowCostHeight: CGFloat = 16
         static let rowActionsHeight: CGFloat = 40
         static let rowPeekHeight: CGFloat = 228
         static let rowInlineHeight: CGFloat = 36
         static let groupHeaderHeight: CGFloat = 33
+
+        /// Text width a reason line can actually use before wrapping: panel
+        /// width minus outer padding, leading padding, the status rail, and
+        /// the trailing padding the text column carries.
+        static let reasonMaxWidth: CGFloat = 440
     }
 
     // MARK: - Header
@@ -167,8 +171,8 @@ struct PanelView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: system)
-                .font(.system(size: 12, weight: .semibold))
-                .frame(width: 26, height: 26)
+                .font(.system(size: 13, weight: .semibold))
+                .frame(width: 30, height: 30)
                 .background(Circle().fill(Color.primary.opacity(0.06)))
         }
         .buttonStyle(.borderless)
@@ -313,7 +317,9 @@ struct PanelView: View {
     /// grows by while it is the selected/expanded one.
     private func rowHeight(_ agent: Agent) -> CGFloat {
         var height = Layout.rowBaseHeight
-        if agent.verdict.reasonText != nil { height += Layout.rowReasonHeight }
+        if let reason = agent.verdict.reasonText {
+            height += reasonHeight(reason)
+        }
         if appModel.usageSnapshot.agentSummary(for: agent.id, window: .day).hasUsage {
             height += Layout.rowCostHeight
         }
@@ -326,6 +332,22 @@ struct PanelView: View {
         case .peekLoading, .peekFailed, .nudge, .closeConfirm: height += Layout.rowInlineHeight
         }
         return height
+    }
+
+    /// Measured rendered height of a reason line. The row renders it at
+    /// 12.5 pt with a two-line limit and fixed wrapping width; measuring the
+    /// actual wrapped height (instead of the old flat 17 pt single-line
+    /// budget) keeps the scroll-area estimate honest when a reason wraps.
+    private func reasonHeight(_ text: String) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
+        let lineHeight = font.ascender - font.descender + font.leading
+        let bounds = (text as NSString).boundingRect(
+            with: .init(width: Layout.reasonMaxWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font]
+        )
+        let lines = min(max(ceil(bounds.height / lineHeight), 1), 2) // matches .lineLimit(2)
+        return lines * lineHeight
     }
 
     @ViewBuilder
