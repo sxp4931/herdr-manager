@@ -529,7 +529,7 @@ struct PanelView: View {
             }
         case .connecting:
             HStack(spacing: 4) {
-                Circle().fill(.yellow).frame(width: 7, height: 7)
+                Circle().fill(Brand.warn).frame(width: 7, height: 7)
                 Text("connecting…").font(.system(size: 11)).foregroundStyle(.secondary)
             }
         case .reconnecting, .disconnected:
@@ -618,10 +618,10 @@ struct PanelView: View {
         HStack(spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 11))
-                .foregroundStyle(.red)
+                .foregroundStyle(Brand.blocked)
             Text(text)
                 .font(.system(size: 11))
-                .foregroundStyle(.red)
+                .foregroundStyle(Brand.blocked)
                 .lineLimit(2)
             Spacer()
             Button("Retry") { appModel.resync() }
@@ -631,24 +631,24 @@ struct PanelView: View {
         }
         .padding(.horizontal, Layout.gutter)
         .padding(.vertical, 6)
-        .background(Color.red.opacity(0.06))
+        .background(Brand.blocked.opacity(0.06))
     }
 
     private func healthBanner(_ health: AdapterHealth) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 11))
-                .foregroundStyle(.orange)
+                .foregroundStyle(Brand.warn)
             let reason = health.reason ?? (health.compatible ? "writes disabled" : "incompatible protocol")
             Text("v\(health.protocolVersion): \(reason)")
                 .font(.system(size: 11))
-                .foregroundStyle(.orange)
+                .foregroundStyle(Brand.warn)
                 .lineLimit(1)
             Spacer()
         }
         .padding(.horizontal, Layout.gutter)
         .padding(.vertical, 6)
-        .background(Color.orange.opacity(0.06))
+        .background(Brand.warn.opacity(0.06))
     }
 
     // MARK: - Empty states
@@ -681,7 +681,7 @@ struct PanelView: View {
                 .foregroundStyle(.secondary)
             Text(LiveHerdrAdapter.resolveSocketPath())
                 .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Brand.secondaryText)
                 .textSelection(.enabled)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)

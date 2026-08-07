@@ -97,13 +97,11 @@ enum Brand {
         return pillUnknown
     }
 
-    /// Search placeholder text: a neutral gray that holds ≥4.5:1 in both
+    /// Search placeholder text: an AA-safe neutral gray held ≥4.5:1 in both
     /// appearances (system placeholder colour drops to ~4.3:1 in dark mode,
-    /// and a mid-gray is too close to the light field fill).
-    static let searchPlaceholder = adaptive(
-        light: (0.353, 0.373, 0.392), // #5A5F64 — darkened for the light fill
-        dark: (0.700, 0.720, 0.740)   // #B3B8BD — brightened for the dark fill
-    )
+    /// and a mid-gray is too close to the light field fill). Shares the
+    /// secondary-text token so the whole panel speaks one grey vocabulary.
+    static let searchPlaceholder = secondaryText
 
     // The single warm amber accent. `amber` is the body-text-safe variant
     // (darkened in light mode so cost lines pass AA); `amberDeep` is a quieter
@@ -115,6 +113,31 @@ enum Brand {
     static let amberDeep = adaptive(
         light: (0.420, 0.271, 0.00),  // #6B4500
         dark: (0.961, 0.698, 0.290)   // #F5B24A
+    )
+
+    /// Warning orange — a distinct hue from the silent-state amber and the
+    /// blocked red, reserved for operational warnings (health banner, pending
+    /// actions, unpriced usage). System `.orange` drops to ~2.2:1 in light
+    /// mode; this darkened variant holds ≥4.5:1 on a light material.
+    static let warn = adaptive(
+        light: (0.761, 0.255, 0.047),  // #C2410C
+        dark: (1.00, 0.655, 0.149)     // #FFA726
+    )
+
+    /// Fill for the affirmative Approve button. System `.green` leaves white
+    /// label text at ~2.2:1; this darkened green keeps white ≥4.5:1 in both
+    /// appearances and ties approval to the working/active state family.
+    static let approveFill = adaptive(
+        light: (0.118, 0.443, 0.220), // #1E7138
+        dark: (0.08, 0.32, 0.15)      // #145126
+    )
+
+    /// AA-safe secondary text grey. System `.secondary`/`.tertiary` drop to
+    /// ~3.5:1 / ~2.2:1 in light mode on small text; this holds ≥4.5:1 in both
+    /// appearances while staying visually demoted.
+    static let secondaryText = adaptive(
+        light: (0.353, 0.373, 0.392), // #5A5F64
+        dark: (0.700, 0.720, 0.740)   // #B3B8BD
     )
 
     /// The single colour that represents an agent right now (worst-state wins).

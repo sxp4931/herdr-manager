@@ -216,15 +216,22 @@ struct AgentRow: View, Equatable {
         HStack(spacing: 7) {
             if agent.verdict.isAwaitingInput {
                 Button("Approve") { appModel.approve(agent) }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Brand.approveFill)
                     .help("Sends Enter to accept the highlighted option")
                 Button("Deny") { appModel.deny(agent) }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Brand.blocked)
                     .help("Sends Esc to dismiss the prompt")
             }
             Button("Peek") { onPeekToggle() }
+                .buttonStyle(.bordered)
                 .help("Show the last 20 lines of this pane")
             Button("Jump") { onJump() }
+                .buttonStyle(.bordered)
                 .help("Focus this agent's workspace and pane")
             Button("Nudge") { onNudgeOpen() }
+                .buttonStyle(.bordered)
                 .help("Send a message to this agent")
             Spacer(minLength: 0)
             Menu {
@@ -235,7 +242,6 @@ struct AgentRow: View, Equatable {
             .menuStyle(.borderlessButton)
             .fixedSize()
         }
-        .buttonStyle(.bordered)
         .controlSize(.regular)
         .font(.system(size: 12))
         .padding(.top, 6)
@@ -285,10 +291,10 @@ struct AgentRow: View, Equatable {
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 11))
-                    .foregroundStyle(Brand.silent)
+                    .foregroundStyle(Brand.warn)
                 Text(error)
                     .font(.system(size: 11.5))
-                    .foregroundStyle(Brand.silent)
+                    .foregroundStyle(Brand.warn)
                     .lineLimit(2)
                 Spacer(minLength: 4)
                 Button("Retry") { onPeekToggle() }

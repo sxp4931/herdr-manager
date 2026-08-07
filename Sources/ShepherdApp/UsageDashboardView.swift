@@ -127,17 +127,17 @@ struct UsageDashboardView: View {
             if summary.hasUsage {
                 Text(UsageFormatter.tokenBreakdown(summary))
                     .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Brand.secondaryText)
                 if let models = UsageFormatter.modelNames(summary) {
                     Text(models)
                         .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Brand.secondaryText)
                         .lineLimit(2)
                 }
                 if summary.hasUnpricedUsage {
                     Text("One or more logged models have no configured price.")
                         .font(.system(size: 10))
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Brand.warn)
                 }
             } else {
                 Text("No supported local session usage found in this window.")
@@ -271,7 +271,7 @@ struct UsageDashboardView: View {
                     if let saveError {
                         Text(saveError)
                             .font(.system(size: 10))
-                            .foregroundStyle(.red)
+                            .foregroundStyle(Brand.blocked)
                     }
                     Spacer()
                     Button("Save") { savePricing() }
@@ -381,13 +381,13 @@ private struct UsageSummaryRow: View {
                 if let models = UsageFormatter.modelNames(summary) {
                     Text(models)
                         .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Brand.secondaryText)
                         .lineLimit(1)
                 }
                 if summary.hasUnpricedUsage {
                     Text("model price missing")
                         .font(.system(size: 10))
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Brand.warn)
                 }
             }
             Spacer(minLength: 8)

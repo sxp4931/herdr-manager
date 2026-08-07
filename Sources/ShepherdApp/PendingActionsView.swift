@@ -28,7 +28,7 @@ struct PendingActionsView: View {
                 HStack {
                     Text("Pending Actions (\(actions.count))")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Brand.warn)
                     Spacer()
                 }
                 .padding(.horizontal, 14)
@@ -64,7 +64,7 @@ struct PendingActionsView: View {
                         if !expiresText.isEmpty {
                             Text(expiresText)
                                 .font(.system(size: 10.5, design: .monospaced))
-                                .foregroundStyle(.orange)
+                                .foregroundStyle(Brand.warn)
                                 .lineLimit(1)
                         }
                     }
@@ -111,12 +111,12 @@ struct PendingActionsView: View {
             HStack(spacing: 6) {
                 Button("Confirm Approve") { appModel.approveAction(action.actionId) }
                     .buttonStyle(.borderedProminent)
-                    .tint(.green)
+                    .tint(Brand.approveFill)
                     .controlSize(.regular)
                     .help(Self.approveHelp(for: action))
                 Button("Confirm Deny") { appModel.denyAction(action.actionId) }
                     .buttonStyle(.bordered)
-                    .tint(.red)
+                    .tint(Brand.blocked)
                     .controlSize(.regular)
                     .help(Self.denyHelp(for: action))
                 Button("Cancel") { confirmingActionId = nil }
@@ -134,7 +134,7 @@ struct PendingActionsView: View {
                 Label("Approve", systemImage: "checkmark")
             }
             .buttonStyle(.borderedProminent)
-            .tint(.green)
+            .tint(Brand.approveFill)
             .controlSize(.regular)
             .help(Self.approveHelp(for: action))
 
@@ -148,7 +148,7 @@ struct PendingActionsView: View {
                 Label("Deny", systemImage: "xmark")
             }
             .buttonStyle(.bordered)
-            .tint(.red)
+            .tint(Brand.blocked)
             .controlSize(.regular)
             .help(Self.denyHelp(for: action))
         }
