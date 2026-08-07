@@ -302,6 +302,22 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             cacheWrite1hPerMillion: 10.0,
             outputPerMillion: 25.0
         ),
+        // Anthropic: Opus 4.8 list rates, verified against
+        // https://www.anthropic.com/pricing (Legacy models) on 2026-08-07.
+        "claude-opus-4.8": TokenMeterPricing(
+            inputPerMillion: 5.0,
+            cacheReadPerMillion: 0.50,
+            cacheWrite5mPerMillion: 6.25,
+            cacheWrite1hPerMillion: 10.0,
+            outputPerMillion: 25.0
+        ),
+        "claude-opus-4-8": TokenMeterPricing(
+            inputPerMillion: 5.0,
+            cacheReadPerMillion: 0.50,
+            cacheWrite5mPerMillion: 6.25,
+            cacheWrite1hPerMillion: 10.0,
+            outputPerMillion: 25.0
+        ),
         "claude-haiku-4.5": TokenMeterPricing(
             inputPerMillion: 1.0,
             cacheReadPerMillion: 0.10,
