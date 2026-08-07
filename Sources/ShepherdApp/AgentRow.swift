@@ -301,7 +301,10 @@ Text(locationLine)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(8)
                 }
-                .frame(maxHeight: 220)
+                // Body cap is the single source of truth for the peek-height
+                // budget (`PanelLayout.peekHeight`); keep the two in sync via
+                // `PanelLayout.peekBodyHeight`.
+                .frame(maxHeight: PanelLayout.peekBodyHeight)
                 .background(Color.primary.opacity(0.04))
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }

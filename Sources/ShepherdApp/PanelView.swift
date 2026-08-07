@@ -53,7 +53,7 @@ struct PanelView: View {
         // `MenuBarExtra` window resolves such a frame to its *minimum* and then
         // clips the header — which is what kept the old panel at 220pt. The
         // list is the only flexible piece, and it carries an explicit height.
-        .frame(width: Layout.panelWidth)
+        .frame(width: PanelLayout.panelWidth)
         .fixedSize(horizontal: false, vertical: true)
         .background(panelBackground)
         .onKeyPress(.escape) {
@@ -105,8 +105,9 @@ struct PanelView: View {
     /// One place to tune the panel's overall geometry. The panel used to be a
     /// 400×560 box with a 400pt scroll area, which put ~2.5 rows on screen at
     /// once; these are the roomier numbers everything else is sized against.
+    /// Tokens shared with other surfaces (panel width, peek expansion) live in
+    /// `PanelLayout` so the window geometry has exactly one definition.
     private enum Layout {
-        static let panelWidth: CGFloat = 500
         static let gutter: CGFloat = 14
 
         /// List sizing. These are estimates, not measurements: they only decide
@@ -117,7 +118,6 @@ struct PanelView: View {
         static let rowBaseHeight: CGFloat = 64
         static let rowCostHeight: CGFloat = 16
         static let rowActionsHeight: CGFloat = 40
-        static let rowPeekHeight: CGFloat = 228
         static let rowInlineHeight: CGFloat = 36
         static let groupHeaderHeight: CGFloat = 33
 
@@ -397,7 +397,7 @@ struct PanelView: View {
         height += Layout.rowActionsHeight
         switch expansion {
         case .none: break
-        case .peek: height += Layout.rowPeekHeight
+        case .peek: height += PanelLayout.peekHeight
         case .peekLoading, .peekFailed, .nudge, .closeConfirm: height += Layout.rowInlineHeight
         }
         return height

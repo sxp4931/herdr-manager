@@ -19,8 +19,6 @@ struct UsageDashboardView: View {
     @State private var outputPrice = ""
     @State private var saveError: String?
 
-    private let panelWidth: CGFloat = 500
-
     /// The dashboard is taller than the triage panel; cap it to the screen so
     /// a small or scaled display never clips the pricing section behind the
     /// window edge. The inner ScrollView absorbs the remaining height.
@@ -49,7 +47,7 @@ struct UsageDashboardView: View {
             }
             .frame(maxHeight: .infinity)
         }
-        .frame(width: panelWidth, height: panelHeight)
+        .frame(width: PanelLayout.panelWidth, height: panelHeight)
         .onAppear {
             loadPricingFields()
             appModel.refreshUsageNow()
