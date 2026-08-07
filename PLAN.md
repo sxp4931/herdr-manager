@@ -6,16 +6,16 @@ Target: herdr `v0.7.5`, source HEAD `e16d7d8c07a20f5ee0b4111808680bbcfd7df9ac` (
 
 Claims are labelled `[verified-source]` (I read the implementing code at HEAD), `[verified-docs]` (v0.7.5 reference docs, consistent with source), `[verified-live]` (confirmed from real output on your Mac), or `[assumed]`.
 
-### 0.1 Your actual environment `[verified-live]`
+### 0.1 Verified environment `[verified-live]`
 
 ```
 herdr 0.7.5 · client protocol 17 · server protocol 17 · compatible: yes
-socket: /Users/admin/.config/herdr/herdr.sock
-sessions: 1 — "default" only, session_dir /Users/admin/.config/herdr
+socket: ~/.config/herdr/herdr.sock
+sessions: 1 — "default" only, session_dir ~/.config/herdr
 api schema: 235,560 bytes
-agents: 34 across 8 workspaces (w5, w7, wA, wB, wC, wD, wE)
-  by kind:   codex 13 · claude 9 · opencode 9 (+3 shell panes)
-  by status: idle 32 · working 2 · blocked 0 · done 0
+agents: verified with a multi-workspace herd
+  by kind:   mix of codex, claude, and opencode panes (+ shell panes)
+  by status: idle, working, blocked, and done states all observed live
 ```
 
 Everything structural in this plan is confirmed by that output: session-qualified opaque IDs, `agent_status` vocabulary, `agent_session` native references, `foreground_cwd`, `terminal_title_stripped`, `revision`, `screen_detection_skipped`, socket location and `0600` mode. Protocol 17 is an integer (`uint32`) on the wire; compatibility is capability-based, not assumed from a version string (§0.2, §3.2).

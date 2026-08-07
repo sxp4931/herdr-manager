@@ -15,3 +15,16 @@ Shepherd.app/
 
 # Runtime data (per-user, not source)
 # ~/Library/Application Support/HerdrManager/ contains settings.json, journal.ndjson, pending-actions.json
+
+# Internal agent-workflow artifacts
+/.codex/
+/.impeccable/
+/tasks/
+/AGENT-PROMPT.md
+
+# Defense-in-depth
+.env
+*.log
+*.ndjson
+*.sock
+*.pem

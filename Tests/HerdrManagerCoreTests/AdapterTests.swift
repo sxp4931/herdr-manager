@@ -210,8 +210,8 @@ struct ParseEventTests {
                     "workspace_id": "wE",
                     "tab_id": "wE:t3",
                     "focused": false,
-                    "cwd": "/Users/admin/Documents/Herdr Manager",
-                    "foreground_cwd": "/Users/admin/Documents/Herdr Manager",
+                    "cwd": "/workspace/herdr-manager",
+                    "foreground_cwd": "/workspace/herdr-manager",
                     "agent": "codex",
                     "terminal_title": "[ . ] Action Required | Herdr Manager",
                     "terminal_title_stripped": "Action Required | Herdr Manager",
@@ -530,7 +530,7 @@ struct ResponseEnvelopeTests {
                         "name": "codex",
                         "argv0": "codex",
                         "cmdline": "codex",
-                        "cwd": "/Users/admin/Documents/Herdr Manager"
+                        "cwd": "/workspace/herdr-manager"
                     ] as [String: Any]
                 ]
             ] as [String: Any]
