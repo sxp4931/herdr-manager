@@ -610,7 +610,9 @@ struct PanelView: View {
         switch appModel.connectionState {
         case .connected:
             HStack(spacing: 4) {
-                Circle().fill(.green).frame(width: 7, height: 7)
+                // Brand.working, not system .green: it is the herd-light
+                // vocabulary and resolves correctly in both appearances.
+                Circle().fill(Brand.working).frame(width: 7, height: 7)
                 Text("connected").font(.system(size: 11)).foregroundStyle(Brand.secondaryText)
             }
         case .connecting:
@@ -623,7 +625,7 @@ struct PanelView: View {
             // silently. No per-attempt number and no alarming colour — the UI
             // flips to "connected" exactly once on the next successful poll.
             HStack(spacing: 4) {
-                Circle().fill(Color.secondary).frame(width: 7, height: 7)
+                Circle().fill(Brand.idle).frame(width: 7, height: 7)
                 Text("disconnected").font(.system(size: 11)).foregroundStyle(Brand.secondaryText)
             }
         }
@@ -774,6 +776,10 @@ struct PanelView: View {
                 .textSelection(.enabled)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
+            Text("Start herdr, then press ⌘R to resync.")
+                .font(.system(size: 12))
+                .foregroundStyle(Brand.secondaryText)
+                .padding(.top, 2)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 34)

@@ -152,23 +152,24 @@ struct AgentRow: View, Equatable {
                         .foregroundStyle(Brand.secondaryText)
                 }
 
-                // Line 2: workspace · tab · ~cwd-basename.
-                if !locationLine.isEmpty {
-Text(locationLine)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(Brand.secondaryText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(locationLine)
-                }
-
-                // Line 3: what it's waiting on, only when there's something to say.
+                // Line 2: what it's waiting on — the triage payload leads, so
+                // the eye lands on *why* before *where*.
                 if let reason = agent.verdict.reasonText {
                     Text(reason)
                         .font(.system(size: 12.5, weight: .medium))
                         .foregroundStyle(reasonColor)
                         .lineLimit(2)
                         .help(reason)
+                }
+
+                // Line 3: workspace · tab · ~cwd-basename.
+                if !locationLine.isEmpty {
+                    Text(locationLine)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Brand.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(locationLine)
                 }
 
                 if dailyCost.hasUsage {

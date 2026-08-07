@@ -18,6 +18,8 @@ struct UsageDashboardView: View {
     @State private var cacheWrite1hPrice = ""
     @State private var outputPrice = ""
     @State private var saveError: String?
+    /// Transient confirmation after a successful pricing save.
+    @State private var saveNotice: String?
 
     /// The dashboard is taller than the triage panel; cap it to the screen so
     /// a small or scaled display never clips the pricing section behind the
@@ -126,7 +128,7 @@ struct UsageDashboardView: View {
         return HStack(spacing: 8) {
             Image(systemName: "cube")
                 .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Brand.secondaryText)
             Picker("Model", selection: $modelFilter) {
                 Text("All models").tag(String?.none)
                 ForEach(models, id: \.self) { model in
@@ -136,13 +138,13 @@ struct UsageDashboardView: View {
             .pickerStyle(.menu)
             .labelsHidden()
             .frame(maxWidth: .infinity, alignment: .leading)
-            if let modelFilter {
+            if modelFilter != nil {
                 Button {
                     self.modelFilter = nil
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Brand.secondaryText)
                 }
                 .buttonStyle(.borderless)
                 .help("Clear model filter")
@@ -358,6 +360,10 @@ struct UsageDashboardView: View {
                         Text(saveError)
                             .font(.system(size: 10))
                             .foregroundStyle(Brand.blocked)
+                    } else if let saveNotice {
+                        Text(saveNotice)
+                            .font(.system(size: 10))
+                            .foregroundStyle(Brand.working)
                     }
                     Spacer()
                     Button("Save") { savePricing() }
@@ -402,6 +408,7 @@ struct UsageDashboardView: View {
     }
 
     private func loadPricingFields() {
+        saveNotice = nil
         let model = pricingModelKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let pricing = appModel.tokenMeterPriceBook.pricing(
             for: pricingProvider,
@@ -427,6 +434,7 @@ struct UsageDashboardView: View {
               let cacheWrite5m = Double(cacheWrite5mPrice), cacheWrite5m >= 0,
               let cacheWrite1h = Double(cacheWrite1hPrice), cacheWrite1h >= 0,
               let output = Double(outputPrice), output >= 0 else {
+            saveNotice = nil
             saveError = "Enter valid prices in all fields"
             return
         }
@@ -447,6 +455,11 @@ struct UsageDashboardView: View {
                 model: model,
                 pricing: pricing
             )
+        }
+        saveNotice = "Saved"
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            if saveNotice == "Saved" { saveNotice = nil }
         }
     }
 }

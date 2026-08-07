@@ -98,7 +98,7 @@ struct PendingActionsView: View {
                     .padding(.top, 2)
                 }
                 .font(.system(size: 10.5, weight: .medium))
-                .tint(.secondary)
+                .tint(Brand.secondaryText)
             }
         }
         .padding(.horizontal, 14)
