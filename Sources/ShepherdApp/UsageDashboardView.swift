@@ -15,6 +15,7 @@ struct UsageDashboardView: View {
     @State private var cacheWrite5mPrice = ""
     @State private var cacheWrite1hPrice = ""
     @State private var outputPrice = ""
+    @State private var saveError: String?
 
     private let panelWidth: CGFloat = 500
 
@@ -111,6 +112,9 @@ struct UsageDashboardView: View {
                     .font(.system(size: 22, weight: .bold, design: .rounded))
                     .foregroundStyle(Brand.amber)
             }
+            Text("Estimate — not a bill")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
             HStack(spacing: 12) {
                 Label(UsageFormatter.tokens(summary.usage.totalTokens), systemImage: "number")
                 Label("\(summary.sessions) sessions", systemImage: "rectangle.stack")
@@ -236,7 +240,7 @@ struct UsageDashboardView: View {
                 if !detectedModels.isEmpty {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Detected models")
-                            .font(.system(size: 9.5))
+                            .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 5) {
@@ -246,7 +250,7 @@ struct UsageDashboardView: View {
                                         loadPricingFields()
                                     }
                                     .buttonStyle(.link)
-                                    .font(.system(size: 9.5, design: .monospaced))
+                                    .font(.system(size: 10, design: .monospaced))
                                 }
                             }
                         }
@@ -264,6 +268,11 @@ struct UsageDashboardView: View {
                     Text("USD per 1M tokens · unknown logged models remain n/a")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
+                    if let saveError {
+                        Text(saveError)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.red)
+                    }
                     Spacer()
                     Button("Save") { savePricing() }
                         .controlSize(.small)
@@ -296,7 +305,7 @@ struct UsageDashboardView: View {
     private func priceField(_ label: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label)
-                .font(.system(size: 9.5))
+                .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             TextField("0", text: text)
@@ -332,8 +341,10 @@ struct UsageDashboardView: View {
               let cacheWrite5m = Double(cacheWrite5mPrice), cacheWrite5m >= 0,
               let cacheWrite1h = Double(cacheWrite1hPrice), cacheWrite1h >= 0,
               let output = Double(outputPrice), output >= 0 else {
+            saveError = "Enter valid prices in all fields"
             return
         }
+        saveError = nil
         let pricing = TokenMeterPricing(
             inputPerMillion: input,
             cacheReadPerMillion: cacheRead,
@@ -369,13 +380,13 @@ private struct UsageSummaryRow: View {
                     .foregroundStyle(.secondary)
                 if let models = UsageFormatter.modelNames(summary) {
                     Text(models)
-                        .font(.system(size: 9.5, design: .monospaced))
+                        .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                 }
                 if summary.hasUnpricedUsage {
                     Text("model price missing")
-                        .font(.system(size: 9.5))
+                        .font(.system(size: 10))
                         .foregroundStyle(.orange)
                 }
             }

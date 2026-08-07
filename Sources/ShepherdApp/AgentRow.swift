@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import HerdrManagerCore
 
 /// What (if anything) is expanded under the currently-selected row. Owned by
@@ -8,6 +9,7 @@ enum RowExpansion: Equatable {
     case none
     case peekLoading
     case peek(String)
+    case peekFailed(String)
     case nudge
     case closeConfirm
 }
@@ -94,13 +96,14 @@ struct AgentRow: View, Equatable {
     }
 
     /// The state as a tinted chip rather than plain grey text — at a glance the
-    /// state now reads from the same colour as the row's rail and dot.
-    private func statePill(accent: Color) -> some View {
+    /// state now reads from the same colour as the row's rail and dot. Text uses
+    /// the strong pill variant so it holds ≥4.5:1 on the tinted fill.
+    private func statePill(accent: Color, text: Color) -> some View {
         Text(stateLabel)
             .font(.system(size: 10.5, weight: .semibold))
             .textCase(.uppercase)
             .tracking(0.4)
-            .foregroundStyle(accent)
+            .foregroundStyle(text)
             .padding(.horizontal, 7)
             .padding(.vertical, 2.5)
             .background(Capsule().fill(accent.opacity(0.14)))
@@ -133,7 +136,7 @@ struct AgentRow: View, Equatable {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer(minLength: 8)
-                    statePill(accent: accent)
+                    statePill(accent: accent, text: Brand.pillText(for: agent))
                     Text(dwellString)
                         .font(.system(size: 11.5, weight: .medium, design: .monospaced))
                         .foregroundStyle(.secondary)
@@ -142,7 +145,7 @@ struct AgentRow: View, Equatable {
                 // Line 2: workspace · tab · ~cwd-basename.
                 if !locationLine.isEmpty {
                     Text(locationLine)
-                        .font(.system(size: 11.5))
+                        .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -151,7 +154,7 @@ struct AgentRow: View, Equatable {
                 // Line 3: what it's waiting on, only when there's something to say.
                 if let reason = agent.verdict.reasonText {
                     Text(reason)
-                        .font(.system(size: 11.5))
+                        .font(.system(size: 12.5, weight: .medium))
                         .foregroundStyle(reasonColor)
                         .lineLimit(2)
                 }
@@ -163,7 +166,7 @@ struct AgentRow: View, Equatable {
                             .lineLimit(1)
                     }
                     .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                    .foregroundStyle(Brand.amber.opacity(0.9))
+                    .foregroundStyle(Brand.amber)
                 }
 
                 if isSelected {
@@ -221,10 +224,10 @@ struct AgentRow: View, Equatable {
                 .help("Show the last 20 lines of this pane")
             Button("Jump") { onJump() }
                 .help("Focus this agent's workspace and pane")
+            Button("Nudge") { onNudgeOpen() }
+                .help("Send a message to this agent")
             Spacer(minLength: 0)
             Menu {
-                Button("Nudge…") { onNudgeOpen() }
-                Divider()
                 Button("Close agent", role: .destructive) { onCloseRequest() }
             } label: {
                 Text("⋯")
@@ -252,16 +255,46 @@ struct AgentRow: View, Equatable {
             }
             .padding(.top, 4)
         case .peek(let content):
-            ScrollView {
-                Text(content)
-                    .font(.system(size: 11, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Spacer()
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(content, forType: .string)
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help("Copy the peeked output")
+                }
+                ScrollView {
+                    Text(content)
+                        .font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                }
+                .frame(maxHeight: 220)
+                .background(Color.primary.opacity(0.04))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
-            .frame(maxHeight: 220)
-            .background(Color.primary.opacity(0.04))
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .padding(.top, 4)
+        case .peekFailed(let error):
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Brand.silent)
+                Text(error)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Brand.silent)
+                    .lineLimit(2)
+                Spacer(minLength: 4)
+                Button("Retry") { onPeekToggle() }
+                    .controlSize(.regular)
+                    .help("Retry the peek")
+            }
             .padding(.top, 4)
         case .nudge:
             HStack(spacing: 6) {

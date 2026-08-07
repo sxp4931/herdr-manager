@@ -2,28 +2,119 @@ import SwiftUI
 import AppKit
 import HerdrManagerCore
 
-/// Brand identity: a deep teal field, a warm amber accent, and a herd of
-/// small glowing status lights. The whole UI is built around this so the
-/// menu bar, panel and rows feel like one object.
+/// Brand identity: a clean, native macOS utility with a single warm amber
+/// accent and a herd of small status lights. The palette is deliberately
+/// two-layered:
+///
+/// - **Adaptive body layer** (`blocked`, `silent`, `done`, `working`, `idle`,
+///   `unknown`, `amber`): dynamic colors that resolve against the panel's
+///   appearance. The light variants are darkened so every text use passes WCAG
+///   AA (≥4.5:1) on a light material; dark variants are bright for a dark bar.
+/// - **Fixed menu-bar layer** (`worstColor`): the menu-bar attention badge is
+///   baked into an `NSImage` at paint time, so adaptive colors would resolve
+///   against the wrong appearance (panel vs bar). It uses fixed system colors
+///   instead.
 enum Brand {
-    // Field
-    static let bgDeep = Color(red: 0.045, green: 0.155, blue: 0.145)
-    static let bgMid = Color(red: 0.075, green: 0.235, blue: 0.215)
+    // MARK: Adaptive body palette
 
-    // Amber accent
-    static let amber = Color(red: 0.945, green: 0.745, blue: 0.305)
-    static let amberDeep = Color(red: 0.875, green: 0.595, blue: 0.175)
+    /// An adaptive color that resolves to a light/dark variant based on the
+    /// current appearance. Both variants are chosen to keep text ≥4.5:1.
+    private static func adaptive(
+        light rgbL: (Double, Double, Double),
+        dark rgbD: (Double, Double, Double)
+    ) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let c = isDark ? rgbD : rgbL
+            return NSColor(red: c.0, green: c.1, blue: c.2, alpha: 1)
+        })
+    }
 
-    // The herd lights (status vocabulary)
-    static let blocked = Color(red: 1.00, green: 0.38, blue: 0.38)
-    static let silent = Color(red: 1.00, green: 0.64, blue: 0.26)
-    static let done = Color(red: 0.36, green: 0.68, blue: 1.00)
-    static let working = Color(red: 0.32, green: 0.82, blue: 0.47)
-    static let idle = Color(red: 0.46, green: 0.64, blue: 0.59)
-    static let unknown = Color(red: 0.62, green: 0.66, blue: 0.66)
+    // Status vocabulary (the herd lights). Light variants are darkened for AA
+    // text contrast on light materials; dark variants are bright.
+    static let blocked = adaptive(
+        light: (0.702, 0.151, 0.118), // #B3261E
+        dark: (1.00, 0.42, 0.42)      // #FF6B6B
+    )
+    static let silent = adaptive(
+        light: (0.541, 0.353, 0.00),  // #8A5A00 (dark amber for text)
+        dark: (1.00, 0.788, 0.302)    // #FFC94D
+    )
+    static let done = adaptive(
+        light: (0.118, 0.294, 0.824), // #1E4BD2
+        dark: (0.424, 0.651, 1.00)    // #6CA6FF
+    )
+    static let working = adaptive(
+        light: (0.118, 0.443, 0.220), // #1E7138
+        dark: (0.329, 0.851, 0.557)   // #54D98E
+    )
+    static let idle = adaptive(
+        light: (0.357, 0.420, 0.392), // #5B6B64
+        dark: (0.561, 0.659, 0.627)   // #8FA8A0
+    )
+    static let unknown = adaptive(
+        light: (0.373, 0.400, 0.420), // #5F666B
+        dark: (0.573, 0.604, 0.624)   // #929A9F
+    )
 
-    static let amberGradient = LinearGradient(
-        colors: [amber, amberDeep], startPoint: .top, endPoint: .bottom
+    /// Stronger variants of the status colors for TEXT that sits ON a tinted
+    /// pill. The tinted fill (accent at 14% over material) pulls the background
+    /// toward the text colour, so pill text needs more headroom than body text
+    /// to hold ≥4.5:1: light variants are darker, dark variants are brighter.
+    static let pillBlocked = adaptive(
+        light: (0.60, 0.10, 0.07),  // #991A12
+        dark: (1.00, 0.55, 0.55)    // #FF8C8C
+    )
+    static let pillSilent = adaptive(
+        light: (0.42, 0.27, 0.00),  // #6B4500
+        dark: (1.00, 0.84, 0.45)    // #FFD873
+    )
+    static let pillDone = adaptive(
+        light: (0.09, 0.22, 0.62),  // #17389E
+        dark: (0.54, 0.72, 1.00)    // #8AB8FF
+    )
+    static let pillWorking = adaptive(
+        light: (0.08, 0.32, 0.15),  // #145126
+        dark: (0.44, 0.90, 0.63)    // #70E6A1
+    )
+    static let pillIdle = adaptive(
+        light: (0.24, 0.29, 0.27),  // #3E4A45
+        dark: (0.66, 0.76, 0.72)    // #A8C2BA
+    )
+    static let pillUnknown = adaptive(
+        light: (0.26, 0.28, 0.30),  // #43474C
+        dark: (0.66, 0.69, 0.72)    // #A8B0B8
+    )
+
+    /// The pill text colour for an agent: the status-strong variant matching
+    /// `color(for:)`, so the pill label holds ≥4.5:1 on its tinted fill.
+    static func pillText(for agent: Agent) -> Color {
+        if agent.status == .blocked || agent.verdict.isProcessGone { return pillBlocked }
+        if agent.verdict.isSilent { return pillSilent }
+        if agent.status == .done { return pillDone }
+        if agent.status == .working { return pillWorking }
+        if agent.status == .idle { return pillIdle }
+        return pillUnknown
+    }
+
+    /// Search placeholder text: a neutral gray that holds ≥4.5:1 in both
+    /// appearances (system placeholder colour drops to ~4.3:1 in dark mode,
+    /// and a mid-gray is too close to the light field fill).
+    static let searchPlaceholder = adaptive(
+        light: (0.353, 0.373, 0.392), // #5A5F64 — darkened for the light fill
+        dark: (0.700, 0.720, 0.740)   // #B3B8BD — brightened for the dark fill
+    )
+
+    // The single warm amber accent. `amber` is the body-text-safe variant
+    // (darkened in light mode so cost lines pass AA); `amberDeep` is a quieter
+    // deeper amber for accents that don't carry text.
+    static let amber = adaptive(
+        light: (0.541, 0.353, 0.00),  // #8A5A00
+        dark: (1.00, 0.788, 0.302)    // #FFC94D
+    )
+    static let amberDeep = adaptive(
+        light: (0.420, 0.271, 0.00),  // #6B4500
+        dark: (0.961, 0.698, 0.290)   // #F5B24A
     )
 
     /// The single colour that represents an agent right now (worst-state wins).
@@ -37,14 +128,18 @@ enum Brand {
         return unknown
     }
 
-    /// Worst-state colour across the whole herd, for the menu-bar light.
-    /// Worst-state wins: blocked > silent > done.
+    /// Worst-state colour across the whole herd, for the menu-bar attention
+    /// badge. This is the FIXED menu-bar layer: `MenuBarIcon` bakes the colour
+    /// into an `NSImage` at paint time, so it must not be adaptive (adaptive
+    /// colors would resolve against the wrong appearance, panel vs bar). The
+    /// returned `Color`s are fixed `NSColor.system*`-backed and stay visibly
+    /// red/amber/blue on every bar appearance.
     static func worstColor(blocked: Int, silent: Int, done: Int, connected: Bool) -> Color {
-        if !connected { return Brand.unknown }
-        if blocked > 0 { return Brand.blocked }
-        if silent > 0 { return Brand.silent }
-        if done > 0 { return Brand.done }
-        return Brand.working
+        if !connected { return Color(nsColor: .systemGray) }
+        if blocked > 0 { return Color(nsColor: .systemRed) }
+        if silent > 0 { return Color(nsColor: .systemYellow) }
+        if done > 0 { return Color(nsColor: .systemBlue) }
+        return Color(nsColor: .systemGreen)
     }
 
     // MARK: - Mark symbol resolution
@@ -86,8 +181,11 @@ struct FlockMark: View {
     var body: some View {
         Image(systemName: Brand.markSymbolName)
             .font(.system(size: size, weight: .medium))
-            .foregroundStyle(Brand.amberGradient)
+            .foregroundStyle(Brand.amber)
             .opacity(dimmed ? 0.4 : 1.0)
-            .shadow(color: Brand.amber.opacity(glow && !dimmed ? 0.5 : 0), radius: size * 0.16)
+            .shadow(
+                color: Brand.amber.opacity(glow && !dimmed ? 0.20 : 0),
+                radius: size * 0.10
+            )
     }
 }

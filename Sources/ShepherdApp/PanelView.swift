@@ -204,11 +204,21 @@ struct PanelView: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
-            TextField("Filter by name, kind, workspace…", text: $searchText)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .focused($searchFocused)
-                .onSubmit { searchFocused = false }
+            // Custom placeholder: the system placeholder colour drops to ~4.3:1
+            // in dark mode, so render our own at an adaptive ≥4.5:1 grey.
+            ZStack(alignment: .leading) {
+                if searchText.isEmpty {
+                    Text("Filter by name, kind, workspace…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Brand.searchPlaceholder)
+                        .allowsHitTesting(false)
+                }
+                TextField("", text: $searchText, prompt: Text(""))
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .focused($searchFocused)
+                    .onSubmit { searchFocused = false }
+            }
             if !searchText.isEmpty {
                 Button {
                     searchText = ""
@@ -231,7 +241,7 @@ struct PanelView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .strokeBorder(
-                    searchFocused ? Brand.amber.opacity(0.7) : Color.primary.opacity(0.10),
+                    searchFocused ? Brand.amber : Color.primary.opacity(0.10),
                     lineWidth: 1
                 )
         )
@@ -313,7 +323,7 @@ struct PanelView: View {
         switch expansion {
         case .none: break
         case .peek: height += Layout.rowPeekHeight
-        case .peekLoading, .nudge, .closeConfirm: height += Layout.rowInlineHeight
+        case .peekLoading, .peekFailed, .nudge, .closeConfirm: height += Layout.rowInlineHeight
         }
         return height
     }
@@ -373,7 +383,7 @@ struct PanelView: View {
             .padding(.bottom, 5)
         }
         .buttonStyle(.plain)
-        .background(.ultraThinMaterial)
+        .background(Color.primary.opacity(0.03))
         .help(collapsed ? "Expand \(group.name)" : "Collapse \(group.name)")
     }
 
@@ -400,16 +410,16 @@ struct PanelView: View {
     // MARK: - Data
 
     private static func needsYou(_ agent: Agent) -> Bool {
-        agent.status == .blocked || agent.verdict.isSilent || agent.status == .done || agent.verdict.isProcessGone
+        agent.status == .blocked || agent.verdict.isSilent || agent.verdict.isProcessGone
     }
 
     /// Worst-first priority for the "Needs you" ranking. Process-gone is
     /// grouped with blocked (both map to `Brand.blocked` in `Brand.color(for:)`
-    /// — the same "this needs you NOW" urgency), then silent, then done.
+    /// — the same "this needs you NOW" urgency), then silent. `done` agents are
+    /// excluded from "Needs you" entirely (a finished agent does not need you).
     private static func needsYouPriority(_ agent: Agent) -> Int {
         if agent.status == .blocked || agent.verdict.isProcessGone { return 0 }
         if agent.verdict.isSilent { return 1 }
-        if agent.status == .done { return 2 }
         return 3
     }
 
@@ -447,6 +457,12 @@ struct PanelView: View {
             .sorted { $0.enteredAt < $1.enteredAt }
     }
 
+    private var doneAgents: [Agent] {
+        appModel.store.agents.values
+            .filter { $0.status == .done && matchesSearch($0) }
+            .sorted { $0.enteredAt < $1.enteredAt }
+    }
+
     private var allGroups: [WorkspaceGroup] {
         let agents = appModel.store.agents.values.filter { matchesSearch($0) }
         let grouped = Dictionary(grouping: agents, by: { $0.workspaceName })
@@ -478,7 +494,7 @@ struct PanelView: View {
 
     private var footer: some View {
         HStack(spacing: 10) {
-            newAgentMenu(label: "＋ New agent")
+            newAgentMenu(label: "New agent")
             if case .starting(let kind) = appModel.newAgentState {
                 Text("Starting \(kind)…")
                     .font(.system(size: 10))
@@ -532,8 +548,8 @@ struct PanelView: View {
     private let pinnedKinds = ["claude", "codex", "opencode"]
 
     @ViewBuilder
-    private func newAgentMenu(label: String) -> some View {
-        Menu {
+    private func newAgentMenu(label: String, prominent: Bool = false) -> some View {
+        let content = Menu {
             ForEach(pinnedKinds, id: \.self) { kind in
                 kindSubmenu(kind)
             }
@@ -547,11 +563,22 @@ struct PanelView: View {
                 }
             }
         } label: {
-            Text(label).font(.system(size: 12.5, weight: .medium))
+            Label(label, systemImage: "plus")
+                .font(.system(size: 12.5, weight: .medium))
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
         .onAppear { appModel.loadAgentKindsIfNeeded() }
+
+        if prominent {
+            // Empty-state CTA: a real primary button, not a borderless label.
+            content
+                .menuStyle(.button)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+        } else {
+            content
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+        }
     }
 
     @ViewBuilder
@@ -597,6 +624,10 @@ struct PanelView: View {
                 .foregroundStyle(.red)
                 .lineLimit(2)
             Spacer()
+            Button("Retry") { appModel.resync() }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Re-connect / Retry sync")
         }
         .padding(.horizontal, Layout.gutter)
         .padding(.vertical, 6)
@@ -667,7 +698,7 @@ struct PanelView: View {
             Text("Start one below to get going.")
                 .font(.system(size: 12.5))
                 .foregroundStyle(.secondary)
-            newAgentMenu(label: "＋ New agent")
+            newAgentMenu(label: "New agent", prominent: true)
                 .padding(.top, 2)
         }
         .frame(maxWidth: .infinity)
@@ -695,7 +726,7 @@ struct PanelView: View {
     private var headerSubtitle: String {
         switch appModel.connectionState {
         case .connected:
-            return "\(needsYouAgents.count) need you · \(runningAgents.count) running · \(appModel.store.agents.count) agents"
+            return "\(needsYouAgents.count) need you · \(doneAgents.count) done · \(runningAgents.count) running"
         case .connecting:
             return "connecting…"
         case .reconnecting, .disconnected:
@@ -707,12 +738,8 @@ struct PanelView: View {
         ZStack {
             Rectangle().fill(.regularMaterial)
             LinearGradient(
-                colors: [Brand.bgMid.opacity(0.22), Brand.bgDeep.opacity(0.06), .clear],
+                colors: [Color.primary.opacity(0.03), .clear],
                 startPoint: .top, endPoint: .bottom
-            )
-            RadialGradient(
-                colors: [Brand.amber.opacity(0.10), .clear],
-                center: .topLeading, startRadius: 8, endRadius: 340
             )
         }
     }
@@ -790,7 +817,7 @@ struct PanelView: View {
             } catch {
                 await MainActor.run {
                     guard appModel.selectedAgentId == agent.id else { return }
-                    expansion = .peek("(peek failed: \(error.localizedDescription))")
+                    expansion = .peekFailed("Peek failed: \(error.localizedDescription)")
                 }
             }
         }

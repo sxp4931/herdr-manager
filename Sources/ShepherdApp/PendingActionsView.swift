@@ -4,6 +4,20 @@ import HerdrManagerCore
 struct PendingActionsView: View {
     @Environment(AppModel.self) private var appModel
 
+    /// ID of the pending action currently awaiting an inline destructive
+    /// confirmation (for tools that stop/close/interrupt). `nil` when no
+    /// confirmation is armed.
+    @State private var confirmingActionId: String?
+
+    /// Tools whose approve/deny is destructive and needs an inline confirm.
+    private static let destructiveTools: Set<String> = [
+        "pane.close", "agent.stop", "agent.interrupt",
+    ]
+
+    private static func isDestructive(_ tool: String) -> Bool {
+        destructiveTools.contains(tool)
+    }
+
     var body: some View {
         let actions = appModel.pendingActions
         guard !actions.isEmpty else { return AnyView(EmptyView()) }
@@ -56,27 +70,7 @@ struct PendingActionsView: View {
                     }
                 }
                 Spacer(minLength: 4)
-                Button {
-                    appModel.approveAction(action.actionId)
-                } label: {
-                    Text("OK")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.green)
-                }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                .help("Approve")
-
-                Button {
-                    appModel.denyAction(action.actionId)
-                } label: {
-                    Text("Deny")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.red)
-                }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                .help("Deny")
+                actionButtons(for: action)
             }
 
             // Expandable redacted detail (params are already redacted by the store).
@@ -105,6 +99,79 @@ struct PendingActionsView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 5)
+    }
+
+    // MARK: - Action buttons
+
+    @ViewBuilder
+    private func actionButtons(for action: PendingAction) -> some View {
+        let destructive = Self.isDestructive(action.tool)
+        if destructive && confirmingActionId == action.actionId {
+            // Inline confirmation for destructive tools: arm, then confirm or cancel.
+            HStack(spacing: 6) {
+                Button("Confirm Approve") { appModel.approveAction(action.actionId) }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+                    .controlSize(.regular)
+                    .help(Self.approveHelp(for: action))
+                Button("Confirm Deny") { appModel.denyAction(action.actionId) }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                    .controlSize(.regular)
+                    .help(Self.denyHelp(for: action))
+                Button("Cancel") { confirmingActionId = nil }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+            }
+        } else {
+            Button {
+                if destructive {
+                    confirmingActionId = action.actionId
+                } else {
+                    appModel.approveAction(action.actionId)
+                }
+            } label: {
+                Label("Approve", systemImage: "checkmark")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.green)
+            .controlSize(.regular)
+            .help(Self.approveHelp(for: action))
+
+            Button {
+                if destructive {
+                    confirmingActionId = action.actionId
+                } else {
+                    appModel.denyAction(action.actionId)
+                }
+            } label: {
+                Label("Deny", systemImage: "xmark")
+            }
+            .buttonStyle(.bordered)
+            .tint(.red)
+            .controlSize(.regular)
+            .help(Self.denyHelp(for: action))
+        }
+    }
+
+    private static func approveHelp(for action: PendingAction) -> String {
+        switch action.tool {
+        case "pane.close": return "Approve — closes the pane"
+        case "agent.stop": return "Approve — stops the agent"
+        case "agent.interrupt": return "Approve — interrupts the agent"
+        case "session.spawn": return "Approve — spawns the agent"
+        case "agent.say": return "Approve — sends the text"
+        default: return "Approve — accepts this action"
+        }
+    }
+
+    private static func denyHelp(for action: PendingAction) -> String {
+        switch action.tool {
+        case "pane.close": return "Deny — keeps the pane open"
+        case "agent.stop": return "Deny — keeps the agent running"
+        case "agent.interrupt": return "Deny — does not interrupt"
+        default: return "Deny — rejects this action"
+        }
     }
 
     // MARK: - Deterministic summary
