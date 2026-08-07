@@ -69,6 +69,8 @@ struct PendingActionsView: View {
                         }
                     }
                 }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(Self.actionAccessibilityLabel(summary: summary, observed: action.observedStatus, expires: expiresText))
                 Spacer(minLength: 4)
                 actionButtons(for: action)
             }
@@ -175,6 +177,16 @@ struct PendingActionsView: View {
     }
 
     // MARK: - Deterministic summary
+
+    /// One VoiceOver label for the whole action row summary: the tool
+    /// summary plus observed status and expiry, so a screen-reader user gets
+    /// the same picture as a sighted user without hopping between fragments.
+    private static func actionAccessibilityLabel(summary: String, observed: String?, expires: String) -> String {
+        var parts = [summary]
+        if let observed, !observed.isEmpty { parts.append("observed \(observed)") }
+        if !expires.isEmpty { parts.append("expires \(expires)") }
+        return parts.joined(separator: ", ")
+    }
 
     /// Build a deterministic, tool-aware summary from explicit param keys.
     /// Never uses `params.values.first` (dictionary order is nondeterministic).

@@ -193,12 +193,12 @@ struct AgentRow: View, Equatable {
         .padding(.vertical, 1)
         .contentShape(Rectangle())
         .onHover { hovering in isHovering = hovering }
-        .onTapGesture(count: 2) { onJump() }
-        .onTapGesture { onSelect() }
+        .background(ClickCatcher(onSelect: onSelect, onDoubleClick: onJump))
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel(accessibilityDescription)
         .accessibilityHint("Double-click to jump to this agent")
+        .accessibilityAction { onSelect() }
         .contextMenu {
             Button("Override: 5 min") { appModel.setThresholdOverride(for: agent, minutes: 5) }
             Button("Override: 10 min") { appModel.setThresholdOverride(for: agent, minutes: 10) }
@@ -237,7 +237,9 @@ struct AgentRow: View, Equatable {
             Menu {
                 Button("Close agent", role: .destructive) { onCloseRequest() }
             } label: {
-                Text("⋯")
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 12, weight: .semibold))
+                    .accessibilityLabel("More actions")
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
@@ -363,5 +365,43 @@ private struct StatusDot: View {
                 .shadow(color: color.opacity(active ? 0.9 : 0.4), radius: active ? 3 : 1)
         }
         .frame(width: 12, height: 12)
+    }
+}
+
+/// Native click handling for a row. SwiftUI's paired `onTapGesture` +
+/// `onTapGesture(count: 2)` disambiguates the two by withholding the single
+/// tap until the double-click window closes — selection then *feels* laggy
+/// even though it is only ~0.3s late. Routing clicks through an `NSView`
+/// reproduces the platform behavior exactly: click selects immediately,
+/// double-click jumps. The transparent view sits behind the row content, so
+/// buttons, text fields, and scroll views above it still receive their own
+/// events; right-clicks fall through to the SwiftUI context menu untouched.
+private struct ClickCatcher: NSViewRepresentable {
+    let onSelect: () -> Void
+    let onDoubleClick: () -> Void
+
+    func makeNSView(context: Context) -> CatcherView {
+        let view = CatcherView()
+        view.onSelect = onSelect
+        view.onDoubleClick = onDoubleClick
+        return view
+    }
+
+    func updateNSView(_ nsView: CatcherView, context: Context) {
+        nsView.onSelect = onSelect
+        nsView.onDoubleClick = onDoubleClick
+    }
+
+    final class CatcherView: NSView {
+        var onSelect: () -> Void = {}
+        var onDoubleClick: () -> Void = {}
+
+        override func mouseDown(with event: NSEvent) {
+            if event.clickCount >= 2 {
+                onDoubleClick()
+            } else {
+                onSelect()
+            }
+        }
     }
 }
