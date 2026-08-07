@@ -54,6 +54,7 @@ struct PendingActionsView: View {
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
+                        .help(Self.summary(for: action))
                     HStack(spacing: 4) {
                         if let observed = action.observedStatus, !observed.isEmpty {
                             Text("observed: \(observed)")

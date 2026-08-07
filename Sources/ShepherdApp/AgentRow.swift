@@ -135,6 +135,7 @@ struct AgentRow: View, Equatable {
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .help(titleText)
                     Spacer(minLength: 8)
                     statePill(accent: accent, text: Brand.pillText(for: agent))
                     Text(dwellString)
@@ -144,11 +145,12 @@ struct AgentRow: View, Equatable {
 
                 // Line 2: workspace · tab · ~cwd-basename.
                 if !locationLine.isEmpty {
-                    Text(locationLine)
+Text(locationLine)
                         .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Brand.secondaryText)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .help(locationLine)
                 }
 
                 // Line 3: what it's waiting on, only when there's something to say.
@@ -157,6 +159,7 @@ struct AgentRow: View, Equatable {
                         .font(.system(size: 12.5, weight: .medium))
                         .foregroundStyle(reasonColor)
                         .lineLimit(2)
+                        .help(reason)
                 }
 
                 if dailyCost.hasUsage {
