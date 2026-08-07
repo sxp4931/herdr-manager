@@ -112,7 +112,7 @@ struct PanelView: View {
         /// List sizing. These are estimates, not measurements: they only decide
         /// how tall the scroll area is, so being a few points off costs at worst
         /// a slightly early scrollbar.
-        static let listMaxHeight: CGFloat = 540
+        static let listCeilingHeight: CGFloat = 540
         static let emptyStateHeight: CGFloat = 210
         static let rowBaseHeight: CGFloat = 64
         static let rowCostHeight: CGFloat = 16
@@ -121,10 +121,55 @@ struct PanelView: View {
         static let rowInlineHeight: CGFloat = 36
         static let groupHeaderHeight: CGFloat = 33
 
+        /// Fixed chrome above and below the list: header, filter bar, footer,
+        /// the dividers between them, and the list's own vertical padding.
+        /// These are estimates; overestimating costs at worst a slightly early
+        /// scrollbar, underestimating would clip the footer off-screen.
+        static let fixedChromeHeight: CGFloat = 220
+        /// One banner row (error / health).
+        static let bannerHeight: CGFloat = 28
+        /// Pending-actions section header plus one action row.
+        static let pendingHeaderHeight: CGFloat = 28
+        static let pendingRowHeight: CGFloat = 48
+        /// Floor: even on a tiny display the list keeps a few rows visible.
+        static let listMinHeight: CGFloat = 180
+        /// Margin under the panel so its shadow never collides with the dock.
+        static let screenMargin: CGFloat = 20
+
         /// Text width a reason line can actually use before wrapping: panel
         /// width minus outer padding, leading padding, the status rail, and
         /// the trailing padding the text column carries.
         static let reasonMaxWidth: CGFloat = 440
+    }
+
+    /// Memoized wrapped heights for reason lines. The panel measures every
+    /// visible agent's reason on every body recompute (each herdr event while
+    /// the panel is open), and the text column width is a fixed constant — so
+    /// the measurement is a pure function of the string and never needs to run
+    /// twice. Bounded: dropped wholesale when it outgrows its cap; a busy herd
+    /// generates long-lived reason strings, so the common case is a cache hit.
+    private enum ReasonLayout {
+        @MainActor
+        private static var heights: [String: CGFloat] = [:]
+
+        @MainActor
+        static func height(for text: String) -> CGFloat {
+            if let cached = heights[text] { return cached }
+            let font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
+            let lineHeight = font.ascender - font.descender + font.leading
+            let bounds = (text as NSString).boundingRect(
+                with: .init(width: Layout.reasonMaxWidth, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [.font: font]
+            )
+            let lines = min(max(ceil(bounds.height / lineHeight), 1), 2) // matches .lineLimit(2)
+            let height = lines * lineHeight
+            if heights.count >= 256 {
+                heights.removeAll(keepingCapacity: true)
+            }
+            heights[text] = height
+            return height
+        }
     }
 
     // MARK: - Header
@@ -310,7 +355,31 @@ struct PanelView: View {
         for agent in agents {
             height += rowHeight(agent)
         }
-        return min(height, Layout.listMaxHeight)
+        return min(height, listMaxHeight)
+    }
+
+    /// Screen-aware cap on the list. The panel's chrome (header, filter bar,
+    /// footer, banners, pending actions) doesn't shrink, so on a small or
+    /// scaled display the list gives up height instead of pushing the footer
+    /// off-screen. Roomier screens keep the 540pt ceiling, and the list never
+    /// collapses below a few visible rows. Mirrors the dashboard's
+    /// screen-aware `panelHeight` (a `MenuBarExtra` window can appear on any
+    /// screen, and `NSScreen.main` is the screen the panel opens on).
+    private var listMaxHeight: CGFloat {
+        let screen = NSScreen.main?.visibleFrame.height ?? 900
+        var chrome = Layout.fixedChromeHeight
+        if !appModel.pendingActions.isEmpty {
+            chrome += Layout.pendingHeaderHeight
+                + CGFloat(appModel.pendingActions.count) * Layout.pendingRowHeight
+        }
+        if appModel.lastError != nil { chrome += Layout.bannerHeight }
+        if let health = appModel.adapterHealth, !health.compatible || !health.writesEnabled {
+            chrome += Layout.bannerHeight
+        }
+        return min(
+            Layout.listCeilingHeight,
+            max(Layout.listMinHeight, screen - chrome - Layout.screenMargin)
+        )
     }
 
     /// Height of one row: two text lines plus padding, and whatever the row
@@ -339,15 +408,7 @@ struct PanelView: View {
     /// actual wrapped height (instead of the old flat 17 pt single-line
     /// budget) keeps the scroll-area estimate honest when a reason wraps.
     private func reasonHeight(_ text: String) -> CGFloat {
-        let font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
-        let lineHeight = font.ascender - font.descender + font.leading
-        let bounds = (text as NSString).boundingRect(
-            with: .init(width: Layout.reasonMaxWidth, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font]
-        )
-        let lines = min(max(ceil(bounds.height / lineHeight), 1), 2) // matches .lineLimit(2)
-        return lines * lineHeight
+        ReasonLayout.height(for: text)
     }
 
     @ViewBuilder

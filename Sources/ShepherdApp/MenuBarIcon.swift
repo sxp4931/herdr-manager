@@ -7,7 +7,7 @@ import HerdrManagerCore
 /// vibrant/tinted bars. Attention is drawn in a fixed state colour instead,
 /// because a coloured badge must stay visibly red/amber/blue regardless of
 /// bar appearance; a template image would strip that colour to monochrome.
-enum HerdState: Equatable {
+enum HerdState: Equatable, Hashable {
     case calm
     case attention(Color)
     case disconnected
@@ -28,6 +28,38 @@ enum MenuBarIcon {
     private static let dotDiameter: CGFloat = 6
     private static let digitFontSize: CGFloat = 11
     private static let spacing: CGFloat = 3
+
+    /// Bounded cache of rendered badges. The menu-bar label re-evaluates on
+    /// every herdr event, but the badge only *looks* different when the herd
+    /// signal or the count changes; re-running `render` (symbol lookup plus
+    /// `lockFocus` tint compositing) on every event is pure waste on the
+    /// always-on hot path. When the cache outgrows its cap it is dropped
+    /// wholesale and rebuilt lazily — the count shifts often enough on a busy
+    /// herd that a precise LRU is not worth the bookkeeping.
+    @MainActor
+    private static var cache: [RenderKey: NSImage] = [:]
+
+    /// Identity of a rendered badge: enough to know whether the bitmap needs
+    /// to change. The count is part of the key because the attention digits
+    /// are painted into the same image.
+    private struct RenderKey: Hashable {
+        let state: HerdState
+        let attentionCount: Int
+    }
+
+    /// Render the badge for the current herd signal, or return the cached
+    /// bitmap when the signal has not changed since the last render.
+    @MainActor
+    static func rendered(state: HerdState, attentionCount: Int) -> NSImage {
+        let key = RenderKey(state: state, attentionCount: attentionCount)
+        if let cached = cache[key] { return cached }
+        let image = render(state: state, attentionCount: attentionCount)
+        if cache.count >= 16 {
+            cache.removeAll(keepingCapacity: true)
+        }
+        cache[key] = image
+        return image
+    }
 
     static func render(state: HerdState, attentionCount: Int) -> NSImage {
         switch state {
