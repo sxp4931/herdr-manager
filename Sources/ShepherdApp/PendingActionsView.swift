@@ -89,6 +89,7 @@ struct PendingActionsView: View {
                                     .font(.system(size: 10.5, design: .monospaced))
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
+                                    .help("\(key): \(value)")
                                     .textSelection(.enabled)
                             }
                         }
@@ -239,9 +240,15 @@ struct PendingActionsView: View {
     private static func expiresText(for action: PendingAction) -> String {
         let remaining = action.expiresAt.timeIntervalSinceNow
         guard remaining > 0 else { return "expired" }
-        let seconds = Int(remaining)
-        if seconds >= 60 {
-            return "\(seconds / 60)m\(seconds % 60)s"
+        let totalSeconds = Int(remaining)
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let seconds = totalSeconds % 60
+        if hours > 0 {
+            return "\(hours)h\(minutes)m"
+        }
+        if minutes > 0 {
+            return "\(minutes)m\(seconds)s"
         }
         return "\(seconds)s"
     }

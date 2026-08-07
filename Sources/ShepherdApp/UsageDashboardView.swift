@@ -384,9 +384,15 @@ private struct UsageSummaryRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.system(size: 12.5, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(title)
                 Text(subtitle)
                     .font(.system(size: 10.5, design: .monospaced))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(subtitle)
                 if let models = UsageFormatter.modelNames(summary) {
                     Text(models)
                         .font(.system(size: 10, design: .monospaced))

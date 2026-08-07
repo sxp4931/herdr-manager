@@ -87,6 +87,13 @@ final class AppModel {
     /// panel footer renders this so failures are no longer silently swallowed.
     var lastError: String?
 
+    /// Agent IDs with a write currently in flight (approve/deny/nudge/close/
+    /// jump). Guards against double-submission: a second click on the same row
+    /// while a write is pending is ignored, and the row's action buttons read
+    /// this set to disable — so a double-click on Approve lands one Enter on
+    /// the permission prompt, not two.
+    private(set) var inFlightAgentWrites: Set<AgentID> = []
+
     /// Cached adapter health for the footer badge. Refreshed on every
     /// successful snapshot so protocol/version mismatches surface quickly.
     var adapterHealth: AdapterHealth?
@@ -541,6 +548,9 @@ final class AppModel {
     /// after the destination is actually brought forward.
     @discardableResult
     func jump(_ agent: Agent) async -> Bool {
+        guard !inFlightAgentWrites.contains(agent.id) else { return false }
+        inFlightAgentWrites.insert(agent.id)
+        defer { inFlightAgentWrites.remove(agent.id) }
         let health = adapter.health()
         guard health.writesEnabled else {
             setLastError("Jump skipped: \(health.reason ?? "writes disabled")")
@@ -573,7 +583,10 @@ final class AppModel {
     }
 
     private func sendKeys(_ agent: Agent, keys: [String], actionName: String) {
+        guard !inFlightAgentWrites.contains(agent.id) else { return }
+        inFlightAgentWrites.insert(agent.id)
         Task { [weak self] in
+            defer { self?.inFlightAgentWrites.remove(agent.id) }
             guard let self else { return }
             let health = self.adapter.health()
             guard health.writesEnabled else {
@@ -591,7 +604,10 @@ final class AppModel {
 
     /// Nudge: a free-text prompt sent straight to the agent's pane.
     func nudge(_ agent: Agent, text: String) {
+        guard !inFlightAgentWrites.contains(agent.id) else { return }
+        inFlightAgentWrites.insert(agent.id)
         Task { [weak self] in
+            defer { self?.inFlightAgentWrites.remove(agent.id) }
             guard let self else { return }
             let health = self.adapter.health()
             guard health.writesEnabled else {
@@ -610,7 +626,10 @@ final class AppModel {
     /// Close agent — destructive; the caller (AgentRow) is responsible for
     /// requiring an explicit confirmation step before invoking this.
     func closeAgent(_ agent: Agent) {
+        guard !inFlightAgentWrites.contains(agent.id) else { return }
+        inFlightAgentWrites.insert(agent.id)
         Task { [weak self] in
+            defer { self?.inFlightAgentWrites.remove(agent.id) }
             guard let self else { return }
             let health = self.adapter.health()
             guard health.writesEnabled else {
@@ -727,31 +746,69 @@ final class AppModel {
 
     func approveAction(_ id: String) {
         Task {
-            _ = try? await sharedActionStore.approve(id)
-            await journal.record(JournalEntry(
-                actionId: id,
-                tool: await sharedActionStore.get(id)?.tool ?? "unknown",
-                params: await sharedActionStore.get(id)?.params ?? [:],
-                caller: "ui",
-                preState: "pending",
-                postState: "approved",
-                outcome: "approved"
-            ))
+            do {
+                guard let status = await sharedActionStore.status(id) else {
+                    setLastError("That request is no longer in the queue.")
+                    return
+                }
+                guard status == .pending else {
+                    setLastError("That request was already \(Self.stateDescription(status)).")
+                    return
+                }
+                try await sharedActionStore.approve(id)
+                await journal.record(JournalEntry(
+                    actionId: id,
+                    tool: await sharedActionStore.get(id)?.tool ?? "unknown",
+                    params: await sharedActionStore.get(id)?.params ?? [:],
+                    caller: "ui",
+                    preState: "pending",
+                    postState: "approved",
+                    outcome: "approved"
+                ))
+            } catch {
+                setLastError("Approve failed: \(error.localizedDescription)")
+            }
         }
     }
 
     func denyAction(_ id: String) {
         Task {
-            _ = try? await sharedActionStore.deny(id)
-            await journal.record(JournalEntry(
-                actionId: id,
-                tool: await sharedActionStore.get(id)?.tool ?? "unknown",
-                params: await sharedActionStore.get(id)?.params ?? [:],
-                caller: "ui",
-                preState: "pending",
-                postState: "denied",
-                outcome: "denied"
-            ))
+            do {
+                guard let status = await sharedActionStore.status(id) else {
+                    setLastError("That request is no longer in the queue.")
+                    return
+                }
+                guard status == .pending else {
+                    setLastError("That request was already \(Self.stateDescription(status)).")
+                    return
+                }
+                try await sharedActionStore.deny(id)
+                await journal.record(JournalEntry(
+                    actionId: id,
+                    tool: await sharedActionStore.get(id)?.tool ?? "unknown",
+                    params: await sharedActionStore.get(id)?.params ?? [:],
+                    caller: "ui",
+                    preState: "pending",
+                    postState: "denied",
+                    outcome: "denied"
+                ))
+            } catch {
+                setLastError("Deny failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Human-readable description of a terminal action state, for the error
+    /// banner when the UI tries to approve/deny an action that moved on.
+    private static func stateDescription(_ state: ActionState) -> String {
+        switch state {
+        case .pending: return "still pending"
+        case .approved: return "approved"
+        case .denied: return "denied"
+        case .expired: return "expired"
+        case .executing: return "claimed for execution"
+        case .executed: return "executed"
+        case .failed: return "failed"
         }
     }
 

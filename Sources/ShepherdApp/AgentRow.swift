@@ -14,12 +14,20 @@ enum RowExpansion: Equatable {
     case closeConfirm
 }
 
+/// Bounds for the free-text nudge field. A terminal pane is not a text area:
+/// an unbounded paste would flood the agent's input with megabytes of junk.
+/// The cap is generous for real prompts, tight enough to stop accidents.
+enum NudgeLimits {
+    static let maxLength = 2000
+}
+
 struct AgentRow: View, Equatable {
     @Environment(AppModel.self) private var appModel
     let agent: Agent
     let dailyCost: TokenMeterSummary
     let isSelected: Bool
     let expansion: RowExpansion
+    let writeInFlight: Bool
     @Binding var nudgeText: String
 
     let onSelect: () -> Void
@@ -37,6 +45,7 @@ struct AgentRow: View, Equatable {
         lhs.agent == rhs.agent
             && lhs.dailyCost == rhs.dailyCost
             && lhs.isSelected == rhs.isSelected
+            && lhs.writeInFlight == rhs.writeInFlight
             && (lhs.isSelected ? lhs.expansion == rhs.expansion : true)
     }
 
@@ -221,10 +230,12 @@ Text(locationLine)
                 Button("Approve") { appModel.approve(agent) }
                     .buttonStyle(.borderedProminent)
                     .tint(Brand.approveFill)
+                    .disabled(writeInFlight)
                     .help("Sends Enter to accept the highlighted option")
                 Button("Deny") { appModel.deny(agent) }
                     .buttonStyle(.borderedProminent)
                     .tint(Brand.blocked)
+                    .disabled(writeInFlight)
                     .help("Sends Esc to dismiss the prompt")
             }
             Button("Peek") { onPeekToggle() }
@@ -232,13 +243,16 @@ Text(locationLine)
                 .help("Show the last 20 lines of this pane")
             Button("Jump") { onJump() }
                 .buttonStyle(.bordered)
+                .disabled(writeInFlight)
                 .help("Focus this agent's workspace and pane")
             Button("Nudge") { onNudgeOpen() }
                 .buttonStyle(.bordered)
+                .disabled(writeInFlight)
                 .help("Send a message to this agent")
             Spacer(minLength: 0)
             Menu {
                 Button("Close agent", role: .destructive) { onCloseRequest() }
+                    .disabled(writeInFlight)
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 12, weight: .semibold))
@@ -308,14 +322,28 @@ Text(locationLine)
             }
             .padding(.top, 4)
         case .nudge:
-            HStack(spacing: 6) {
-                TextField("Send a message…", text: $nudgeText)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12))
-                    .onSubmit { onNudgeSubmit() }
-                    .onExitCommand { onCancelExpansion() }
-                Button("Send") { onNudgeSubmit() }
-                    .controlSize(.regular)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    TextField("Send a message…", text: $nudgeText)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12))
+                        .onChange(of: nudgeText) { _, newValue in
+                            if newValue.count > NudgeLimits.maxLength {
+                                nudgeText = String(newValue.prefix(NudgeLimits.maxLength))
+                            }
+                        }
+                        .onSubmit { onNudgeSubmit() }
+                        .onExitCommand { onCancelExpansion() }
+                    Button("Send") { onNudgeSubmit() }
+                        .controlSize(.regular)
+                        .disabled(nudgeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                if !nudgeText.isEmpty {
+                    Text("\(nudgeText.count)/\(NudgeLimits.maxLength)")
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
             }
             .padding(.top, 4)
         case .closeConfirm:

@@ -391,6 +391,8 @@ struct PanelView: View {
                     .tracking(0.7)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(group.name)
                 Text("\(group.agents.count)")
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.secondary)
@@ -416,6 +418,7 @@ struct PanelView: View {
             dailyCost: appModel.usageSnapshot.agentSummary(for: agent.id, window: .day),
             isSelected: isSelected,
             expansion: isSelected ? expansion : .none,
+            writeInFlight: appModel.inFlightAgentWrites.contains(agent.id),
             nudgeText: $nudgeText,
             onSelect: { appModel.selectedAgentId = agent.id },
             onJump: { jump(agent) },
@@ -645,6 +648,7 @@ struct PanelView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(Brand.blocked)
                 .lineLimit(2)
+                .help(text)
             Spacer()
             Button("Retry") { appModel.resync() }
                 .buttonStyle(.bordered)
@@ -657,15 +661,17 @@ struct PanelView: View {
     }
 
     private func healthBanner(_ health: AdapterHealth) -> some View {
-        HStack(spacing: 6) {
+        let reason = health.reason ?? (health.compatible ? "writes disabled" : "incompatible protocol")
+        let detail = "v\(health.protocolVersion): \(reason)"
+        return HStack(spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 11))
                 .foregroundStyle(Brand.warn)
-            let reason = health.reason ?? (health.compatible ? "writes disabled" : "incompatible protocol")
-            Text("v\(health.protocolVersion): \(reason)")
+            Text(detail)
                 .font(.system(size: 11))
                 .foregroundStyle(Brand.warn)
                 .lineLimit(1)
+                .help(detail)
             Spacer()
         }
         .padding(.horizontal, Layout.gutter)
@@ -851,12 +857,12 @@ struct PanelView: View {
     }
 
     private func submitNudge(_ agent: Agent) {
-        let text = nudgeText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = nudgeText.trimmingCharacters(in: .whitespacesAndNewlines).prefix(NudgeLimits.maxLength)
         guard !text.isEmpty else {
             expansion = .none
             return
         }
-        appModel.nudge(agent, text: text)
+        appModel.nudge(agent, text: String(text))
         nudgeText = ""
         expansion = .none
     }
