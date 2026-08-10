@@ -19,7 +19,12 @@ func pad(_ s: String, to width: Int) -> String {
 struct HerdmgrCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "herdmgr",
-        abstract: "Herdr Manager CLI — monitor AI coding agents"
+        abstract: "Herdr Manager CLI — monitor AI coding agents",
+        discussion: """
+            Without --socket, the herdr socket is resolved from HERDR_SOCKET_PATH, \
+            then HERDR_SESSION, then $XDG_CONFIG_HOME/herdr/herdr.sock, \
+            then ~/.config/herdr/herdr.sock.
+            """
     )
 
     @Flag(name: .long, help: "Output as JSON")
@@ -43,7 +48,7 @@ struct HerdmgrCommand: AsyncParsableCommand {
         let fm = FileManager.default
         guard fm.fileExists(atPath: socketPath) else {
             FileHandle.standardError.write("Error: herdr socket not found at \(socketPath)\n".data(using: .utf8)!)
-            FileHandle.standardError.write("Is herdr running?\n".data(using: .utf8)!)
+            FileHandle.standardError.write("Is herdr running? Install it from https://herdr.dev\n".data(using: .utf8)!)
             throw ExitCode.failure
         }
 

@@ -1,7 +1,7 @@
 # Shepherd
 
 Shepherd is a macOS menu-bar app that triages a herd of AI coding agents managed by
-[herdr](https://github.com/ogulcancelik/herdr) ([herdr.dev](https://herdr.dev)).
+[herdr](https://github.com/herdrdev/herdr) ([herdr.dev](https://herdr.dev)).
 It answers "does anything need me?" at a glance and gets you from blocked to unblocked
 in one or two actions.
 
@@ -22,7 +22,7 @@ writes with a visible reason while reads continue.
 
 - macOS 14+
 - Xcode 16+ (Swift 6 toolchain)
-- [herdr](https://github.com/ogulcancelik/herdr) installed and running
+- [herdr](https://github.com/herdrdev/herdr) installed and running
   (verified baseline: herdr 0.7.5, wire protocol 17)
 
 ## How it finds herdr
@@ -30,12 +30,23 @@ writes with a visible reason while reads continue.
 The herdr socket is resolved in this order:
 
 1. `HERDR_SOCKET_PATH` environment variable (explicit override)
-2. `HERDR_SESSION` environment variable (session-based lookup under
-   `<config>/herdr/sessions/<name>/herdr.sock`)
+2. `HERDR_SESSION` environment variable — resolved against herdr's session
+   registry (`herdr session list`) first, then
+   `<config>/herdr/sessions/<name>/herdr.sock`. If the session can't be
+   resolved, resolution falls through to the defaults below.
 3. `$XDG_CONFIG_HOME/herdr/herdr.sock`
 4. `~/.config/herdr/herdr.sock` (default)
 
 ## Quick start
+
+Shepherd has nothing to talk to without herdr, so install and start it first:
+
+```sh
+brew install herdr          # or: curl -fsSL https://herdr.dev/install.sh | sh
+herdr                       # start it where your work lives
+```
+
+Then build and run Shepherd:
 
 ```sh
 git clone https://github.com/sxp4931/herdr-manager.git
@@ -44,8 +55,9 @@ swift build
 swift run ShepherdApp
 ```
 
-A menu-bar icon appears. If herdr is not running, the panel tells you to start herdr
-and lets you reconnect with ⌘R.
+A menu-bar icon appears. If herdr is not running, the panel shows where it looked,
+links to [herdr.dev](https://herdr.dev) if you don't have herdr yet, and lets you
+reconnect with ⌘R.
 
 ### Release build
 
@@ -54,6 +66,8 @@ and lets you reconnect with ⌘R.
 ```
 
 Produces an ad-hoc-signed `Shepherd.app` bundle (launch with `open Shepherd.app`).
+If Gatekeeper blocks the bundle on another Mac (ad-hoc signing carries no
+notarization), right-click → Open once to launch it.
 The bundle also includes the MCP server as a helper binary at
 `Shepherd.app/Contents/Helpers/herdr-manager-mcp`, giving agent hosts a stable
 command path.
