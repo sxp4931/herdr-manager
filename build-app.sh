@@ -4,11 +4,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-echo "Building ShepherdApp..."
-swift build -c release 2>&1 | tail -1
+echo "Building ShepherdApp (universal)..."
+swift build -c release --arch arm64 --arch x86_64 2>&1 | tail -1
 
-BINARY=".build/release/ShepherdApp"
-MCP_BINARY=".build/release/herdr-manager-mcp"
+# Universal builds land under .build/apple/Products/Release; locate the products.
+BINARY="$(find .build/apple/Products -name ShepherdApp -type f 2>/dev/null | head -1)"
+MCP_BINARY="$(find .build/apple/Products -name herdr-manager-mcp -type f 2>/dev/null | head -1)"
+[ -n "$BINARY" ] || BINARY=".build/release/ShepherdApp"
+[ -n "$MCP_BINARY" ] || MCP_BINARY=".build/release/herdr-manager-mcp"
 APP_DIR="Shepherd.app"
 
 echo "Creating $APP_DIR bundle..."
@@ -40,9 +43,9 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.shepherd.app</string>
     <key>CFBundleVersion</key>
-    <string>0.1.0</string>
+    <string>0.1.1</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.1.1</string>
     <key>CFBundleExecutable</key>
     <string>Shepherd</string>
     <key>CFBundlePackageType</key>
@@ -61,8 +64,19 @@ cat > "$APP_DIR/Contents/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
-echo "Signing $APP_DIR for local use..."
-codesign --force --deep --sign - "$APP_DIR"
+# Sign with a Developer ID identity (hardened runtime + secure timestamp,
+# required for notarization) when one is available; fall back to ad-hoc for
+# local-only builds. Override with SIGN_IDENTITY="..." if needed.
+DEV_ID="$(security find-identity -v -p codesigning 2>/dev/null | grep -m1 'Developer ID Application' | sed -E 's/.*"(.*)".*/\1/')"
+IDENTITY="${SIGN_IDENTITY:-$DEV_ID}"
+if [ -n "$IDENTITY" ]; then
+    echo "Signing $APP_DIR with Developer ID: $IDENTITY"
+    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP_DIR/Contents/Helpers/herdr-manager-mcp"
+    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP_DIR"
+else
+    echo "Signing $APP_DIR ad-hoc for local use..."
+    codesign --force --deep --sign - "$APP_DIR"
+fi
 
 echo "✅ $APP_DIR created"
 echo "   Launch: open $APP_DIR"
