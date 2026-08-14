@@ -10,9 +10,9 @@
 //  SF Pro caption in charcoal. Finder draws the real icons; this file
 //  never impersonates them.
 //  STORY: Open the DMG, see Shepherd on the left, gold chevron, Applications
-//  on the right, drag.
+//  on the right, drag; then close this window.
 //  FIRST VIEWPORT: 660×400 Finder window. Icon wells at layout.json.
-//  Gold chevron in the gap. Caption below the labels.
+//  Gold chevron in the gap. Drag caption, then the close cue, below the labels.
 //  FORM: Classic Mac drag-install; approved classic comp.
 //  FINISH: unreviewed and undocumented is unfinished; this build ends with
 //  the finish review, the verdict, and DESIGN.md
@@ -49,6 +49,7 @@ let layout: Layout = {
 
 let scale = 2
 let caption = "Drag Shepherd to Applications"
+let closeCue = "Then close this window"
 
 // Warm paper — Finder-like, slightly warmer so the gold has a home.
 let paperTop = CGColor(srgbRed: 0.949, green: 0.941, blue: 0.918, alpha: 1)   // #F2F0EA
@@ -200,30 +201,54 @@ func addChevron(in context: CGContext) {
     context.restoreGState()
 }
 
-func addCaption(in context: CGContext) {
-    let font = NSFont.systemFont(ofSize: 15, weight: .medium)
+func drawCenteredLine(
+    _ text: String,
+    finderY: CGFloat,
+    font: NSFont,
+    color: NSColor,
+    kern: CGFloat,
+    in context: CGContext
+) {
     let attributes: [NSAttributedString.Key: Any] = [
         .font: font,
-        .foregroundColor: captionColor,
-        .kern: 0.25,
+        .foregroundColor: color,
+        .kern: kern,
     ]
-    let attributed = NSAttributedString(string: caption, attributes: attributes)
+    let attributed = NSAttributedString(string: text, attributes: attributes)
     let line = CTLineCreateWithAttributedString(attributed)
 
     var ascent: CGFloat = 0
     var descent: CGFloat = 0
     var leading: CGFloat = 0
     let width = CGFloat(CTLineGetTypographicBounds(line, &ascent, &descent, &leading))
-
-    let iconBottom = CGFloat(layout.appY) + CGFloat(layout.iconSize) / 2
-    // Finder's icon label sits ~28pt under the icon body. Sit the caption
-    // clearly below that, still inside the window with a generous footer.
-    let finderY = iconBottom + 92
     let baseline = cgY(finderY) - descent
     let x = CGFloat(layout.windowWidth) / 2 - width / 2
 
     context.textPosition = CGPoint(x: x, y: baseline)
     CTLineDraw(line, context)
+}
+
+func addCaption(in context: CGContext) {
+    let iconBottom = CGFloat(layout.appY) + CGFloat(layout.iconSize) / 2
+    // Finder's icon label sits ~28pt under the icon body. Sit the drag
+    // instruction clearly below that, with the close cue as the next beat.
+    let dragY = iconBottom + 80
+    drawCenteredLine(
+        caption,
+        finderY: dragY,
+        font: NSFont.systemFont(ofSize: 15, weight: .medium),
+        color: captionColor,
+        kern: 0.25,
+        in: context
+    )
+    drawCenteredLine(
+        closeCue,
+        finderY: dragY + 22,
+        font: NSFont.systemFont(ofSize: 13, weight: .regular),
+        color: captionColor,
+        kern: 0.2,
+        in: context
+    )
 }
 
 func render(previewWells: Bool) -> CGImage {
