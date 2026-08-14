@@ -12,6 +12,7 @@ public enum TokenMeterProvider: String, Codable, CaseIterable, Hashable, Identif
     case grok
     case deepseek
     case qwen
+    case cursor
 
     public var id: Self { self }
 
@@ -23,6 +24,7 @@ public enum TokenMeterProvider: String, Codable, CaseIterable, Hashable, Identif
         case .grok: return "Grok"
         case .deepseek: return "DeepSeek"
         case .qwen: return "Qwen / Alibaba"
+        case .cursor: return "Cursor"
         }
     }
 
@@ -37,6 +39,7 @@ public enum TokenMeterProvider: String, Codable, CaseIterable, Hashable, Identif
         case "codex", "openai": self = .codex
         case "kimi", "kimi-code", "kimi_code": self = .kimi
         case "grok", "xai": self = .grok
+        case "cursor", "cursor-agent", "cursor_agent": self = .cursor
         case "deepseek", "deepseek-r1", "deepseek_v3": self = .deepseek
         case "qwen", "alibaba", "dashscope", "qwen-coder": self = .qwen
         default: return nil
@@ -733,6 +736,28 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
         ),
         // Dashed spelling of grok-4.6.
         "grok-4-6": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 6.0
+        ),
+        // Cursor agent logs `cursor-grok-4.6-high` (and the dashed form)
+        // rather than the bare xAI id. Same list rates as grok-4.6.
+        "cursor-grok-4.6": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 6.0
+        ),
+        "cursor-grok-4.6-high": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 6.0
+        ),
+        "cursor-grok-4-6": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 6.0
+        ),
+        "cursor-grok-4-6-high": TokenMeterPricing(
             inputPerMillion: 2.0,
             cacheReadPerMillion: 0.50,
             outputPerMillion: 6.0

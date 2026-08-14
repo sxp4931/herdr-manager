@@ -327,11 +327,12 @@ struct PanelView: View {
         static let listCeilingHeight: CGFloat = 540
         static let emptyStateHeight: CGFloat = 260
         static let rowBaseHeight: CGFloat = 64
-        /// Cost chip and the always-visible Peek/Jump/Nudge cluster share one
-        /// line on every tile. Sized to the small bordered buttons, not the
-        /// 10.5 pt caption: underestimating here clips the cluster on a short
-        /// list that hasn't yet hit the scroll ceiling.
-        static let rowCostHeight: CGFloat = 26
+        /// Cost chip on its own row (10.5 pt caption plus the 4 pt stack gap).
+        static let rowCostHeight: CGFloat = 18
+        /// Peek / Jump / Nudge on a dedicated full-width row. Custom-drawn
+        /// chrome is taller than the old cramped `.small` cluster; this
+        /// budget is what keeps a short list from clipping them.
+        static let rowPrimaryActionsHeight: CGFloat = 40
         static let rowActionsHeight: CGFloat = 40
         static let rowInlineHeight: CGFloat = 36
         static let groupHeaderHeight: CGFloat = 33
@@ -632,15 +633,16 @@ struct PanelView: View {
     }
 
     /// Height of one row: two text lines plus padding, and whatever the row
-    /// grows by while it is the selected/expanded one. Every tile now draws
-    /// the cost chip and Peek/Jump/Nudge on one shared line, so that height
-    /// is no longer gated on `hasUsage`.
+    /// grows by while it is the selected/expanded one. Every tile draws the
+    /// cost chip and a full-width Peek/Jump/Nudge row, so that height is no
+    /// longer gated on `hasUsage`.
     private func rowHeight(_ agent: Agent) -> CGFloat {
         var height = Layout.rowBaseHeight
         if let reason = agent.verdict.reasonText {
             height += reasonHeight(reason)
         }
         height += Layout.rowCostHeight
+        height += Layout.rowPrimaryActionsHeight
         guard appModel.selectedAgentId == agent.id else { return height }
 
         height += Layout.rowActionsHeight

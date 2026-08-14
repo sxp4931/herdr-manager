@@ -1,7 +1,8 @@
 import Foundation
 import SQLite3
 
-/// Reads the local session logs used by the supported coding-agent CLIs.
+/// Reads the local session logs used by the supported coding-agent CLIs
+/// and Cursor's local chat store / herdr-usage JSONL.
 ///
 /// The actor owns all file I/O so a large transcript cannot block Shepherd's
 /// menu-bar main actor. It never writes to, tails, or uploads the log files.
@@ -33,6 +34,7 @@ public actor LocalTokenMeter {
         events.append(contentsOf: scanCodex())
         events.append(contentsOf: scanKimi())
         events.append(contentsOf: scanGrok())
+        events.append(contentsOf: scanCursor())
         events.append(contentsOf: scanOpenCode())
 
         return TokenMeterAggregator.snapshot(
@@ -387,6 +389,302 @@ public actor LocalTokenMeter {
                 usage: .totalOnly(record.total)
             )
         }.sorted { $0.date < $1.date }
+    }
+
+    // MARK: - Cursor agent
+
+    /// Cursor stores billed usage in two local places:
+    ///
+    /// 1. `~/.cursor/herdr-usage.jsonl` — one line per `afterAgentResponse`
+    ///    hook, with the model id (e.g. `grok-4.6` / `cursor-grok-4.6-high`)
+    ///    and token counts. This is how Grok-backed Cursor sessions become
+    ///    visible: the chat store does not persist xAI usage the way it
+    ///    persists Anthropic `usage` objects.
+    /// 2. `~/.cursor/chats/<project>/<session>/store.db` — Anthropic-shaped
+    ///    `usage` JSON embedded in conversation blobs, plus `lastUsedModel`
+    ///    and `cwd` from the session meta.
+    private func scanCursor() -> [TokenUsageEvent] {
+        var events: [TokenUsageEvent] = []
+        events.append(contentsOf: scanCursorUsageLog())
+        events.append(contentsOf: scanCursorChats())
+        return events
+    }
+
+    private func scanCursorUsageLog() -> [TokenUsageEvent] {
+        let file = homeDirectory.appendingPathComponent(".cursor/herdr-usage.jsonl")
+        guard let contents = try? String(contentsOf: file, encoding: .utf8) else { return [] }
+        var events: [TokenUsageEvent] = []
+        var lineNumber = 0
+        for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
+            defer { lineNumber += 1 }
+            guard let data = String(line).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data),
+                  let record = object as? [String: Any] else { continue }
+
+            let input = integer(record["input_tokens"] ?? record["inputTokens"])
+            let output = integer(record["output_tokens"] ?? record["outputTokens"])
+            let cacheRead = integer(
+                record["cache_read_tokens"]
+                    ?? record["cacheReadTokens"]
+                    ?? record["cache_read_input_tokens"]
+            )
+            let cacheWrite = integer(
+                record["cache_write_tokens"]
+                    ?? record["cacheWriteTokens"]
+                    ?? record["cache_creation_input_tokens"]
+            )
+            // Cursor's raw `inputTokens` already includes cache. Treat the
+            // logged input as billed input and keep cache splits for pricing.
+            let billedInput = max(input, cacheRead + cacheWrite)
+            let tokenUsage = TokenUsage(
+                inputTokens: billedInput,
+                cacheReadTokens: cacheRead,
+                cacheWrite5mTokens: cacheWrite,
+                outputTokens: output
+            )
+            guard tokenUsage.totalTokens > 0 else { continue }
+
+            let sessionID = (record["conversation_id"] as? String)
+                ?? (record["conversationId"] as? String)
+                ?? "line-\(lineNumber)"
+            let model = (record["model"] as? String)
+                ?? (record["modelName"] as? String)
+            let cwd = normalizedPath(record["cwd"] as? String)
+            let date = epochDate(record["ts_ms"] ?? record["timestamp_ms"], milliseconds: true)
+                ?? parseDate(record["ts"] ?? record["timestamp"])
+                ?? modificationDate(of: file)
+            events.append(TokenUsageEvent(
+                id: "cursor-log:\(sessionID):\(lineNumber)",
+                sessionID: sessionID,
+                provider: .cursor,
+                model: model,
+                cwd: cwd,
+                date: date,
+                usage: tokenUsage
+            ))
+        }
+        return events
+    }
+
+    private func scanCursorChats() -> [TokenUsageEvent] {
+        let root = homeDirectory.appendingPathComponent(".cursor/chats", isDirectory: true)
+        guard let projects = try? FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        var events: [TokenUsageEvent] = []
+        for project in projects where isDirectory(project) {
+            guard let sessions = try? FileManager.default.contentsOfDirectory(
+                at: project,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for session in sessions where isDirectory(session) {
+                events.append(contentsOf: scanCursorSession(session))
+            }
+        }
+        return events
+    }
+
+    private func scanCursorSession(_ session: URL) -> [TokenUsageEvent] {
+        let sessionID = session.lastPathComponent
+        let meta = cursorSessionMeta(at: session)
+        let cwd = normalizedPath(meta.cwd)
+        var model = meta.model
+        var events: [TokenUsageEvent] = []
+
+        let store = session.appendingPathComponent("store.db")
+        guard FileManager.default.fileExists(atPath: store.path) else { return [] }
+
+        var db: OpaquePointer?
+        let openResult = sqlite3_open_v2(store.path, &db, SQLITE_OPEN_READONLY, nil)
+        guard openResult == SQLITE_OK, let db else { return [] }
+        defer { sqlite3_close(db) }
+
+        if model == nil, let stored = cursorLastUsedModel(db) {
+            model = stored
+        }
+
+        let sql = "SELECT id, data FROM blobs"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
+            return []
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let blobID = sqliteText(stmt, index: 0),
+                  let bytes = sqliteBlob(stmt, index: 1) else { continue }
+            // File-read blobs of this repo's tests contain the same Anthropic
+            // `usage` shape as a real API response. Skip those so a Cursor
+            // session that grepped TokenMeterTests cannot mint fake cost.
+            if bytes.range(of: Data("TokenMeterTests".utf8)) != nil
+                || bytes.range(of: Data("#expect".utf8)) != nil {
+                continue
+            }
+            let blobModel = cursorModelName(in: bytes) ?? model
+            for (index, usage) in cursorAPIUsageObjects(in: bytes).enumerated() {
+                events.append(TokenUsageEvent(
+                    id: "cursor-chat:\(sessionID):\(blobID):\(index)",
+                    sessionID: sessionID,
+                    provider: .cursor,
+                    model: blobModel ?? model,
+                    cwd: cwd,
+                    date: meta.date,
+                    usage: usage
+                ))
+            }
+        }
+        return events
+    }
+
+    private struct CursorSessionMeta {
+        var cwd: String?
+        var model: String?
+        var date: Date
+    }
+
+    private func cursorSessionMeta(at session: URL) -> CursorSessionMeta {
+        let fallback = modificationDate(of: session)
+        let metaURL = session.appendingPathComponent("meta.json")
+        guard let data = try? Data(contentsOf: metaURL),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let record = object as? [String: Any] else {
+            return CursorSessionMeta(cwd: nil, model: nil, date: fallback)
+        }
+        let date = epochDate(record["updatedAtMs"] ?? record["createdAtMs"], milliseconds: true)
+            ?? fallback
+        return CursorSessionMeta(
+            cwd: record["cwd"] as? String,
+            model: record["lastUsedModel"] as? String,
+            date: date
+        )
+    }
+
+    private func cursorLastUsedModel(_ db: OpaquePointer) -> String? {
+        let sql = "SELECT value FROM meta LIMIT 1"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
+            return nil
+        }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW,
+              let hex = sqliteText(stmt, index: 0),
+              let decoded = dataFromHex(hex),
+              let object = try? JSONSerialization.jsonObject(with: decoded),
+              let record = object as? [String: Any],
+              let model = record["lastUsedModel"] as? String,
+              !model.isEmpty else {
+            return nil
+        }
+        return model
+    }
+
+    /// Anthropic-shaped usage objects that sit next to `stop_reason` or
+    /// `service_tier` — the API response, not a quoted fixture.
+    private func cursorAPIUsageObjects(in data: Data) -> [TokenUsage] {
+        guard let text = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .isoLatin1) else { return [] }
+        var result: [TokenUsage] = []
+        var searchStart = text.startIndex
+        while let usageRange = text.range(of: "\"usage\"", range: searchStart..<text.endIndex) {
+            let windowStart = text.index(usageRange.lowerBound, offsetBy: -80, limitedBy: text.startIndex)
+                ?? text.startIndex
+            let window = text[windowStart..<usageRange.lowerBound]
+            let isAPIResponse = window.contains("stop_reason") || window.contains("service_tier")
+            searchStart = usageRange.upperBound
+            guard isAPIResponse,
+                  let brace = text[usageRange.upperBound...].firstIndex(of: "{"),
+                  let json = extractJSONObject(from: text, startingAt: brace),
+                  let object = try? JSONSerialization.jsonObject(with: Data(json.utf8)),
+                  let usage = object as? [String: Any] else { continue }
+
+            let input = integer(usage["input_tokens"])
+            let output = integer(usage["output_tokens"])
+            let cacheRead = integer(usage["cache_read_input_tokens"])
+            let cacheCreation = integer(usage["cache_creation_input_tokens"])
+            let cacheCreationDetails = usage["cache_creation"] as? [String: Any]
+            let write5m = integer(cacheCreationDetails?["ephemeral_5m_input_tokens"])
+            let write1h = integer(cacheCreationDetails?["ephemeral_1h_input_tokens"])
+            let effectiveWrite5m = write5m > 0 || write1h > 0 ? write5m : cacheCreation
+            let tokenUsage = TokenUsage(
+                inputTokens: input + cacheCreation + cacheRead,
+                cacheReadTokens: cacheRead,
+                cacheWrite5mTokens: effectiveWrite5m,
+                cacheWrite1hTokens: write1h,
+                outputTokens: output
+            )
+            if tokenUsage.totalTokens > 0 {
+                result.append(tokenUsage)
+            }
+        }
+        return result
+    }
+
+    private func cursorModelName(in data: Data) -> String? {
+        guard let text = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .isoLatin1) else { return nil }
+        for marker in ["\"modelName\":\"", "\"lastUsedModel\":\""] {
+            guard let start = text.range(of: marker) else { continue }
+            let rest = text[start.upperBound...]
+            guard let end = rest.firstIndex(of: "\"") else { continue }
+            let model = String(rest[rest.startIndex..<end])
+            if !model.isEmpty { return model }
+        }
+        return nil
+    }
+
+    private func extractJSONObject(from text: String, startingAt start: String.Index) -> String? {
+        var depth = 0
+        var index = start
+        var inString = false
+        var escaped = false
+        while index < text.endIndex {
+            let character = text[index]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    inString = false
+                }
+            } else if character == "\"" {
+                inString = true
+            } else if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+                if depth == 0 {
+                    return String(text[start...index])
+                }
+            }
+            index = text.index(after: index)
+            if text.distance(from: start, to: index) > 8_000 { return nil }
+        }
+        return nil
+    }
+
+    private func sqliteBlob(_ stmt: OpaquePointer, index: Int32) -> Data? {
+        guard let bytes = sqlite3_column_blob(stmt, index) else { return nil }
+        let length = Int(sqlite3_column_bytes(stmt, index))
+        return Data(bytes: bytes, count: length)
+    }
+
+    private func dataFromHex(_ hex: String) -> Data? {
+        let cleaned = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.count.isMultiple(of: 2), !cleaned.isEmpty else { return nil }
+        var data = Data(capacity: cleaned.count / 2)
+        var index = cleaned.startIndex
+        while index < cleaned.endIndex {
+            let next = cleaned.index(index, offsetBy: 2)
+            guard let byte = UInt8(cleaned[index..<next], radix: 16) else { return nil }
+            data.append(byte)
+            index = next
+        }
+        return data
     }
 
     // MARK: - Helpers

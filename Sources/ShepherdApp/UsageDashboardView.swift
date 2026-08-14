@@ -333,7 +333,7 @@ struct UsageDashboardView: View {
                 appModel.usageSnapshot.providerSummary(for: $0, window: window).hasUsage
             }
             if providers.isEmpty {
-                Text("Claude, Codex, DeepSeek, Qwen, Kimi, and Grok logs will appear here when available.")
+                Text("Claude, Codex, DeepSeek, Qwen, Kimi, Grok, and Cursor logs will appear here when available.")
                     .font(.system(size: 11))
                     .foregroundStyle(Brand.secondaryText)
                     .padding(.vertical, 4)

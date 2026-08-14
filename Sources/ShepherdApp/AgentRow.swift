@@ -221,13 +221,13 @@ struct AgentRow: View, Equatable {
     /// this is not a stored property, and must not become one, or it would
     /// have to be listed in `==` for a value the row already sees change.
     private var costFace: CostFace {
-        let estimateHelp = "API list-price estimate, not a bill. Shepherd prices local CLI session logs at configured rates."
+        let estimateHelp = "API list-price estimate, not a bill. Shepherd prices local CLI and Cursor session logs at configured rates."
         if !dailyCost.hasUsage {
             return CostFace(
                 text: "no local log",
                 symbol: nil,
                 color: Brand.secondaryText,
-                help: "No local log. Shepherd only reads local CLI session logs, and cannot see this agent's tokens.",
+                help: "No local log. Shepherd reads CLI session logs and Cursor chat usage (including Grok 4.6) when those files record tokens.",
                 spoken: "no local log"
             )
         }
@@ -300,70 +300,60 @@ struct AgentRow: View, Equatable {
                 .padding(.trailing, 11)
 
             VStack(alignment: .leading, spacing: 4) {
-                // Line 1: name/kind (left) + state pill and dwell (right).
-                HStack(spacing: 7) {
-                    StatusGlyph(face: face, active: active)
-                    Text(titleText)
-                        .font(.system(size: 13.5, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(titleText)
-                        // The row container already speaks title, state, dwell
-                        // and cost as one summary; repeating each fragment as
-                        // its own VoiceOver stop would make thirty tiles
-                        // unnavigable. Buttons stay exposed — see `.contain`.
-                        .accessibilityHidden(true)
-                    Spacer(minLength: 8)
-                    statePill(face: face)
-                        .accessibilityHidden(true)
-                    Text(dwellText)
-                        .font(.system(size: 11.5, weight: dwell.weight, design: .monospaced))
-                        .foregroundStyle(dwell.color)
-                        .accessibilityHidden(true)
-                        // Says what the figure measures without naming a state
-                        // that would contradict the rest of the row. This is
-                        // time in herdr's *status*, which for a silent or gone
-                        // pane is still `working` — so spelling that status out
-                        // would print "In working" beside a pill reading GONE,
-                        // an xmark glyph, and a reason line about a dead
-                        // process. The duration those encodings refer to is the
-                        // one the reason line already prints.
-                        //
-                        // Joined with a separator rather than "for", because
-                        // the formatter's word for a brand-new agent is "now",
-                        // and "…for now" is not the sentence it looks like.
-                        .help("Time in herdr's current status · \(dwellText)")
-                }
+                // Info block only: ClickCatcher lives here so it cannot sit
+                // on top of Peek / Jump / Nudge. In a MenuBarExtra window an
+                // NSViewRepresentable background on the whole card steals
+                // mouse-downs from SwiftUI buttons, which made the actions
+                // look missing even after a click selected the tile.
+                VStack(alignment: .leading, spacing: 4) {
+                    // Line 1: name/kind (left) + state pill and dwell (right).
+                    HStack(spacing: 7) {
+                        StatusGlyph(face: face, active: active)
+                        Text(titleText)
+                            .font(.system(size: 13.5, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(titleText)
+                            .accessibilityHidden(true)
+                        Spacer(minLength: 8)
+                        statePill(face: face)
+                            .accessibilityHidden(true)
+                        Text(dwellText)
+                            .font(.system(size: 11.5, weight: dwell.weight, design: .monospaced))
+                            .foregroundStyle(dwell.color)
+                            .accessibilityHidden(true)
+                            .help("Time in herdr's current status · \(dwellText)")
+                    }
 
-                // Line 2: what it's waiting on — the triage payload leads, so
-                // the eye lands on *why* before *where*.
-                if let reason = agent.verdict.reasonText {
-                    Text(reason)
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(reasonColor)
-                        .lineLimit(2)
-                        .help(reason)
-                        .accessibilityHidden(true)
-                }
+                    if let reason = agent.verdict.reasonText {
+                        Text(reason)
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(reasonColor)
+                            .lineLimit(2)
+                            .help(reason)
+                            .accessibilityHidden(true)
+                    }
 
-                // Line 3: workspace · tab · ~cwd-basename.
-                if !locationLine.isEmpty {
-                    Text(locationLine)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(Brand.secondaryText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(locationLine)
-                        .accessibilityHidden(true)
-                }
+                    if !locationLine.isEmpty {
+                        Text(locationLine)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(Brand.secondaryText)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(locationLine)
+                            .accessibilityHidden(true)
+                    }
 
-                // Line 4: cost chip (every tile, so the figures form a
-                // column) and the always-visible Peek / Jump / Nudge cluster.
-                // One cluster only — selected rows do not redraw these three.
-                HStack(alignment: .center, spacing: 8) {
                     costChip
-                    Spacer(minLength: 8)
+                }
+                .contentShape(Rectangle())
+                .background(ClickCatcher(onSelect: onSelect, onDoubleClick: onJump))
+
+                // Peek / Jump / Nudge stay on every tile. Clicking a tile
+                // also reveals them in `selectedActionRow` so a click is
+                // never a dead end if this cluster is clipped or unpainted.
+                if !isSelected {
                     primaryActionCluster
                 }
 
@@ -377,8 +367,12 @@ struct AgentRow: View, Equatable {
             .padding(.trailing, 12)
         }
         .padding(.leading, 8)
-        .background(cardBackground(accent: accent, active: active || alarmed))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        // Clip the fill, not the content: clipping the whole card was
+        // swallowing the action row when the list height estimate ran short.
+        .background(
+            cardBackground(accent: accent, active: active || alarmed)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(
@@ -386,23 +380,23 @@ struct AgentRow: View, Equatable {
                         : accent.opacity(isHovering ? 0.4 : 0.14),
                     lineWidth: isSelected ? 1.25 : 1
                 )
+                .allowsHitTesting(false)
         )
         .padding(.horizontal, 12)
         .padding(.vertical, 1)
         .contentShape(Rectangle())
         .onHover { hovering in isHovering = hovering }
-        .background(ClickCatcher(onSelect: onSelect, onDoubleClick: onJump))
-        // `.contain` (not `.combine`): Peek / Jump / Nudge now live on every
-        // tile, and flattening the row into one element would swallow them.
-        // The container still speaks the summary; each button stays its own
-        // reachable, labelled control. `.isButton` is deliberately omitted —
-        // a group that is also a button is a VoiceOver trap that hides
-        // children. Select remains an explicit `accessibilityAction`.
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityDescription(face: face, dwell: dwellText))
         .accessibilityHint("Double-click to jump to this agent")
         .accessibilityAction { onSelect() }
         .contextMenu {
+            Button("Peek", systemImage: "eye") { onPeekToggle() }
+            Button("Jump", systemImage: "arrow.right.to.line") { onJump() }
+                .disabled(writeInFlight)
+            Button("Nudge", systemImage: "bubble.left") { onNudgeOpen() }
+                .disabled(writeInFlight)
+            Divider()
             Button("Override: 5 min") { appModel.setThresholdOverride(for: agent, minutes: 5) }
             Button("Override: 10 min") { appModel.setThresholdOverride(for: agent, minutes: 10) }
             Button("Override: 15 min") { appModel.setThresholdOverride(for: agent, minutes: 15) }
@@ -433,104 +427,138 @@ struct AgentRow: View, Equatable {
 
     // MARK: - Primary actions (every tile)
 
-    /// Peek / Jump / Nudge, always. Resting emphasis is quiet so thirty
-    /// copies do not drown the status signal; hover and selection lift the
-    /// labels to primary without dropping the resting state below AA —
-    /// `Brand.secondaryText` is already the AA-safe grey, and opacity is
-    /// not reduced on top of it. These sit in the content tree above
-    /// `ClickCatcher`, so their mouse-downs should hit the buttons, not
-    /// the row: a Peek click must not also select-via-catcher, and a
-    /// double-click on Peek must not jump.
+    /// Peek / Jump / Nudge, equal width, full row. Drawn with our own
+    /// chrome rather than `.bordered`: system bordered buttons inside a
+    /// `MenuBarExtra` window often paint empty. These sit outside
+    /// `ClickCatcher` so a click hits the button, not the row.
     private var primaryActionCluster: some View {
-        let live = isHovering || isSelected
-        let rest = live ? Color.primary : Brand.secondaryText
-        return HStack(spacing: 5) {
-            Button { onPeekToggle() } label: {
-                Label("Peek", systemImage: "eye")
-                    .foregroundStyle(rest)
-            }
-            .help("Show the last 20 lines of this pane")
-
-            Button { onJump() } label: {
-                Label("Jump", systemImage: "arrow.right.to.line")
-                    // Dimmed by hand while a write is in flight: an explicit
-                    // `foregroundStyle` wins over the button style's own
-                    // disabled treatment, so without this Jump would look
-                    // live while refusing every click. Same trap as Deny.
-                    .foregroundStyle(writeInFlight ? Brand.secondaryText.opacity(0.4) : rest)
-            }
-            .disabled(writeInFlight)
-            .help("Focus this agent's workspace and pane")
-
-            Button { onNudgeOpen() } label: {
-                Label("Nudge", systemImage: "bubble.left")
-                    .foregroundStyle(writeInFlight ? Brand.secondaryText.opacity(0.4) : rest)
-            }
-            .disabled(writeInFlight)
-            .help("Send a message to this agent")
+        HStack(spacing: 6) {
+            actionButton(
+                title: "Peek",
+                systemImage: "eye",
+                disabled: false,
+                help: "Show the last 20 lines of this pane",
+                action: onPeekToggle
+            )
+            actionButton(
+                title: "Jump",
+                systemImage: "arrow.right.to.line",
+                disabled: writeInFlight,
+                help: "Focus this agent's workspace and pane",
+                action: onJump
+            )
+            actionButton(
+                title: "Nudge",
+                systemImage: "bubble.left",
+                disabled: writeInFlight,
+                help: "Send a message to this agent",
+                action: onNudgeOpen
+            )
         }
-        .labelStyle(.titleAndIcon)
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .font(.system(size: 11, weight: live ? .semibold : .medium))
-        .fixedSize()
+        .padding(.top, 4)
+    }
+
+    private func actionButton(
+        title: String,
+        systemImage: String,
+        disabled: Bool,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .labelStyle(.titleAndIcon)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(disabled ? Brand.secondaryText.opacity(0.4) : Color.primary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 7)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(isSelected ? Brand.amber.opacity(0.16) : Color.primary.opacity(0.08))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .strokeBorder(
+                            isSelected ? Brand.amber.opacity(0.65) : Color.primary.opacity(0.22),
+                            lineWidth: 1
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .help(help)
+        .accessibilityLabel(title)
     }
 
     // MARK: - Selected-only actions (Approve / Deny / overflow)
 
     @ViewBuilder
     private var selectedActionRow: some View {
-        HStack(spacing: 7) {
-            if agent.verdict.isAwaitingInput {
-                // Approve and Deny used to be two filled buttons that differed
-                // only in hue — green beside red, the exact pair the most
-                // common colour deficiency collapses, and the pair that decides
-                // whether the user is accepting or rejecting an agent's
-                // request. They now differ three ways at once: a checkmark
-                // against a cross, a filled button against an outlined one, and
-                // only then the colour. Weight also encodes intent, the way
-                // macOS alerts do — the affirmative action is the prominent
-                // one, so nothing else has to be read to find the default.
-                Button { appModel.approve(agent) } label: {
-                    Label("Approve", systemImage: "checkmark")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Brand.approveFill)
-                .disabled(writeInFlight)
-                .help("Sends Enter to accept the highlighted option")
+        VStack(alignment: .leading, spacing: 6) {
+            // Click-to-select used to grow the row and still omit Peek /
+            // Jump / Nudge — they lived only on the unselected cluster,
+            // which MenuBarExtra often failed to paint. They lead here so
+            // selecting a tile always reveals them.
+            primaryActionCluster
 
-                Button { appModel.deny(agent) } label: {
-                    // `pillBlocked`, not `blocked`: this red is label text on a
-                    // filled control rather than on the panel material, and the
-                    // body variant lands under 4.5:1 against a dark-mode bezel.
-                    // That is the case the strong pill variants exist for.
-                    //
-                    // Dimmed by hand while a write is in flight: an explicit
-                    // `foregroundStyle` wins over the button style's own
-                    // disabled treatment, so without this the button would look
-                    // live while refusing every click.
-                    Label("Deny", systemImage: "xmark")
-                        .foregroundStyle(Brand.pillBlocked.opacity(writeInFlight ? 0.4 : 1))
-                }
-                .buttonStyle(.bordered)
-                .disabled(writeInFlight)
-                .help("Sends Esc to dismiss the prompt")
-            }
-            Spacer(minLength: 0)
-            Menu {
-                Button("Close agent", role: .destructive) { onCloseRequest() }
+            HStack(spacing: 7) {
+                if agent.verdict.isAwaitingInput {
+                    // Approve and Deny used to be two filled buttons that differed
+                    // only in hue — green beside red, the exact pair the most
+                    // common colour deficiency collapses, and the pair that decides
+                    // whether the user is accepting or rejecting an agent's
+                    // request. They now differ three ways at once: a checkmark
+                    // against a cross, a filled button against an outlined one, and
+                    // only then the colour. Weight also encodes intent, the way
+                    // macOS alerts do — the affirmative action is the prominent
+                    // one, so nothing else has to be read to find the default.
+                    Button { appModel.approve(agent) } label: {
+                        Label("Approve", systemImage: "checkmark")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Brand.approveFill)
                     .disabled(writeInFlight)
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 12, weight: .semibold))
-                    .accessibilityLabel("More actions")
+                    .help("Sends Enter to accept the highlighted option")
+
+                    Button { appModel.deny(agent) } label: {
+                        // `pillBlocked`, not `blocked`: this red is label text on a
+                        // filled control rather than on the panel material, and the
+                        // body variant lands under 4.5:1 against a dark-mode bezel.
+                        // That is the case the strong pill variants exist for.
+                        //
+                        // Dimmed by hand while a write is in flight: an explicit
+                        // `foregroundStyle` wins over the button style's own
+                        // disabled treatment, so without this the button would look
+                        // live while refusing every click.
+                        Label("Deny", systemImage: "xmark")
+                            .foregroundStyle(Brand.pillBlocked.opacity(writeInFlight ? 0.4 : 1))
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(writeInFlight)
+                    .help("Sends Esc to dismiss the prompt")
+                }
+                Spacer(minLength: 0)
+                Menu {
+                    Button("Peek", systemImage: "eye") { onPeekToggle() }
+                    Button("Jump", systemImage: "arrow.right.to.line") { onJump() }
+                        .disabled(writeInFlight)
+                    Button("Nudge", systemImage: "bubble.left") { onNudgeOpen() }
+                        .disabled(writeInFlight)
+                    Divider()
+                    Button("Close agent", role: .destructive) { onCloseRequest() }
+                        .disabled(writeInFlight)
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 12, weight: .semibold))
+                        .accessibilityLabel("More actions")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
+            .controlSize(.regular)
+            .font(.system(size: 12))
         }
-        .controlSize(.regular)
-        .font(.system(size: 12))
-        .padding(.top, 6)
+        .padding(.top, 2)
     }
 
     // MARK: - Expansion (peek / nudge / close-confirm), selected row only
@@ -699,14 +727,14 @@ private struct StatusGlyph: View {
     }
 }
 
-/// Native click handling for a row. SwiftUI's paired `onTapGesture` +
-/// `onTapGesture(count: 2)` disambiguates the two by withholding the single
-/// tap until the double-click window closes — selection then *feels* laggy
-/// even though it is only ~0.3s late. Routing clicks through an `NSView`
-/// reproduces the platform behavior exactly: click selects immediately,
-/// double-click jumps. The transparent view sits behind the row content, so
-/// buttons, text fields, and scroll views above it still receive their own
-/// events; right-clicks fall through to the SwiftUI context menu untouched.
+/// Native click handling for the info block. SwiftUI's paired `onTapGesture`
+/// + `onTapGesture(count: 2)` disambiguates the two by withholding the
+/// single tap until the double-click window closes — selection then *feels*
+/// laggy even though it is only ~0.3s late. Routing clicks through an
+/// `NSView` reproduces the platform behavior: click selects immediately,
+/// double-click jumps. The catcher is scoped to title / reason / location /
+/// cost so it cannot sit on top of Peek / Jump / Nudge. Right-clicks fall
+/// through to the SwiftUI context menu.
 private struct ClickCatcher: NSViewRepresentable {
     let onSelect: () -> Void
     let onDoubleClick: () -> Void
@@ -715,6 +743,7 @@ private struct ClickCatcher: NSViewRepresentable {
         let view = CatcherView()
         view.onSelect = onSelect
         view.onDoubleClick = onDoubleClick
+        view.wantsLayer = false
         return view
     }
 
@@ -726,6 +755,10 @@ private struct ClickCatcher: NSViewRepresentable {
     final class CatcherView: NSView {
         var onSelect: () -> Void = {}
         var onDoubleClick: () -> Void = {}
+
+        override var isOpaque: Bool { false }
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
         override func mouseDown(with event: NSEvent) {
             if event.clickCount >= 2 {

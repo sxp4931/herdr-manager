@@ -138,6 +138,12 @@ struct TokenMeterPricingTests {
         #expect(book.pricing(for: .grok, model: "grok-4.6")?.inputPerMillion == 2.0)
         #expect(book.pricing(for: .grok, model: "grok-4.6")?.cacheReadPerMillion == 0.50)
         #expect(book.pricing(for: .grok, model: "grok-4-6")?.outputPerMillion == 6.0)
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high")?.inputPerMillion == 2.0)
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high")?.cacheReadPerMillion == 0.50)
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high")?.outputPerMillion == 6.0)
+        #expect(book.pricing(for: .cursor, model: "grok-4.6")?.outputPerMillion == 6.0)
+        #expect(TokenMeterProvider(rawValue: "cursor-agent") == .cursor)
+        #expect(TokenMeterProvider(agentKind: .custom("cursor")) == .cursor)
         #expect(book.pricing(for: .grok, model: "grok-4.20")?.inputPerMillion == 1.25)
         #expect(book.pricing(for: .grok, model: "grok-4-20")?.outputPerMillion == 2.50)
         #expect(book.pricing(for: .grok, model: "grok-code-fast-1")?.inputPerMillion == 1.0)
@@ -389,6 +395,122 @@ struct LocalTokenMeterTests {
                 == ["deepseek-v4-flash-0731", "qwen3.8-max"]
         )
         #expect(snapshot.modelSummary(for: "unknown-model", window: .day).hasUsage == false)
+    }
+
+    @Test("Reads Cursor herdr-usage.jsonl and prices Grok 4.6")
+    func readsCursorUsageLog() async throws {
+        let home = try makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let file = home.appendingPathComponent(".cursor/herdr-usage.jsonl")
+        try writeLines([
+            #"{"ts":"2026-01-15T11:00:00Z","conversation_id":"sess-cursor","cwd":"/repo","model":"cursor-grok-4.6-high","input_tokens":1000,"output_tokens":50,"cache_read_tokens":200,"cache_write_tokens":100}"#,
+        ], to: file)
+
+        let agent = Agent(
+            id: AgentID("w1:cursor"),
+            kind: .custom("cursor"),
+            enteredAt: date("2026-01-15T10:00:00Z"),
+            cwd: "/repo"
+        )
+        let meter = LocalTokenMeter(homeDirectory: home)
+        let snapshot = await meter.snapshot(
+            agents: [agent],
+            priceBook: TokenMeterPriceBook.defaults,
+            now: date("2026-01-15T13:00:00Z"),
+            calendar: utcCalendar()
+        )
+
+        let provider = snapshot.providerSummary(for: .cursor, window: .day)
+        #expect(provider.usage.inputTokens == 1000)
+        #expect(provider.usage.cacheReadTokens == 200)
+        #expect(provider.usage.cacheWrite5mTokens == 100)
+        #expect(provider.usage.outputTokens == 50)
+        #expect(provider.models == ["cursor-grok-4.6-high"])
+        #expect(provider.costUSD != nil)
+        #expect(provider.costIsEstimated == false)
+
+        let individual = snapshot.agentSummary(for: agent.id, window: .day)
+        #expect(individual.usage.totalTokens == 1050)
+        #expect(individual.costUSD != nil)
+        #expect(snapshot.ambiguousAttributionCount == 0)
+    }
+
+    @Test("Reads Cursor chat store Anthropic-shaped usage and lastUsedModel")
+    func readsCursorChatStoreUsage() async throws {
+        let home = try makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let session = home
+            .appendingPathComponent(".cursor/chats/project/sess-1", isDirectory: true)
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        let meta = #"{"schemaVersion":1,"createdAtMs":1768474800000,"updatedAtMs":1768474800000,"cwd":"/repo","title":"Test"}"#
+        try meta.write(
+            to: session.appendingPathComponent("meta.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try writeCursorStore(
+            to: session.appendingPathComponent("store.db"),
+            model: "grok-4.6",
+            blob: #"prefix{"stop_reason":"tool_use","stop_sequence":null,"service_tier":"standard","usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":20,"ephemeral_1h_input_tokens":0},"output_tokens":4}}suffix"#
+        )
+
+        let agent = Agent(
+            id: AgentID("w1:cursor"),
+            kind: .custom("cursor"),
+            enteredAt: date("2026-01-15T10:00:00Z"),
+            cwd: "/repo"
+        )
+        let meter = LocalTokenMeter(homeDirectory: home)
+        let snapshot = await meter.snapshot(
+            agents: [agent],
+            priceBook: TokenMeterPriceBook.defaults,
+            now: date("2026-01-15T13:00:00Z"),
+            calendar: utcCalendar()
+        )
+
+        let provider = snapshot.providerSummary(for: .cursor, window: .day)
+        #expect(provider.usage.inputTokens == 60)
+        #expect(provider.usage.cacheReadTokens == 30)
+        #expect(provider.usage.cacheWrite5mTokens == 20)
+        #expect(provider.usage.outputTokens == 4)
+        #expect(provider.models.contains("grok-4.6") || provider.models.contains("cursor-grok-4.6-high"))
+        #expect(provider.costUSD != nil)
+        #expect(snapshot.agentSummary(for: agent.id, window: .day).usage.totalTokens == 64)
+    }
+
+    private func writeCursorStore(to url: URL, model: String, blob: String) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        var db: OpaquePointer?
+        guard sqlite3_open(url.path, &db) == SQLITE_OK, let db else {
+            throw TestingError.dbOpenFailed
+        }
+        defer { sqlite3_close(db) }
+        sqlite3_exec(db, "CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);", nil, nil, nil)
+        sqlite3_exec(db, "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);", nil, nil, nil)
+
+        let metaJSON = #"{"agentId":"sess-1","lastUsedModel":"\#(model)"}"#
+        let hex = metaJSON.utf8.map { String(format: "%02x", $0) }.joined()
+        let insertMeta = "INSERT INTO meta (key, value) VALUES ('0', ?);"
+        var metaStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, insertMeta, -1, &metaStmt, nil) == SQLITE_OK, let metaStmt {
+            defer { sqlite3_finalize(metaStmt) }
+            sqlite3_bind_text(metaStmt, 1, (hex as NSString).utf8String, -1, nil)
+            _ = sqlite3_step(metaStmt)
+        }
+
+        let insertBlob = "INSERT INTO blobs (id, data) VALUES ('blob-1', ?);"
+        var blobStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, insertBlob, -1, &blobStmt, nil) == SQLITE_OK, let blobStmt {
+            defer { sqlite3_finalize(blobStmt) }
+            let data = Data(blob.utf8)
+            data.withUnsafeBytes { bytes in
+                sqlite3_bind_blob(blobStmt, 1, bytes.baseAddress, Int32(data.count), nil)
+                _ = sqlite3_step(blobStmt)
+            }
+        }
     }
 
     private func writeOpenCodeDatabase(to url: URL) throws {
