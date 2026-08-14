@@ -15,10 +15,11 @@ import HerdrManagerCore
 ///   against the wrong appearance (panel vs bar). It uses fixed system colors
 ///   instead.
 ///
-/// A third, colourless layer runs alongside both (`symbolName(for:)`,
-/// `worstShape(blocked:silent:)`, `stateWord(for:)`): every status colour
-/// has a glyph, a silhouette, and a word that say the same thing. Colour is
-/// the fastest channel, never the only one.
+/// A third, colourless layer runs alongside both. `face(for:)` resolves a
+/// state's colour, glyph, and word together, and `worstShape(blocked:silent:)`
+/// gives the menu-bar badge a silhouette: every status colour has partners
+/// that say the same thing without it. Colour is the fastest channel, never
+/// the only one.
 enum Brand {
     // MARK: Adaptive body palette
 
@@ -111,17 +112,6 @@ enum Brand {
         dark: (0.66, 0.69, 0.72)    // #A8B0B8
     )
 
-    /// The pill text colour for an agent: the status-strong variant matching
-    /// `color(for:)`, so the pill label holds ≥4.5:1 on its tinted fill.
-    static func pillText(for agent: Agent) -> Color {
-        if agent.status == .blocked || agent.verdict.isProcessGone { return pillBlocked }
-        if agent.verdict.isSilent { return pillSilent }
-        if agent.status == .done { return pillDone }
-        if agent.status == .working { return pillWorking }
-        if agent.status == .idle { return pillIdle }
-        return pillUnknown
-    }
-
     /// Search placeholder text: an AA-safe neutral gray held ≥4.5:1 in both
     /// appearances (system placeholder colour drops to ~4.3:1 in dark mode,
     /// and a mid-gray is too close to the light field fill). Shares the
@@ -182,46 +172,70 @@ enum Brand {
         case circle    // informational — done / calm
     }
 
-    /// SF Symbol naming each herd state, drawn inside the row's status chip.
-    /// Deliberately plain single-stroke glyphs: they are rendered at ~8 pt, and
-    /// anything more detailed turns to mush at that size.
+    /// Everything the UI says about one agent's state, resolved together.
     ///
-    /// Ordered to match `stateWord(for:)` exactly, so the glyph and the word
-    /// never describe different states. Note that this is *not* the order in
-    /// `color(for:)`: that one tests `blocked` first, which it can afford to
-    /// because blocked and process-gone share a colour. They do not share a
-    /// glyph, so a pane whose process died while herdr still reports it
-    /// blocked has to resolve to "gone" — the more informative of the two, and
-    /// the one the row has always printed.
-    static func symbolName(for agent: Agent) -> String {
-        if agent.verdict.isProcessGone { return "xmark" }
-        if agent.verdict.isSilent { return "zzz" }
-        if agent.status == .blocked { return "exclamationmark" }
-        if agent.status == .done { return "checkmark" }
-        if agent.status == .working { return "play.fill" }
-        if agent.status == .idle { return "pause.fill" }
-        return "questionmark"
+    /// The four encodings used to be four separate functions with four
+    /// hand-maintained ladders of `if` tests — and they had already drifted:
+    /// the colour ladder tested `blocked` before `processGone` while the glyph
+    /// and word ladders tested the reverse. That particular divergence was
+    /// harmless (blocked and gone share a colour), but only by luck, and
+    /// nothing stopped the next one from mattering. Resolving all four in a
+    /// single pass makes "no state encoded by colour alone" a property of the
+    /// type rather than a convention: a new state cannot be added without
+    /// giving it a colour, a text colour, a glyph, and a word.
+    struct StateFace {
+        /// Body colour: the row's rail, its status chip, its dwell emphasis.
+        let color: Color
+        /// The stronger variant, for text or glyphs sitting on a tint of
+        /// `color` — the tint pulls the background toward the foreground, so
+        /// these need more headroom to hold ≥4.5:1.
+        let strong: Color
+        /// SF Symbol for the status chip. Deliberately plain single-stroke
+        /// glyphs: they render at ~8 pt, and anything more detailed turns to
+        /// mush at that size.
+        let symbol: String
+        /// The word in the state pill and the row's spoken label.
+        let word: String
     }
 
-    /// The word for an agent's state, in the row's pill and its spoken label.
-    /// The verdict outranks herdr's raw status where it is more informative: a
-    /// pane that has gone quiet or lost its process reads better as
-    /// "silent"/"gone" than as the status it was last seen in.
-    static func stateWord(for agent: Agent) -> String {
-        if agent.verdict.isProcessGone { return "gone" }
-        if agent.verdict.isSilent { return "silent" }
-        return agent.status.rawValue
-    }
-
-    /// The single colour that represents an agent right now (worst-state wins).
-    static func color(for agent: Agent) -> Color {
-        if agent.status == .blocked { return blocked }
-        if agent.verdict.isProcessGone { return blocked }
-        if agent.verdict.isSilent { return silent }
-        if agent.status == .done { return done }
-        if agent.status == .working { return working }
-        if agent.status == .idle { return idle }
-        return unknown
+    /// Resolve an agent's state face. The verdict outranks herdr's raw status
+    /// where it is more informative — a pane that has lost its process or gone
+    /// quiet reads better as "gone"/"silent" than as the status it was last
+    /// seen in — with one exception, below.
+    ///
+    /// **Blocked beats silent.** `AgentStore.diagnoseAll` snapshots the herd,
+    /// awaits a diagnosis per agent, then writes the verdict back onto
+    /// whatever the agent has since become; a pane that fell quiet and then
+    /// hit a permission prompt can land with `status == .blocked` carrying a
+    /// `.silent` verdict. herdr's status is the fresher fact and the more
+    /// urgent one, and every other surface already ranks it that way — the
+    /// menu-bar tally, `PanelView.needsYouPriority`, and the row's own
+    /// `alarmed` glow all test blocked first. Ranking the stale verdict above
+    /// it here would put an amber SILENT pill on a row wearing a red urgency
+    /// glow, under a red badge in the menu bar.
+    static func face(for agent: Agent) -> StateFace {
+        if agent.verdict.isProcessGone {
+            return StateFace(color: blocked, strong: pillBlocked, symbol: "xmark", word: "gone")
+        }
+        if agent.status != .blocked, agent.verdict.isSilent {
+            return StateFace(color: silent, strong: pillSilent, symbol: "zzz", word: "silent")
+        }
+        switch agent.status {
+        case .blocked:
+            return StateFace(
+                color: blocked, strong: pillBlocked, symbol: "exclamationmark", word: "blocked"
+            )
+        case .done:
+            return StateFace(color: done, strong: pillDone, symbol: "checkmark", word: "done")
+        case .working:
+            return StateFace(color: working, strong: pillWorking, symbol: "play.fill", word: "working")
+        case .idle:
+            return StateFace(color: idle, strong: pillIdle, symbol: "pause.fill", word: "idle")
+        case .unknown:
+            return StateFace(
+                color: unknown, strong: pillUnknown, symbol: "questionmark", word: "unknown"
+            )
+        }
     }
 
     /// Worst-state colour across the whole herd, for the menu-bar attention

@@ -23,4 +23,22 @@ enum DwellFormatter {
             return "\(totalSeconds)s"
         }
     }
+
+    /// The identity of what `format(interval:)` would print, as an integer.
+    ///
+    /// Two intervals with the same tick render the same text, so a caller can
+    /// ask "would advancing my clock change anything?" without formatting —
+    /// no strings built, no allocation, just the integer arithmetic the
+    /// formatter was going to do anyway. The panel uses it to decide whether a
+    /// clock tick is worth publishing: the alternative is re-rendering the
+    /// whole panel to discover that nothing moved.
+    ///
+    /// The encoding mirrors the formatter's own granularity — seconds below a
+    /// minute, whole minutes above it (hours are just minutes regrouped) —
+    /// with the two ranges kept apart so no second can collide with a minute.
+    static func displayTick(interval: TimeInterval) -> Int {
+        let totalSeconds = Int(interval)
+        guard totalSeconds > 0 else { return 0 }
+        return totalSeconds < 60 ? totalSeconds : 60 + totalSeconds / 60
+    }
 }

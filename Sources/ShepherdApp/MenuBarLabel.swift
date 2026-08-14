@@ -124,7 +124,7 @@ private struct AttentionSignal {
     var total: Int { blocked + gone + silent + done }
 
     /// Blocked and process-gone are one urgency to every other surface —
-    /// `Brand.color(for:)` gives them the same colour and the panel's
+    /// `Brand.face(for:)` gives them the same colour and the panel's
     /// Needs-you ranking gives them the same priority — so the badge ranks
     /// them together too. They stay separate fields only because the spoken
     /// summary says which of the two it found.

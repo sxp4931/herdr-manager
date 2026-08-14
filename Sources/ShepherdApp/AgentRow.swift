@@ -100,6 +100,15 @@ struct AgentRow: View, Equatable {
     /// why they cannot be derived here.
     let dwellText: String
     let dwellBucket: DwellBucket
+    /// The nudge draft as a value, captured when the row is built.
+    ///
+    /// A `@Binding` cannot do this job: `==` would read both sides'
+    /// `wrappedValue` out of the same storage, so they would always agree and
+    /// the row would never redraw while you type — precisely the trap
+    /// `DwellBucket` documents. The binding still drives the text field, which
+    /// writes through it; this captured copy drives everything *derived* from
+    /// the draft, including the equality that lets any of it update at all.
+    let nudgeDraft: String
     @Binding var nudgeText: String
 
     let onSelect: () -> Void
@@ -121,15 +130,15 @@ struct AgentRow: View, Equatable {
             && lhs.dwellText == rhs.dwellText
             && lhs.dwellBucket == rhs.dwellBucket
             // The nudge draft is compared only for the selected row, alongside
-            // its expansion and for the same reason: every row shares the one
-            // binding, so comparing it unconditionally would re-render the
+            // its expansion and for the same reason: every row is handed the
+            // same draft, so comparing it unconditionally would re-render the
             // whole herd on every keystroke. Comparing it *somewhere* is not
             // optional though — the character counter and the Send button's
             // enabled state are derived from it, and a row that never redraws
             // while you type leaves both showing the state before the first
             // character.
             && (lhs.isSelected
-                ? lhs.expansion == rhs.expansion && lhs.nudgeText == rhs.nudgeText
+                ? lhs.expansion == rhs.expansion && lhs.nudgeDraft == rhs.nudgeDraft
                 : true)
     }
 
@@ -159,26 +168,17 @@ struct AgentRow: View, Equatable {
         return parts.joined(separator: " · ")
     }
 
-    /// "blocked", "silent", "gone", "working", "done" — verdict overrides the
-    /// raw herdr status when it's more informative (a "working" pane that's
-    /// gone silent, or a pane whose process disappeared, reads better as
-    /// "silent"/"gone" than as its stale raw status). Derived from `Brand` so
-    /// the word, the glyph, and the colour all come from one decision.
-    private var stateLabel: String {
-        Brand.stateWord(for: agent)
-    }
-
     /// A waiting agent's dwell figure earns emphasis as the wait grows: a
     /// prompt left unanswered for 40 minutes should not read like one left for
     /// 20 seconds. The escalation is weight *and* colour, never colour alone —
     /// the hardening from grey to bold state-colour is legible in greyscale,
     /// so this reinforces the attention hierarchy instead of adding another
     /// hue-only channel to it.
-    private var dwellEmphasis: (color: Color, weight: Font.Weight) {
+    private func dwellEmphasis(face: Brand.StateFace) -> (color: Color, weight: Font.Weight) {
         switch dwellBucket {
         case .calm: return (Brand.secondaryText, .medium)
-        case .notice: return (Brand.color(for: agent), .semibold)
-        case .alarm: return (Brand.color(for: agent), .bold)
+        case .notice: return (face.color, .semibold)
+        case .alarm: return (face.color, .bold)
         }
     }
 
@@ -191,37 +191,41 @@ struct AgentRow: View, Equatable {
         }
     }
 
-    /// Takes the dwell figure the row is actually rendering rather than
-    /// re-deriving it, so the sighted and spoken versions of a row always
-    /// quote the same number.
-    private func accessibilityDescription(dwell: String) -> String {
+    /// Takes the state and dwell figure the row is actually rendering rather
+    /// than re-deriving them, so the sighted and spoken versions of a row
+    /// always quote the same state and the same number.
+    private func accessibilityDescription(face: Brand.StateFace, dwell: String) -> String {
         let reason = agent.verdict.reasonText ?? "no issues"
         let cost = dailyCost.hasUsage ? ", today \(UsageFormatter.cost(dailyCost)) API equivalent" : ""
-        return "\(titleText), \(kindLabel), \(stateLabel), \(dwell)\(cost), \(reason)"
+        return "\(titleText), \(kindLabel), \(face.word), \(dwell)\(cost), \(reason)"
     }
 
     /// The state as a tinted chip rather than plain grey text — at a glance the
     /// state reads from the same colour as the row's rail and status glyph, and
     /// spells the word out for anyone the colour doesn't reach. Text uses the
-    /// strong pill variant so it holds ≥4.5:1 on the tinted fill.
-    private func statePill(accent: Color, text: Color) -> some View {
-        Text(stateLabel)
+    /// strong variant so it holds ≥4.5:1 on the tinted fill.
+    private func statePill(face: Brand.StateFace) -> some View {
+        Text(face.word)
             .font(.system(size: 10.5, weight: .semibold))
             .textCase(.uppercase)
             .tracking(0.4)
-            .foregroundStyle(text)
+            .foregroundStyle(face.strong)
             .padding(.horizontal, 7)
             .padding(.vertical, 2.5)
-            .background(Capsule().fill(accent.opacity(0.14)))
-            .overlay(Capsule().strokeBorder(accent.opacity(0.28), lineWidth: 0.5))
+            .background(Capsule().fill(face.color.opacity(0.14)))
+            .overlay(Capsule().strokeBorder(face.color.opacity(0.28), lineWidth: 0.5))
             .fixedSize()
     }
 
     var body: some View {
-        let accent = Brand.color(for: agent)
+        // One resolution of the state for the whole row: rail, glyph, pill,
+        // dwell emphasis, and spoken label all read from it, so none of them
+        // can describe a different state than its neighbour.
+        let face = Brand.face(for: agent)
+        let accent = face.color
         let active = (agent.status == .working || agent.status == .blocked)
         let alarmed = (agent.status == .blocked || agent.verdict.isProcessGone)
-        let dwell = dwellEmphasis
+        let dwell = dwellEmphasis(face: face)
 
         HStack(alignment: .top, spacing: 0) {
             // Left status rail — the colour IS the state, glowing when active.
@@ -236,12 +240,7 @@ struct AgentRow: View, Equatable {
             VStack(alignment: .leading, spacing: 4) {
                 // Line 1: name/kind (left) + state pill and dwell (right).
                 HStack(spacing: 7) {
-                    StatusGlyph(
-                        color: accent,
-                        glyphColor: Brand.pillText(for: agent),
-                        symbol: Brand.symbolName(for: agent),
-                        active: active
-                    )
+                    StatusGlyph(face: face, active: active)
                     Text(titleText)
                         .font(.system(size: 13.5, weight: .semibold))
                         .foregroundStyle(.primary)
@@ -249,7 +248,7 @@ struct AgentRow: View, Equatable {
                         .truncationMode(.middle)
                         .help(titleText)
                     Spacer(minLength: 8)
-                    statePill(accent: accent, text: Brand.pillText(for: agent))
+                    statePill(face: face)
                     Text(dwellText)
                         .font(.system(size: 11.5, weight: dwell.weight, design: .monospaced))
                         .foregroundStyle(dwell.color)
@@ -325,7 +324,7 @@ struct AgentRow: View, Equatable {
         .background(ClickCatcher(onSelect: onSelect, onDoubleClick: onJump))
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel(accessibilityDescription(dwell: dwellText))
+        .accessibilityLabel(accessibilityDescription(face: face, dwell: dwellText))
         .accessibilityHint("Double-click to jump to this agent")
         .accessibilityAction { onSelect() }
         .contextMenu {
@@ -477,12 +476,17 @@ struct AgentRow: View, Equatable {
                         }
                         .onSubmit { onNudgeSubmit() }
                         .onExitCommand { onCancelExpansion() }
+                    // Both of these read the captured draft, not the binding:
+                    // they are what the row *derives* from the text, and the
+                    // captured copy is the one the row's equality can see
+                    // change. Reading the binding here would render correctly
+                    // only on the passes something else already forced.
                     Button("Send") { onNudgeSubmit() }
                         .controlSize(.regular)
-                        .disabled(nudgeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(nudgeDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-                if !nudgeText.isEmpty {
-                    Text("\(nudgeText.count)/\(NudgeLimits.maxLength)")
+                if !nudgeDraft.isEmpty {
+                    Text("\(nudgeDraft.count)/\(NudgeLimits.maxLength)")
                         .font(.system(size: 10.5, design: .monospaced))
                         .foregroundStyle(Brand.secondaryText)
                         .monospacedDigit()
@@ -530,15 +534,12 @@ struct AgentRow: View, Equatable {
 /// `MenuBarExtra` window are a known cause of the panel flickering open and
 /// closed, so emphasis here is purely static.
 private struct StatusGlyph: View {
-    /// The state colour, for the chip's fill and ring.
-    let color: Color
-    /// The stronger variant, for the glyph itself. The glyph sits on a tint of
-    /// its own hue, which pulls the background toward it — the same problem
-    /// the state pill solves with `Brand.pillText(for:)`, and the same
-    /// solution. This is the row's primary colour-free signal; it cannot be
-    /// the lowest-contrast thing in the row.
-    let glyphColor: Color
-    let symbol: String
+    /// The resolved state. `face.color` fills and rings the chip; the glyph
+    /// itself draws in `face.strong`, because it sits on a tint of its own hue
+    /// and that pulls the background toward it — the same problem the state
+    /// pill has, with the same answer. This is the row's primary colour-free
+    /// signal; it cannot be the lowest-contrast thing in the row.
+    let face: Brand.StateFace
     let active: Bool
 
     /// Sized to the 13.5 pt title it sits beside, so the row's first line has
@@ -547,23 +548,23 @@ private struct StatusGlyph: View {
 
     var body: some View {
         ZStack {
-            // 0.14, the same tint the state pill fills with. `glyphColor` is
-            // the pill's own text token, and that token was calibrated to hold
-            // ≥4.5:1 against exactly this fill — a slightly denser one here
-            // would put the row's primary colour-free signal below the
-            // contrast the rest of the palette is validated at.
+            // 0.14 — the same tint the state pill fills with, deliberately.
+            // `face.strong` was calibrated to hold ≥4.5:1 against exactly this
+            // fill, so a denser one here would put the row's primary
+            // colour-free signal below the contrast the rest of the palette is
+            // validated at.
             Circle()
-                .fill(color.opacity(0.14))
+                .fill(face.color.opacity(0.14))
             Circle()
-                .strokeBorder(color.opacity(active ? 0.9 : 0.55), lineWidth: 1)
-            Image(systemName: symbol)
+                .strokeBorder(face.color.opacity(active ? 0.9 : 0.55), lineWidth: 1)
+            Image(systemName: face.symbol)
                 // Heavy at this size on purpose: a hairline glyph inside a
                 // 16 pt chip disappears against the tinted fill.
                 .font(.system(size: 7.5, weight: .black))
-                .foregroundStyle(glyphColor)
+                .foregroundStyle(face.strong)
         }
         .frame(width: side, height: side)
-        .shadow(color: color.opacity(active ? 0.45 : 0), radius: active ? 2.5 : 0)
+        .shadow(color: face.color.opacity(active ? 0.45 : 0), radius: active ? 2.5 : 0)
         // The row's combined accessibility label already names the state; the
         // chip repeating it would make VoiceOver say it twice.
         .accessibilityHidden(true)

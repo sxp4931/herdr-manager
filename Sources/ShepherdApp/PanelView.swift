@@ -60,6 +60,32 @@ struct PanelView: View {
     /// `onAppear` refreshes them the instant it is opened.
     private static let idleClockInterval: Duration = .seconds(60)
 
+    /// Publish a new clock reading, but only if some row would print a
+    /// different figure for it.
+    ///
+    /// `AgentStore` goes out of its way to change-guard its writes so an
+    /// unchanged herd produces no redraws — the panel is a `MenuBarExtra`
+    /// window, and needless re-rendering is what makes one flicker. A timer
+    /// that assigned unconditionally would hand that property straight back:
+    /// `now` is read by `visibleHerd`, so every tick would re-filter and
+    /// re-sort the herd and re-measure every row, twelve times a minute, to
+    /// arrive at the same pixels.
+    ///
+    /// So the tick asks first. `displayTick` is the integer identity of the
+    /// text `DwellFormatter` would produce, so this is one pass of integer
+    /// arithmetic that allocates nothing and stops at the first agent whose
+    /// figure has moved. The dwell buckets need no separate check: both
+    /// thresholds are whole minutes, so a crossing always coincides with that
+    /// agent's printed figure changing.
+    private func advanceClock() {
+        let candidate = Date()
+        let moved = appModel.store.agents.values.contains { agent in
+            DwellFormatter.displayTick(interval: candidate.timeIntervalSince(agent.enteredAt))
+                != DwellFormatter.displayTick(interval: now.timeIntervalSince(agent.enteredAt))
+        }
+        if moved { now = candidate }
+    }
+
     var body: some View {
         Group {
             if showUsageDashboard {
@@ -132,10 +158,16 @@ struct PanelView: View {
             let interval = controlActiveState == .inactive
                 ? Self.idleClockInterval
                 : Self.clockInterval
+            // Re-read before the first sleep. `onAppear` doesn't re-fire on a
+            // panel whose content view was never torn down, so without this a
+            // reopened panel would show the figures it was closed with for a
+            // whole interval — and this task restarts on exactly the
+            // transition that means "the panel just became active".
+            now = Date()
             while !Task.isCancelled {
                 try? await Task.sleep(for: interval)
                 guard !Task.isCancelled else { return }
-                now = Date()
+                advanceClock()
             }
         }
         .focusable()
@@ -173,17 +205,22 @@ struct PanelView: View {
         let needsYou: Int
         let running: Int
         let done: Int
-        /// Whole-herd size for the All tab. Unfiltered, matching what that tab
-        /// has always shown.
-        let total: Int
+        /// Herd size for the All tab — filtered, like its two siblings. It
+        /// used to be the raw store count, which put "All 30" above a
+        /// two-row filtered list while the tabs either side of it counted
+        /// only matches. A tab count that disagrees with the list under it is
+        /// worse than no count.
+        let matching: Int
     }
 
     private var visibleHerd: VisibleHerd {
         var needsYou = 0
         var running = 0
         var done = 0
+        var matching = 0
         let query = searchQuery
         for agent in appModel.store.agents.values where matchesSearch(agent, query: query) {
+            matching += 1
             if Self.needsYou(agent) { needsYou += 1 }
             if agent.status == .working { running += 1 }
             if agent.status == .done { done += 1 }
@@ -209,7 +246,7 @@ struct PanelView: View {
             needsYou: needsYou,
             running: running,
             done: done,
-            total: appModel.store.agents.count
+            matching: matching
         )
     }
 
@@ -439,7 +476,7 @@ struct PanelView: View {
         switch scope {
         case .needsYou: return herd.needsYou
         case .running: return herd.running
-        case .all: return herd.total
+        case .all: return herd.matching
         }
     }
 
@@ -614,6 +651,7 @@ struct PanelView: View {
             // threshold, and stays put otherwise.
             dwellText: DwellFormatter.format(interval: now.timeIntervalSince(agent.enteredAt)),
             dwellBucket: DwellBucket.current(for: agent, now: now),
+            nudgeDraft: nudgeText,
             nudgeText: $nudgeText,
             onSelect: { appModel.selectedAgentId = agent.id },
             onJump: { jump(agent) },
@@ -634,7 +672,7 @@ struct PanelView: View {
     }
 
     /// Worst-first priority for the "Needs you" ranking. Process-gone is
-    /// grouped with blocked (both map to `Brand.blocked` in `Brand.color(for:)`
+    /// grouped with blocked (both map to `Brand.blocked` in `Brand.face(for:)`
     /// — the same "this needs you NOW" urgency), then silent. `done` agents are
     /// excluded from "Needs you" entirely (a finished agent does not need you).
     private static func needsYouPriority(_ agent: Agent) -> Int {
@@ -663,6 +701,13 @@ struct PanelView: View {
             agent.workspaceName,
             agent.tabName,
             agent.cwd,
+            // Both the state as the row prints it and herdr's raw status.
+            // They differ where the verdict outranks the status — a pane
+            // showing a GONE or SILENT pill is still `working` to herdr — and
+            // a filter should match either: typing what the pill says has to
+            // find the row, and typing "working" shouldn't hide a pane that
+            // is working just because it has also gone quiet.
+            Brand.face(for: agent).word,
             agent.status.rawValue,
         ]
         return haystack.contains { $0.lowercased().contains(query) }
@@ -956,9 +1001,9 @@ struct PanelView: View {
     /// rather than one with a count spliced in: "None of your 1 agent are
     /// working" is the kind of line that makes a careful tool feel careless.
     private func nothingRunningSubtitle(herd: VisibleHerd) -> String {
-        herd.total == 1
+        herd.matching == 1
             ? "Your one agent isn't working right now."
-            : "None of your \(herd.total) agents are working right now."
+            : "None of your \(herd.matching) agents are working right now."
     }
 
     /// "All quiet" reads very differently depending on *why* it is quiet, and
