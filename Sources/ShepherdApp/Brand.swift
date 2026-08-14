@@ -16,7 +16,7 @@ import HerdrManagerCore
 ///   instead.
 ///
 /// A third, colourless layer runs alongside both (`symbolName(for:)`,
-/// `worstShape(blocked:silent:done:)`, `stateWord(for:)`): every status colour
+/// `worstShape(blocked:silent:)`, `stateWord(for:)`): every status colour
 /// has a glyph, a silhouette, and a word that say the same thing. Colour is
 /// the fastest channel, never the only one.
 enum Brand {
@@ -244,7 +244,11 @@ enum Brand {
     /// signal absolutely cannot be hue-only — the badge silhouette changes
     /// with the state even when the colour does not survive the viewer's eyes
     /// or a tinted menu bar.
-    static func worstShape(blocked: Int, silent: Int, done: Int) -> BadgeShape {
+    /// Takes no `done:` count, unlike `worstColor`: done is the least urgent
+    /// signal the badge can carry, so it and the no-signal case share the
+    /// circle. A parameter that could not change the answer would only invite
+    /// the reader to look for the branch it feeds.
+    static func worstShape(blocked: Int, silent: Int) -> BadgeShape {
         if blocked > 0 { return .triangle }
         if silent > 0 { return .diamond }
         return .circle

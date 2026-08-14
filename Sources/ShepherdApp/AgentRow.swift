@@ -21,6 +21,73 @@ enum NudgeLimits {
     static let maxLength = 2000
 }
 
+/// How long an agent that wants something has been waiting, quantised to the
+/// three levels the row actually draws differently.
+///
+/// This is deliberately a coarse bucket rather than an elapsed time, because
+/// it has to survive `AgentRow`'s `Equatable` conformance. Rows are wrapped in
+/// `.equatable()` so a thirty-agent herd doesn't re-render wholesale on every
+/// herdr event, which means a row only redraws when some *value* it was
+/// constructed with changes. A raw elapsed time can't be that value — it
+/// changes on every tick — and a property computed inside `==` can't either,
+/// since both sides would evaluate it at comparison time and always agree.
+/// Quantising, and capturing the result when the row is built, gives a value
+/// that is stable across an agent's whole wait apart from the two crossings.
+///
+/// That is a property of this type alone, not of the row: `AgentRow.==` also
+/// compares the rendered dwell *string*, so a waiting row still redraws each
+/// time its printed figure ticks over. The bucket's job is to make sure the
+/// crossings themselves are never the thing that gets missed.
+enum DwellBucket: Equatable {
+    case calm     // not waiting, or not waiting long
+    case notice   // past the first threshold
+    case alarm    // waiting long enough to lead the eye
+
+    /// Thresholds sit either side of the silence thresholds the user can
+    /// already configure, so the hardening is a cue they've had time to build
+    /// an intuition for rather than a fourth independent notion of "late".
+    private static let noticeSeconds: TimeInterval = 5 * 60
+    private static let alarmSeconds: TimeInterval = 15 * 60
+
+    /// Bucket an agent by how long it has been blocked.
+    ///
+    /// Blocked is the only state that qualifies, and the restriction is the
+    /// whole design rather than an omission. This emphasis decorates the row's
+    /// dwell figure, which is `now - enteredAt`: time in the current herdr
+    /// status. Weight and colour applied to a number must be derived from
+    /// *that* number, or the row is shouting for a reason it isn't showing.
+    /// Only for a blocked pane are the two the same quantity — it entered the
+    /// blocked status at the moment it started waiting.
+    ///
+    /// The two states this rejects are both cases where they come apart:
+    ///
+    /// - **Silent** panes are still `working` as far as herdr is concerned
+    ///   (`Diagnoser.checkSilent` gates on it), so the dwell column shows time
+    ///   spent working — typically hours. Timing the emphasis from the
+    ///   silence's own `since` would print a bold red "3h0m" to mean "quiet
+    ///   for twenty minutes".
+    /// - **Process-gone** panes carry no timestamp of death at all, so
+    ///   `enteredAt` is time spent working before dying. A pane that died one
+    ///   second ago after three hours of work would render at full alarm while
+    ///   one that died after two minutes stayed calm — emphasis in inverse
+    ///   proportion to how fresh the news is.
+    ///
+    /// Neither loses anything: both already carry a coloured reason line
+    /// printing their own honest duration, on top of a rail, glyph, and pill.
+    static func current(for agent: Agent, now: Date = Date()) -> DwellBucket {
+        // Process-gone is checked as well as the status, not instead of it:
+        // `Diagnoser.checkProcessGone` runs on blocked panes too, so a pane
+        // that died at its prompt keeps `status == .blocked` while every other
+        // encoding in the row has already switched to "gone". Without this the
+        // row would escalate a dead pane's dwell figure as an unanswered wait.
+        guard agent.status == .blocked, !agent.verdict.isProcessGone else { return .calm }
+        let waited = now.timeIntervalSince(agent.enteredAt)
+        if waited >= alarmSeconds { return .alarm }
+        if waited >= noticeSeconds { return .notice }
+        return .calm
+    }
+}
+
 struct AgentRow: View, Equatable {
     @Environment(AppModel.self) private var appModel
     let agent: Agent
@@ -28,6 +95,11 @@ struct AgentRow: View, Equatable {
     let isSelected: Bool
     let expansion: RowExpansion
     let writeInFlight: Bool
+    /// The rendered dwell figure and its urgency, both captured by `PanelView`
+    /// from the panel's clock when the row is built — see `DwellBucket` for
+    /// why they cannot be derived here.
+    let dwellText: String
+    let dwellBucket: DwellBucket
     @Binding var nudgeText: String
 
     let onSelect: () -> Void
@@ -46,7 +118,19 @@ struct AgentRow: View, Equatable {
             && lhs.dailyCost == rhs.dailyCost
             && lhs.isSelected == rhs.isSelected
             && lhs.writeInFlight == rhs.writeInFlight
-            && (lhs.isSelected ? lhs.expansion == rhs.expansion : true)
+            && lhs.dwellText == rhs.dwellText
+            && lhs.dwellBucket == rhs.dwellBucket
+            // The nudge draft is compared only for the selected row, alongside
+            // its expansion and for the same reason: every row shares the one
+            // binding, so comparing it unconditionally would re-render the
+            // whole herd on every keystroke. Comparing it *somewhere* is not
+            // optional though — the character counter and the Send button's
+            // enabled state are derived from it, and a row that never redraws
+            // while you type leaves both showing the state before the first
+            // character.
+            && (lhs.isSelected
+                ? lhs.expansion == rhs.expansion && lhs.nudgeText == rhs.nudgeText
+                : true)
     }
 
     private var kindLabel: String { agent.kind.label }
@@ -84,37 +168,19 @@ struct AgentRow: View, Equatable {
         Brand.stateWord(for: agent)
     }
 
-    /// How long this agent has been in its current state. Sampled once per
-    /// body and threaded through both the printed figure and its emphasis, so
-    /// a row that redraws while crossing a threshold can never show a hardened
-    /// weight next to a number that hasn't reached it yet.
-    private var dwellSeconds: TimeInterval {
-        Date().timeIntervalSince(agent.enteredAt)
-    }
-
-    /// Dwell time earns emphasis as it grows, but only for agents that
-    /// actually want something: a pane that has been working happily for two
-    /// hours is not more urgent than one working for two minutes, while a
-    /// prompt left unanswered for 40 minutes very much is.
-    ///
-    /// The escalation is weight *and* colour, never colour alone — the
-    /// hardening from regular grey to bold state-colour is legible in
-    /// greyscale, so this reinforces the hierarchy rather than adding another
+    /// A waiting agent's dwell figure earns emphasis as the wait grows: a
+    /// prompt left unanswered for 40 minutes should not read like one left for
+    /// 20 seconds. The escalation is weight *and* colour, never colour alone —
+    /// the hardening from grey to bold state-colour is legible in greyscale,
+    /// so this reinforces the attention hierarchy instead of adding another
     /// hue-only channel to it.
-    private func dwellEmphasis(waited: TimeInterval) -> (color: Color, weight: Font.Weight) {
-        let wants = agent.status == .blocked || agent.verdict.isSilent || agent.verdict.isProcessGone
-        guard wants else { return (Brand.secondaryText, .medium) }
-        if waited >= Self.dwellAlarmSeconds { return (Brand.color(for: agent), .bold) }
-        if waited >= Self.dwellNoticeSeconds { return (Brand.color(for: agent), .semibold) }
-        return (Brand.secondaryText, .medium)
+    private var dwellEmphasis: (color: Color, weight: Font.Weight) {
+        switch dwellBucket {
+        case .calm: return (Brand.secondaryText, .medium)
+        case .notice: return (Brand.color(for: agent), .semibold)
+        case .alarm: return (Brand.color(for: agent), .bold)
+        }
     }
-
-    /// Thresholds for dwell emphasis. Chosen to sit either side of the
-    /// silence thresholds the user can already configure, so the number
-    /// hardening is a cue they've had time to build an intuition for rather
-    /// than a fourth independent notion of "late".
-    private static let dwellNoticeSeconds: TimeInterval = 5 * 60
-    private static let dwellAlarmSeconds: TimeInterval = 15 * 60
 
     private var reasonColor: Color {
         switch agent.verdict.reasonTone {
@@ -155,11 +221,7 @@ struct AgentRow: View, Equatable {
         let accent = Brand.color(for: agent)
         let active = (agent.status == .working || agent.status == .blocked)
         let alarmed = (agent.status == .blocked || agent.verdict.isProcessGone)
-        // One clock reading for the whole row: the figure, its emphasis, and
-        // the spoken label all describe the same instant.
-        let waited = dwellSeconds
-        let dwellText = DwellFormatter.format(interval: waited)
-        let dwell = dwellEmphasis(waited: waited)
+        let dwell = dwellEmphasis
 
         HStack(alignment: .top, spacing: 0) {
             // Left status rail — the colour IS the state, glowing when active.
@@ -176,6 +238,7 @@ struct AgentRow: View, Equatable {
                 HStack(spacing: 7) {
                     StatusGlyph(
                         color: accent,
+                        glyphColor: Brand.pillText(for: agent),
                         symbol: Brand.symbolName(for: agent),
                         active: active
                     )
@@ -190,7 +253,19 @@ struct AgentRow: View, Equatable {
                     Text(dwellText)
                         .font(.system(size: 11.5, weight: dwell.weight, design: .monospaced))
                         .foregroundStyle(dwell.color)
-                        .help("In this state for \(dwellText)")
+                        // Says what the figure measures without naming a state
+                        // that would contradict the rest of the row. This is
+                        // time in herdr's *status*, which for a silent or gone
+                        // pane is still `working` — so spelling that status out
+                        // would print "In working" beside a pill reading GONE,
+                        // an xmark glyph, and a reason line about a dead
+                        // process. The duration those encodings refer to is the
+                        // one the reason line already prints.
+                        //
+                        // Joined with a separator rather than "for", because
+                        // the formatter's word for a brand-new agent is "now",
+                        // and "…for now" is not the sentence it looks like.
+                        .help("Time in herdr's current status · \(dwellText)")
                 }
 
                 // Line 2: what it's waiting on — the triage payload leads, so
@@ -287,8 +362,17 @@ struct AgentRow: View, Equatable {
                 .help("Sends Enter to accept the highlighted option")
 
                 Button { appModel.deny(agent) } label: {
+                    // `pillBlocked`, not `blocked`: this red is label text on a
+                    // filled control rather than on the panel material, and the
+                    // body variant lands under 4.5:1 against a dark-mode bezel.
+                    // That is the case the strong pill variants exist for.
+                    //
+                    // Dimmed by hand while a write is in flight: an explicit
+                    // `foregroundStyle` wins over the button style's own
+                    // disabled treatment, so without this the button would look
+                    // live while refusing every click.
                     Label("Deny", systemImage: "xmark")
-                        .foregroundStyle(Brand.blocked)
+                        .foregroundStyle(Brand.pillBlocked.opacity(writeInFlight ? 0.4 : 1))
                 }
                 .buttonStyle(.bordered)
                 .disabled(writeInFlight)
@@ -446,7 +530,14 @@ struct AgentRow: View, Equatable {
 /// `MenuBarExtra` window are a known cause of the panel flickering open and
 /// closed, so emphasis here is purely static.
 private struct StatusGlyph: View {
+    /// The state colour, for the chip's fill and ring.
     let color: Color
+    /// The stronger variant, for the glyph itself. The glyph sits on a tint of
+    /// its own hue, which pulls the background toward it — the same problem
+    /// the state pill solves with `Brand.pillText(for:)`, and the same
+    /// solution. This is the row's primary colour-free signal; it cannot be
+    /// the lowest-contrast thing in the row.
+    let glyphColor: Color
     let symbol: String
     let active: Bool
 
@@ -456,15 +547,20 @@ private struct StatusGlyph: View {
 
     var body: some View {
         ZStack {
+            // 0.14, the same tint the state pill fills with. `glyphColor` is
+            // the pill's own text token, and that token was calibrated to hold
+            // ≥4.5:1 against exactly this fill — a slightly denser one here
+            // would put the row's primary colour-free signal below the
+            // contrast the rest of the palette is validated at.
             Circle()
-                .fill(color.opacity(0.18))
+                .fill(color.opacity(0.14))
             Circle()
                 .strokeBorder(color.opacity(active ? 0.9 : 0.55), lineWidth: 1)
             Image(systemName: symbol)
                 // Heavy at this size on purpose: a hairline glyph inside a
                 // 16 pt chip disappears against the tinted fill.
                 .font(.system(size: 7.5, weight: .black))
-                .foregroundStyle(color)
+                .foregroundStyle(glyphColor)
         }
         .frame(width: side, height: side)
         .shadow(color: color.opacity(active ? 0.45 : 0), radius: active ? 2.5 : 0)

@@ -5,6 +5,9 @@ import HerdrManagerCore
 struct PanelView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
+    /// Whether the panel's window is the active one — the signal the dwell
+    /// clock throttles against. See `idleClockInterval`.
+    @Environment(\.controlActiveState) private var controlActiveState
 
     /// What the selected row is currently expanded to show (peek / nudge /
     /// close-confirm). Only one row is ever selected, so one flat piece of
@@ -22,30 +25,47 @@ struct PanelView: View {
     @State private var collapsedGroups: Set<String> = []
     @State private var showUsageDashboard = false
 
+    /// The clock the panel's durations are read against, advanced on a timer
+    /// rather than read at render time.
+    ///
+    /// Every observable setter in `AppModel` is change-guarded — `AgentStore`
+    /// only publishes when the snapshot actually differs — which is correct,
+    /// and means a herd where nothing is happening produces no redraws at all.
+    /// That is exactly the herd whose durations most need to keep moving: a
+    /// pane blocked twenty minutes ago emits no events precisely *because* it
+    /// is stuck. Without a tick of its own the panel would sit showing the
+    /// figure it was opened with.
+    @State private var now = Date()
+
+    /// How often the clock advances while the panel is on screen. Small steps
+    /// keep a young agent's seconds figure moving at something like the rate
+    /// it is actually counting — "exact dwell figures" is a stated brand
+    /// commitment, and a coarse tick leaves the panel's own numbers visibly
+    /// behind. Cheap regardless: rows whose rendered figure hasn't changed
+    /// compare equal and skip redrawing.
+    private static let clockInterval: Duration = .seconds(5)
+
+    /// How often it advances when the panel's window isn't active. A
+    /// `MenuBarExtra` window's content view is not reliably torn down on
+    /// dismissal, so without this the tick would keep re-rendering a herd
+    /// nobody is looking at, giving up the "no events, no redraws" property
+    /// the change-guarded store works to provide.
+    ///
+    /// It slows the clock rather than stopping it, deliberately. A gate that
+    /// latched shut — on `onDisappear` without a matching `onAppear`, say —
+    /// would freeze every duration in the panel for the rest of the app's
+    /// life, which in a product whose second principle is honesty about state
+    /// is a real bug and an invisible one. Slowing has no such failure mode:
+    /// the worst case is a closed panel whose figures are a minute stale, and
+    /// `onAppear` refreshes them the instant it is opened.
+    private static let idleClockInterval: Duration = .seconds(60)
+
     var body: some View {
         Group {
             if showUsageDashboard {
                 UsageDashboardView(onBack: { showUsageDashboard = false })
             } else {
-                VStack(alignment: .leading, spacing: 0) {
-                    header
-                    Divider()
-                    filterBar
-                    Divider()
-                    if !appModel.pendingActions.isEmpty {
-                        PendingActionsView()
-                        Divider()
-                    }
-                    content
-                    Divider()
-                    if let errorText = appModel.lastError {
-                        errorBanner(errorText)
-                    }
-                    if let health = appModel.adapterHealth, !health.compatible || !health.writesEnabled {
-                        healthBanner(health)
-                    }
-                    footer
-                }
+                triagePanel
             }
         }
         // Width is fixed; height is whatever the content adds up to. A
@@ -96,6 +116,28 @@ struct PanelView: View {
             togglePeekSelected()
             return .handled
         }
+        // Re-read the clock on open, so a panel reopened after an hour away
+        // doesn't show the durations it was closed with — the moment they are
+        // most wrong. If this never fires the figures are at worst one tick
+        // stale, which the loop below corrects on its own.
+        .onAppear { now = Date() }
+        // Keyed on the window's active state rather than on a view-lifecycle
+        // callback: `controlActiveState` is driven by AppKit's own window
+        // notifications, so it reports the panel closing without depending on
+        // `onAppear`/`onDisappear` arriving in matched pairs. The key also
+        // restarts the loop on each transition, which is what lets the body
+        // below read a current cadence instead of the one captured when the
+        // task was first created.
+        .task(id: controlActiveState) {
+            let interval = controlActiveState == .inactive
+                ? Self.idleClockInterval
+                : Self.clockInterval
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                guard !Task.isCancelled else { return }
+                now = Date()
+            }
+        }
         .focusable()
         // Keyboard-first: the panel opens with the filter field focused so
         // "type to filter" works immediately; Esc drops to arrow-key triage
@@ -103,6 +145,96 @@ struct PanelView: View {
         .defaultFocus($searchFocused, true)
         .onChange(of: appModel.selectedAgentId) { _, _ in
             resetExpansion()
+        }
+    }
+
+    /// What the current scope actually puts on screen, derived once.
+    ///
+    /// Filtering the herd — and, in All scope, grouping and sorting it — is
+    /// not free, and most of the panel wants some slice of the answer: the
+    /// list, the list's height budget, the scope picker's three tab counts,
+    /// the header subtitle, the empty states, and the footer's keyboard hint.
+    /// Each of those used to derive its own, so a single body pass filtered
+    /// and sorted the herd half a dozen times. It now happens once: one pass
+    /// to tally the scope counts, and one sort for the scope actually on
+    /// screen. On a thirty-agent herd redrawing on every herdr event and every
+    /// clock tick, that is the difference worth having.
+    private struct VisibleHerd {
+        /// Workspace groups, populated in All scope only.
+        let groups: [WorkspaceGroup]
+        /// The rows on screen, in render order: what the arrow keys walk and
+        /// what the height budget sums. Excludes agents inside a collapsed
+        /// group, which are not on screen to walk or to measure.
+        let rows: [Agent]
+        /// Scope tallies for the picker's tab labels and the header subtitle.
+        /// Counted, not collected: those two only ever ask "how many", and
+        /// building and sorting three lists to call `.count` on them was most
+        /// of the panel's per-pass work.
+        let needsYou: Int
+        let running: Int
+        let done: Int
+        /// Whole-herd size for the All tab. Unfiltered, matching what that tab
+        /// has always shown.
+        let total: Int
+    }
+
+    private var visibleHerd: VisibleHerd {
+        var needsYou = 0
+        var running = 0
+        var done = 0
+        let query = searchQuery
+        for agent in appModel.store.agents.values where matchesSearch(agent, query: query) {
+            if Self.needsYou(agent) { needsYou += 1 }
+            if agent.status == .working { running += 1 }
+            if agent.status == .done { done += 1 }
+        }
+
+        let groups: [WorkspaceGroup]
+        let rows: [Agent]
+        switch appModel.scope {
+        case .needsYou:
+            groups = []
+            rows = needsYouAgents
+        case .running:
+            groups = []
+            rows = runningAgents
+        case .all:
+            groups = allGroups
+            rows = Self.rows(in: groups, collapsed: collapsedGroups)
+        }
+
+        return VisibleHerd(
+            groups: groups,
+            rows: rows,
+            needsYou: needsYou,
+            running: running,
+            done: done,
+            total: appModel.store.agents.count
+        )
+    }
+
+    /// The triage surface, factored out of `body` so `visibleHerd` can be
+    /// computed once and handed to each part that needs it.
+    private var triagePanel: some View {
+        let herd = visibleHerd
+        return VStack(alignment: .leading, spacing: 0) {
+            header(herd: herd)
+            Divider()
+            filterBar(herd: herd)
+            Divider()
+            if !appModel.pendingActions.isEmpty {
+                PendingActionsView()
+                Divider()
+            }
+            content(herd: herd)
+            Divider()
+            if let errorText = appModel.lastError {
+                errorBanner(errorText)
+            }
+            if let health = appModel.adapterHealth, !health.compatible || !health.writesEnabled {
+                healthBanner(health)
+            }
+            footer(herd: herd)
         }
     }
 
@@ -178,13 +310,13 @@ struct PanelView: View {
 
     // MARK: - Header
 
-    private var header: some View {
+    private func header(herd: VisibleHerd) -> some View {
         HStack(spacing: 10) {
             FlockMark(size: 20, glow: appModel.connectionState == .connected)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Shepherd")
                     .font(.system(size: 15, weight: .bold))
-                Text(headerSubtitle)
+                Text(headerSubtitle(herd: herd))
                     .font(.system(size: 11))
                     .foregroundStyle(Brand.secondaryText)
                     .lineLimit(1)
@@ -233,20 +365,20 @@ struct PanelView: View {
 
     // MARK: - Filter bar (scope + search)
 
-    private var filterBar: some View {
+    private func filterBar(herd: VisibleHerd) -> some View {
         VStack(spacing: 9) {
-            scopePicker
+            scopePicker(herd: herd)
             searchField
         }
         .padding(.horizontal, Layout.gutter)
         .padding(.vertical, 10)
     }
 
-    private var scopePicker: some View {
+    private func scopePicker(herd: VisibleHerd) -> some View {
         @Bindable var appModel = appModel
         return Picker("", selection: $appModel.scope) {
             ForEach(TriageScope.allCases, id: \.self) { scope in
-                Text("\(scope.label) \(count(for: scope))").tag(scope)
+                Text("\(scope.label) \(count(for: scope, herd: herd))").tag(scope)
             }
         }
         .pickerStyle(.segmented)
@@ -303,39 +435,30 @@ struct PanelView: View {
         )
     }
 
-    private func count(for scope: TriageScope) -> Int {
+    private func count(for scope: TriageScope, herd: VisibleHerd) -> Int {
         switch scope {
-        case .needsYou: return needsYouAgents.count
-        case .running: return runningAgents.count
-        case .all: return appModel.store.agents.count
+        case .needsYou: return herd.needsYou
+        case .running: return herd.running
+        case .all: return herd.total
         }
     }
 
     // MARK: - Content
 
     @ViewBuilder
-    private var content: some View {
+    private func content(herd: VisibleHerd) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 3, pinnedViews: [.sectionHeaders]) {
-                switch appModel.scope {
-                case .needsYou:
-                    if needsYouAgents.isEmpty {
-                        emptyStateBody
+                if appModel.scope == .all {
+                    if herd.groups.isEmpty {
+                        emptyStateBody(herd: herd)
                     } else {
-                        flatList(needsYouAgents)
+                        groupedList(herd.groups)
                     }
-                case .running:
-                    if runningAgents.isEmpty {
-                        emptyStateBody
-                    } else {
-                        flatList(runningAgents)
-                    }
-                case .all:
-                    if allGroups.isEmpty {
-                        emptyStateBody
-                    } else {
-                        groupedList
-                    }
+                } else if herd.rows.isEmpty {
+                    emptyStateBody(herd: herd)
+                } else {
+                    flatList(herd.rows)
                 }
             }
             .padding(.vertical, 6)
@@ -344,22 +467,19 @@ struct PanelView: View {
         // `MenuBarExtra` window it collapses to almost nothing unless it is
         // told how tall to be. `listHeight` measures the content and clamps it,
         // so a short list shrinks the panel and a long one fills it and scrolls.
-        .frame(height: listHeight)
+        .frame(height: listHeight(herd: herd))
         .scrollIndicators(.automatic)
     }
 
     /// Estimated height of the visible list, capped at the panel's budget.
     /// Collapsed groups still contribute their header, so folding a group
     /// shrinks the panel to fit rather than leaving dead space behind.
-    private var listHeight: CGFloat {
-        let agents = flatAgentsForKeyboardNav
-        let headers = appModel.scope == .all
-            ? CGFloat(allGroups.count) * Layout.groupHeaderHeight
-            : 0
-        guard !agents.isEmpty || headers > 0 else { return Layout.emptyStateHeight }
+    private func listHeight(herd: VisibleHerd) -> CGFloat {
+        let headers = CGFloat(herd.groups.count) * Layout.groupHeaderHeight
+        guard !herd.rows.isEmpty || headers > 0 else { return Layout.emptyStateHeight }
 
         var height: CGFloat = 12 + headers // list's own vertical padding
-        for agent in agents {
+        for agent in herd.rows {
             height += rowHeight(agent)
         }
         return min(height, listMaxHeight)
@@ -427,8 +547,8 @@ struct PanelView: View {
     }
 
     @ViewBuilder
-    private var groupedList: some View {
-        ForEach(allGroups, id: \.name) { group in
+    private func groupedList(_ groups: [WorkspaceGroup]) -> some View {
+        ForEach(groups, id: \.name) { group in
             Section {
                 if !collapsedGroups.contains(group.name) {
                     ForEach(group.agents) { agent in
@@ -488,6 +608,12 @@ struct PanelView: View {
             isSelected: isSelected,
             expansion: isSelected ? expansion : .none,
             writeInFlight: appModel.inFlightAgentWrites.contains(agent.id),
+            // Both read from the panel's own clock, at row-construction time,
+            // so `AgentRow`'s `Equatable` conformance can see them change: a
+            // row redraws when its figure ticks over or its wait crosses a
+            // threshold, and stays put otherwise.
+            dwellText: DwellFormatter.format(interval: now.timeIntervalSince(agent.enteredAt)),
+            dwellBucket: DwellBucket.current(for: agent, now: now),
             nudgeText: $nudgeText,
             onSelect: { appModel.selectedAgentId = agent.id },
             onJump: { jump(agent) },
@@ -517,10 +643,18 @@ struct PanelView: View {
         return 3
     }
 
+    /// The filter text, trimmed and case-folded. Callers hoist this out of
+    /// their loop and pass it in: normalising the raw field inside the
+    /// predicate re-trimmed and re-lowercased the query once per agent, per
+    /// pass, which was most of what filtering actually cost.
+    private var searchQuery: String {
+        searchText.trimmingCharacters(in: .whitespaces).lowercased()
+    }
+
     /// Case-insensitive substring match across every field the row shows, so
     /// the filter matches whatever the user can actually read on screen.
-    private func matchesSearch(_ agent: Agent) -> Bool {
-        let query = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+    /// `query` must already be normalised — see `searchQuery`.
+    private func matchesSearch(_ agent: Agent, query: String) -> Bool {
         guard !query.isEmpty else { return true }
         let haystack = [
             agent.displayName,
@@ -535,8 +669,9 @@ struct PanelView: View {
     }
 
     private var needsYouAgents: [Agent] {
-        appModel.store.agents.values
-            .filter { Self.needsYou($0) && matchesSearch($0) }
+        let query = searchQuery
+        return appModel.store.agents.values
+            .filter { Self.needsYou($0) && matchesSearch($0, query: query) }
             .sorted { a, b in
                 let pa = Self.needsYouPriority(a)
                 let pb = Self.needsYouPriority(b)
@@ -546,19 +681,15 @@ struct PanelView: View {
     }
 
     private var runningAgents: [Agent] {
-        appModel.store.agents.values
-            .filter { $0.status == .working && matchesSearch($0) }
-            .sorted { $0.enteredAt < $1.enteredAt }
-    }
-
-    private var doneAgents: [Agent] {
-        appModel.store.agents.values
-            .filter { $0.status == .done && matchesSearch($0) }
+        let query = searchQuery
+        return appModel.store.agents.values
+            .filter { $0.status == .working && matchesSearch($0, query: query) }
             .sorted { $0.enteredAt < $1.enteredAt }
     }
 
     private var allGroups: [WorkspaceGroup] {
-        let agents = appModel.store.agents.values.filter { matchesSearch($0) }
+        let query = searchQuery
+        let agents = appModel.store.agents.values.filter { matchesSearch($0, query: query) }
         let grouped = Dictionary(grouping: agents, by: { $0.workspaceName })
         var groups: [WorkspaceGroup] = grouped.map { name, agents in
             let sorted = agents.sorted { a, b in
@@ -573,20 +704,29 @@ struct PanelView: View {
         return groups
     }
 
+    /// The rows the arrow keys walk. Key handling runs outside a body pass, so
+    /// it re-derives rather than reading a cached copy that could be a
+    /// keystroke out of date — but it derives only the rows. Going through
+    /// `visibleHerd` would also tally the three scope counts on every
+    /// keypress, and a keypress has no use for them.
     private var flatAgentsForKeyboardNav: [Agent] {
         switch appModel.scope {
         case .needsYou: return needsYouAgents
         case .running: return runningAgents
-        // Collapsed groups are not on screen, so arrow keys must skip them.
-        case .all: return allGroups
-            .filter { !collapsedGroups.contains($0.name) }
-            .flatMap { $0.agents }
+        case .all: return Self.rows(in: allGroups, collapsed: collapsedGroups)
         }
+    }
+
+    /// Flatten workspace groups to the agents actually on screen. Collapsed
+    /// groups are folded away, so arrow keys skip them and the height budget
+    /// doesn't reserve room for them.
+    private static func rows(in groups: [WorkspaceGroup], collapsed: Set<String>) -> [Agent] {
+        groups.filter { !collapsed.contains($0.name) }.flatMap { $0.agents }
     }
 
     // MARK: - Footer
 
-    private var footer: some View {
+    private func footer(herd: VisibleHerd) -> some View {
         HStack(spacing: 10) {
             newAgentMenu(label: "New agent")
             if case .starting(let kind) = appModel.newAgentState {
@@ -595,7 +735,7 @@ struct PanelView: View {
                     .foregroundStyle(Brand.secondaryText)
             }
             Spacer(minLength: 6)
-            keyboardHints
+            keyboardHints(hasRows: !herd.rows.isEmpty)
             notificationToggle
             connectionIndicator
         }
@@ -619,16 +759,25 @@ struct PanelView: View {
     /// It stands down whenever it would compete for that space: with no rows
     /// there is nothing to navigate, and while an agent is starting the footer
     /// is already carrying a status line that matters more.
+    ///
+    /// It also has to tell the truth about *right now*. The panel opens with
+    /// the filter field focused, and every one of the triage key handlers
+    /// returns `.ignored` while it is — so advertising "↑↓ move" in the state
+    /// the panel opens in would be advertising a key that does nothing. While
+    /// the field holds focus the hint names the one key that does work, which
+    /// is also the key that unlocks the others.
     @ViewBuilder
-    private var keyboardHints: some View {
-        if !flatAgentsForKeyboardNav.isEmpty && !isStartingAgent {
-            Text("↑↓ move · space peek · ⏎ jump")
+    private func keyboardHints(hasRows: Bool) -> some View {
+        if hasRows && !isStartingAgent {
+            Text(searchFocused ? "esc to browse" : "↑↓ move · space peek · ⏎ jump")
                 .font(.system(size: 10))
                 .foregroundStyle(Brand.secondaryText)
                 .lineLimit(1)
                 .fixedSize()
                 .accessibilityLabel(
-                    "Keyboard: up and down arrows move, space peeks, return jumps to the agent"
+                    searchFocused
+                        ? "Keyboard: press escape to leave the filter field and browse agents"
+                        : "Keyboard: up and down arrows move, space peeks, return jumps to the agent"
                 )
         }
     }
@@ -785,7 +934,7 @@ struct PanelView: View {
     // MARK: - Empty states
 
     @ViewBuilder
-    private var emptyStateBody: some View {
+    private func emptyStateBody(herd: VisibleHerd) -> some View {
         if appModel.connectionState != .connected {
             disconnectedEmptyState
         } else if appModel.store.agents.isEmpty {
@@ -796,9 +945,9 @@ struct PanelView: View {
                 subtitle: "Nothing here matches “\(searchText)”."
             )
         } else if appModel.scope == .running {
-            emptyState(title: "Nothing running", subtitle: nothingRunningSubtitle)
+            emptyState(title: "Nothing running", subtitle: nothingRunningSubtitle(herd: herd))
         } else {
-            emptyState(title: "All quiet", subtitle: allQuietSubtitle)
+            emptyState(title: "All quiet", subtitle: allQuietSubtitle(herd: herd))
         }
     }
 
@@ -806,11 +955,10 @@ struct PanelView: View {
     /// be told apart from "nothing here". Written as two whole sentences
     /// rather than one with a count spliced in: "None of your 1 agent are
     /// working" is the kind of line that makes a careful tool feel careless.
-    private var nothingRunningSubtitle: String {
-        let count = appModel.store.agents.count
-        return count == 1
+    private func nothingRunningSubtitle(herd: VisibleHerd) -> String {
+        herd.total == 1
             ? "Your one agent isn't working right now."
-            : "None of your \(count) agents are working right now."
+            : "None of your \(herd.total) agents are working right now."
     }
 
     /// "All quiet" reads very differently depending on *why* it is quiet, and
@@ -820,12 +968,11 @@ struct PanelView: View {
     /// actually working turns a vague reassurance into a claim the user can
     /// check — which is the difference between trusting the panel and
     /// re-opening every pane to be sure.
-    private var allQuietSubtitle: String {
-        let running = runningAgents.count
-        guard running > 0 else { return "Nothing needs you right now." }
-        return running == 1
+    private func allQuietSubtitle(herd: VisibleHerd) -> String {
+        guard herd.running > 0 else { return "Nothing needs you right now." }
+        return herd.running == 1
             ? "1 agent is working. Nothing needs you."
-            : "\(running) agents are working. Nothing needs you."
+            : "\(herd.running) agents are working. Nothing needs you."
     }
 
     private var disconnectedEmptyState: some View {
@@ -893,10 +1040,10 @@ struct PanelView: View {
 
     // MARK: - Brand chrome
 
-    private var headerSubtitle: String {
+    private func headerSubtitle(herd: VisibleHerd) -> String {
         switch appModel.connectionState {
         case .connected:
-            return "\(needsYouAgents.count) need you · \(doneAgents.count) done · \(runningAgents.count) running"
+            return "\(herd.needsYou) need you · \(herd.done) done · \(herd.running) running"
         case .connecting:
             return "connecting…"
         case .reconnecting, .disconnected:
