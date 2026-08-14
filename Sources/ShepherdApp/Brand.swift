@@ -14,6 +14,11 @@ import HerdrManagerCore
 ///   baked into an `NSImage` at paint time, so adaptive colors would resolve
 ///   against the wrong appearance (panel vs bar). It uses fixed system colors
 ///   instead.
+///
+/// A third, colourless layer runs alongside both (`symbolName(for:)`,
+/// `worstShape(blocked:silent:done:)`, `stateWord(for:)`): every status colour
+/// has a glyph, a silhouette, and a word that say the same thing. Colour is
+/// the fastest channel, never the only one.
 enum Brand {
     // MARK: Adaptive body palette
 
@@ -160,6 +165,54 @@ enum Brand {
         dark: (0.700, 0.720, 0.740)   // #B3B8BD
     )
 
+    // MARK: - Non-colour state encoding
+
+    /// The shape half of the status vocabulary. Colour alone cannot carry the
+    /// attention hierarchy: red/amber/blue collapse toward one another for the
+    /// ~8% of men with a red-green deficiency, and vanish entirely in a
+    /// greyscale screenshot. Every place a status colour appears, a shape or a
+    /// glyph says the same thing, so the ranking survives without hue.
+    ///
+    /// The three shapes are ordered by how loud they read: a triangle is the
+    /// universal "alert" silhouette, a diamond is a softer "look at this", a
+    /// circle is neutral information.
+    enum BadgeShape: Hashable, Sendable {
+        case triangle  // needs you now — blocked / process gone
+        case diamond   // worth a look — silent
+        case circle    // informational — done / calm
+    }
+
+    /// SF Symbol naming each herd state, drawn inside the row's status chip.
+    /// Deliberately plain single-stroke glyphs: they are rendered at ~8 pt, and
+    /// anything more detailed turns to mush at that size.
+    ///
+    /// Ordered to match `stateWord(for:)` exactly, so the glyph and the word
+    /// never describe different states. Note that this is *not* the order in
+    /// `color(for:)`: that one tests `blocked` first, which it can afford to
+    /// because blocked and process-gone share a colour. They do not share a
+    /// glyph, so a pane whose process died while herdr still reports it
+    /// blocked has to resolve to "gone" — the more informative of the two, and
+    /// the one the row has always printed.
+    static func symbolName(for agent: Agent) -> String {
+        if agent.verdict.isProcessGone { return "xmark" }
+        if agent.verdict.isSilent { return "zzz" }
+        if agent.status == .blocked { return "exclamationmark" }
+        if agent.status == .done { return "checkmark" }
+        if agent.status == .working { return "play.fill" }
+        if agent.status == .idle { return "pause.fill" }
+        return "questionmark"
+    }
+
+    /// The word for an agent's state, in the row's pill and its spoken label.
+    /// The verdict outranks herdr's raw status where it is more informative: a
+    /// pane that has gone quiet or lost its process reads better as
+    /// "silent"/"gone" than as the status it was last seen in.
+    static func stateWord(for agent: Agent) -> String {
+        if agent.verdict.isProcessGone { return "gone" }
+        if agent.verdict.isSilent { return "silent" }
+        return agent.status.rawValue
+    }
+
     /// The single colour that represents an agent right now (worst-state wins).
     static func color(for agent: Agent) -> Color {
         if agent.status == .blocked { return blocked }
@@ -183,6 +236,18 @@ enum Brand {
         if silent > 0 { return Color(nsColor: .systemYellow) }
         if done > 0 { return Color(nsColor: .systemBlue) }
         return Color(nsColor: .systemGreen)
+    }
+
+    /// Shape of the menu-bar attention badge, ranked by the same worst-state
+    /// -wins rule as `worstColor`. The menu bar is the surface the product
+    /// promises you can trust "without a click", so it is the one place the
+    /// signal absolutely cannot be hue-only — the badge silhouette changes
+    /// with the state even when the colour does not survive the viewer's eyes
+    /// or a tinted menu bar.
+    static func worstShape(blocked: Int, silent: Int, done: Int) -> BadgeShape {
+        if blocked > 0 { return .triangle }
+        if silent > 0 { return .diamond }
+        return .circle
     }
 
     // MARK: - Mark symbol resolution

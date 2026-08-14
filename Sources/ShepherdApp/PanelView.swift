@@ -595,11 +595,42 @@ struct PanelView: View {
                     .foregroundStyle(Brand.secondaryText)
             }
             Spacer(minLength: 6)
+            keyboardHints
             notificationToggle
             connectionIndicator
         }
         .padding(.horizontal, Layout.gutter)
         .padding(.vertical, 10)
+    }
+
+    /// Plain computed property, not an inline `if case` inside the builder —
+    /// a result-builder context rewrites bare `if` statements even when they
+    /// are deciding a `Bool` rather than producing views.
+    private var isStartingAgent: Bool {
+        if case .starting = appModel.newAgentState { return true }
+        return false
+    }
+
+    /// The panel is keyboard-first and, until now, silent about it: arrow keys,
+    /// Space-to-peek, and Return-to-jump were documented in `PRODUCT.md` and
+    /// nowhere on screen. This is the quietest place to say so — one 10 pt line
+    /// in the footer, occupying space the footer already had.
+    ///
+    /// It stands down whenever it would compete for that space: with no rows
+    /// there is nothing to navigate, and while an agent is starting the footer
+    /// is already carrying a status line that matters more.
+    @ViewBuilder
+    private var keyboardHints: some View {
+        if !flatAgentsForKeyboardNav.isEmpty && !isStartingAgent {
+            Text("↑↓ move · space peek · ⏎ jump")
+                .font(.system(size: 10))
+                .foregroundStyle(Brand.secondaryText)
+                .lineLimit(1)
+                .fixedSize()
+                .accessibilityLabel(
+                    "Keyboard: up and down arrows move, space peeks, return jumps to the agent"
+                )
+        }
     }
 
     private var notificationToggle: some View {
@@ -765,10 +796,36 @@ struct PanelView: View {
                 subtitle: "Nothing here matches “\(searchText)”."
             )
         } else if appModel.scope == .running {
-            emptyState(title: "Nothing running", subtitle: "No agents are currently working.")
+            emptyState(title: "Nothing running", subtitle: nothingRunningSubtitle)
         } else {
-            emptyState(title: "All quiet", subtitle: "Nothing needs you right now.")
+            emptyState(title: "All quiet", subtitle: allQuietSubtitle)
         }
+    }
+
+    /// Says how big the herd is that isn't working, so "nothing running" can
+    /// be told apart from "nothing here". Written as two whole sentences
+    /// rather than one with a count spliced in: "None of your 1 agent are
+    /// working" is the kind of line that makes a careful tool feel careless.
+    private var nothingRunningSubtitle: String {
+        let count = appModel.store.agents.count
+        return count == 1
+            ? "Your one agent isn't working right now."
+            : "None of your \(count) agents are working right now."
+    }
+
+    /// "All quiet" reads very differently depending on *why* it is quiet, and
+    /// the old subtitle could not tell the two apart: a herd of twenty agents
+    /// working happily and a herd of twenty agents that all died half an hour
+    /// ago both rendered "Nothing needs you right now." Naming how many are
+    /// actually working turns a vague reassurance into a claim the user can
+    /// check — which is the difference between trusting the panel and
+    /// re-opening every pane to be sure.
+    private var allQuietSubtitle: String {
+        let running = runningAgents.count
+        guard running > 0 else { return "Nothing needs you right now." }
+        return running == 1
+            ? "1 agent is working. Nothing needs you."
+            : "\(running) agents are working. Nothing needs you."
     }
 
     private var disconnectedEmptyState: some View {

@@ -78,16 +78,43 @@ struct AgentRow: View, Equatable {
     /// "blocked", "silent", "gone", "working", "done" — verdict overrides the
     /// raw herdr status when it's more informative (a "working" pane that's
     /// gone silent, or a pane whose process disappeared, reads better as
-    /// "silent"/"gone" than as its stale raw status).
+    /// "silent"/"gone" than as its stale raw status). Derived from `Brand` so
+    /// the word, the glyph, and the colour all come from one decision.
     private var stateLabel: String {
-        if agent.verdict.isProcessGone { return "gone" }
-        if agent.verdict.isSilent { return "silent" }
-        return agent.status.rawValue
+        Brand.stateWord(for: agent)
     }
 
-    private var dwellString: String {
-        DwellFormatter.format(enteredAt: agent.enteredAt)
+    /// How long this agent has been in its current state. Sampled once per
+    /// body and threaded through both the printed figure and its emphasis, so
+    /// a row that redraws while crossing a threshold can never show a hardened
+    /// weight next to a number that hasn't reached it yet.
+    private var dwellSeconds: TimeInterval {
+        Date().timeIntervalSince(agent.enteredAt)
     }
+
+    /// Dwell time earns emphasis as it grows, but only for agents that
+    /// actually want something: a pane that has been working happily for two
+    /// hours is not more urgent than one working for two minutes, while a
+    /// prompt left unanswered for 40 minutes very much is.
+    ///
+    /// The escalation is weight *and* colour, never colour alone — the
+    /// hardening from regular grey to bold state-colour is legible in
+    /// greyscale, so this reinforces the hierarchy rather than adding another
+    /// hue-only channel to it.
+    private func dwellEmphasis(waited: TimeInterval) -> (color: Color, weight: Font.Weight) {
+        let wants = agent.status == .blocked || agent.verdict.isSilent || agent.verdict.isProcessGone
+        guard wants else { return (Brand.secondaryText, .medium) }
+        if waited >= Self.dwellAlarmSeconds { return (Brand.color(for: agent), .bold) }
+        if waited >= Self.dwellNoticeSeconds { return (Brand.color(for: agent), .semibold) }
+        return (Brand.secondaryText, .medium)
+    }
+
+    /// Thresholds for dwell emphasis. Chosen to sit either side of the
+    /// silence thresholds the user can already configure, so the number
+    /// hardening is a cue they've had time to build an intuition for rather
+    /// than a fourth independent notion of "late".
+    private static let dwellNoticeSeconds: TimeInterval = 5 * 60
+    private static let dwellAlarmSeconds: TimeInterval = 15 * 60
 
     private var reasonColor: Color {
         switch agent.verdict.reasonTone {
@@ -98,15 +125,19 @@ struct AgentRow: View, Equatable {
         }
     }
 
-    private var accessibilityDescription: String {
+    /// Takes the dwell figure the row is actually rendering rather than
+    /// re-deriving it, so the sighted and spoken versions of a row always
+    /// quote the same number.
+    private func accessibilityDescription(dwell: String) -> String {
         let reason = agent.verdict.reasonText ?? "no issues"
         let cost = dailyCost.hasUsage ? ", today \(UsageFormatter.cost(dailyCost)) API equivalent" : ""
-        return "\(titleText), \(kindLabel), \(stateLabel), \(dwellString)\(cost), \(reason)"
+        return "\(titleText), \(kindLabel), \(stateLabel), \(dwell)\(cost), \(reason)"
     }
 
     /// The state as a tinted chip rather than plain grey text — at a glance the
-    /// state now reads from the same colour as the row's rail and dot. Text uses
-    /// the strong pill variant so it holds ≥4.5:1 on the tinted fill.
+    /// state reads from the same colour as the row's rail and status glyph, and
+    /// spells the word out for anyone the colour doesn't reach. Text uses the
+    /// strong pill variant so it holds ≥4.5:1 on the tinted fill.
     private func statePill(accent: Color, text: Color) -> some View {
         Text(stateLabel)
             .font(.system(size: 10.5, weight: .semibold))
@@ -124,6 +155,11 @@ struct AgentRow: View, Equatable {
         let accent = Brand.color(for: agent)
         let active = (agent.status == .working || agent.status == .blocked)
         let alarmed = (agent.status == .blocked || agent.verdict.isProcessGone)
+        // One clock reading for the whole row: the figure, its emphasis, and
+        // the spoken label all describe the same instant.
+        let waited = dwellSeconds
+        let dwellText = DwellFormatter.format(interval: waited)
+        let dwell = dwellEmphasis(waited: waited)
 
         HStack(alignment: .top, spacing: 0) {
             // Left status rail — the colour IS the state, glowing when active.
@@ -138,7 +174,11 @@ struct AgentRow: View, Equatable {
             VStack(alignment: .leading, spacing: 4) {
                 // Line 1: name/kind (left) + state pill and dwell (right).
                 HStack(spacing: 7) {
-                    StatusDot(color: accent, active: active)
+                    StatusGlyph(
+                        color: accent,
+                        symbol: Brand.symbolName(for: agent),
+                        active: active
+                    )
                     Text(titleText)
                         .font(.system(size: 13.5, weight: .semibold))
                         .foregroundStyle(.primary)
@@ -147,9 +187,10 @@ struct AgentRow: View, Equatable {
                         .help(titleText)
                     Spacer(minLength: 8)
                     statePill(accent: accent, text: Brand.pillText(for: agent))
-                    Text(dwellString)
-                        .font(.system(size: 11.5, weight: .medium, design: .monospaced))
-                        .foregroundStyle(Brand.secondaryText)
+                    Text(dwellText)
+                        .font(.system(size: 11.5, weight: dwell.weight, design: .monospaced))
+                        .foregroundStyle(dwell.color)
+                        .help("In this state for \(dwellText)")
                 }
 
                 // Line 2: what it's waiting on — the triage payload leads, so
@@ -209,7 +250,7 @@ struct AgentRow: View, Equatable {
         .background(ClickCatcher(onSelect: onSelect, onDoubleClick: onJump))
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel(accessibilityDescription)
+        .accessibilityLabel(accessibilityDescription(dwell: dwellText))
         .accessibilityHint("Double-click to jump to this agent")
         .accessibilityAction { onSelect() }
         .contextMenu {
@@ -228,16 +269,30 @@ struct AgentRow: View, Equatable {
     private var actionRow: some View {
         HStack(spacing: 7) {
             if agent.verdict.isAwaitingInput {
-                Button("Approve") { appModel.approve(agent) }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Brand.approveFill)
-                    .disabled(writeInFlight)
-                    .help("Sends Enter to accept the highlighted option")
-                Button("Deny") { appModel.deny(agent) }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Brand.blocked)
-                    .disabled(writeInFlight)
-                    .help("Sends Esc to dismiss the prompt")
+                // Approve and Deny used to be two filled buttons that differed
+                // only in hue — green beside red, the exact pair the most
+                // common colour deficiency collapses, and the pair that decides
+                // whether the user is accepting or rejecting an agent's
+                // request. They now differ three ways at once: a checkmark
+                // against a cross, a filled button against an outlined one, and
+                // only then the colour. Weight also encodes intent, the way
+                // macOS alerts do — the affirmative action is the prominent
+                // one, so nothing else has to be read to find the default.
+                Button { appModel.approve(agent) } label: {
+                    Label("Approve", systemImage: "checkmark")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Brand.approveFill)
+                .disabled(writeInFlight)
+                .help("Sends Enter to accept the highlighted option")
+
+                Button { appModel.deny(agent) } label: {
+                    Label("Deny", systemImage: "xmark")
+                        .foregroundStyle(Brand.blocked)
+                }
+                .buttonStyle(.bordered)
+                .disabled(writeInFlight)
+                .help("Sends Esc to dismiss the prompt")
             }
             Button("Peek") { onPeekToggle() }
                 .buttonStyle(.bordered)
@@ -379,27 +434,43 @@ struct AgentRow: View, Equatable {
     }
 }
 
-/// A status light. Active agents (working/blocked) get a calm outer ring and a
-/// brighter glow instead of a repeating animation — continuous animations inside
-/// a `MenuBarExtra` window are a known cause of the panel flickering open/closed,
-/// so emphasis here is purely static.
-private struct StatusDot: View {
+/// A status light that says what it means. This was a plain coloured dot,
+/// which made the row's state readable only to someone who can separate the
+/// six status hues — the one accessibility debt `PRODUCT.md` calls out by
+/// name. Carrying the state's glyph inside the light costs the same 16 pt and
+/// removes the dependency on colour entirely: the herd reads correctly in
+/// greyscale, in a screenshot, and to a colour-blind user.
+///
+/// Active agents (working/blocked) get a firmer ring and a brighter glow
+/// instead of a repeating animation — continuous animations inside a
+/// `MenuBarExtra` window are a known cause of the panel flickering open and
+/// closed, so emphasis here is purely static.
+private struct StatusGlyph: View {
     let color: Color
+    let symbol: String
     let active: Bool
+
+    /// Sized to the 13.5 pt title it sits beside, so the row's first line has
+    /// one optical baseline rather than a small dot floating in a tall slot.
+    private let side: CGFloat = 16
 
     var body: some View {
         ZStack {
-            if active {
-                Circle()
-                    .stroke(color.opacity(0.45), lineWidth: 1)
-                    .frame(width: 11, height: 11)
-            }
             Circle()
-                .fill(color)
-                .frame(width: 8, height: 8)
-                .shadow(color: color.opacity(active ? 0.9 : 0.4), radius: active ? 3 : 1)
+                .fill(color.opacity(0.18))
+            Circle()
+                .strokeBorder(color.opacity(active ? 0.9 : 0.55), lineWidth: 1)
+            Image(systemName: symbol)
+                // Heavy at this size on purpose: a hairline glyph inside a
+                // 16 pt chip disappears against the tinted fill.
+                .font(.system(size: 7.5, weight: .black))
+                .foregroundStyle(color)
         }
-        .frame(width: 12, height: 12)
+        .frame(width: side, height: side)
+        .shadow(color: color.opacity(active ? 0.45 : 0), radius: active ? 2.5 : 0)
+        // The row's combined accessibility label already names the state; the
+        // chip repeating it would make VoiceOver say it twice.
+        .accessibilityHidden(true)
     }
 }
 

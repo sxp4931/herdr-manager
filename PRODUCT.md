@@ -81,4 +81,6 @@ Open product questions live in `PLAN.md` §10; where the build resolved them, th
 
 ## Accessibility & Inclusion
 
-Keyboard-first panel (fully operable without a mouse). WCAG AA contrast target in both appearances, encoded in `Brand.swift`. Known open items from the 2026-08-06 critique that future work must address rather than extend: attention hierarchy is color-only (needs redundant encoding), and green-OK/red-deny is a color-blind-failing pair.
+Keyboard-first panel (fully operable without a mouse), with its arrow/space/return bindings named in the footer rather than left to documentation. WCAG AA contrast target in both appearances, encoded in `Brand.swift`.
+
+The two open items from the 2026-08-06 critique are closed, and the shape of the fix is now a standing rule: **no state may be encoded by colour alone.** Every status colour is paired with a glyph (`Brand.symbolName(for:)`, drawn in the row's status light), a menu-bar silhouette (`Brand.worstShape(blocked:silent:done:)` — triangle → diamond → circle, worst-first), and a word (`Brand.stateWord(for:)`, in the row's state pill), all derived from the same decision so they cannot drift apart. Approve and Deny differ by glyph and by fill weight before they differ by hue. Dwell time escalates in weight as well as colour. Work that adds a status signal is expected to carry all three encodings.

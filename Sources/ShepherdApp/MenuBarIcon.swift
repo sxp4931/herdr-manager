@@ -7,9 +7,14 @@ import HerdrManagerCore
 /// vibrant/tinted bars. Attention is drawn in a fixed state colour instead,
 /// because a coloured badge must stay visibly red/amber/blue regardless of
 /// bar appearance; a template image would strip that colour to monochrome.
+///
+/// Attention carries a shape alongside the colour. A tinted menu bar, a
+/// greyscale screenshot, and a red-green colour deficiency all flatten the
+/// hue; the silhouette (triangle → diamond → circle) keeps the worst-state
+/// ranking readable when it does.
 enum HerdState: Equatable, Hashable {
     case calm
-    case attention(Color)
+    case attention(color: Color, shape: Brand.BadgeShape)
     case disconnected
 }
 
@@ -25,7 +30,10 @@ enum MenuBarIcon {
     /// Standard macOS menu-bar item height.
     private static let barHeight: CGFloat = 18
     private static let markPointSize: CGFloat = 14
-    private static let dotDiameter: CGFloat = 6
+    /// Badge side length. A shape needs slightly more room than the plain dot
+    /// it replaced: at 6 pt a triangle and a diamond are hard to tell apart,
+    /// at 7 pt they read cleanly and still clear the mark's bounds.
+    private static let dotDiameter: CGFloat = 7
     private static let digitFontSize: CGFloat = 11
     private static let spacing: CGFloat = 3
 
@@ -65,23 +73,26 @@ enum MenuBarIcon {
         switch state {
         case .calm:
             // Nothing needs the user: quiet, monochrome, and let macOS tint it.
-            return composite(tint: nil, alpha: 1.0, isTemplate: true, showDot: false, countText: nil)
+            return composite(tint: nil, alpha: 1.0, isTemplate: true, dotShape: nil, countText: nil)
         case .disconnected:
             // Quiet, not alarming — dimmed template mark, no count.
-            return composite(tint: nil, alpha: 0.4, isTemplate: true, showDot: false, countText: nil)
-        case .attention(let color):
+            return composite(tint: nil, alpha: 0.4, isTemplate: true, dotShape: nil, countText: nil)
+        case .attention(let color, let shape):
             let countText = attentionCount > 0 ? "\(attentionCount)" : nil
-            return composite(tint: color, alpha: 1.0, isTemplate: false, showDot: true, countText: countText)
+            return composite(
+                tint: color, alpha: 1.0, isTemplate: false, dotShape: shape, countText: countText
+            )
         }
     }
 
-    /// Draw the mark (optionally tinted), an optional status dot, and
+    /// Draw the mark (optionally tinted), an optional status badge, and
     /// optional count digits into one bitmap. `tint == nil` means "draw a
     /// plain monochrome mark and let the caller mark the image as a
-    /// template" (calm/disconnected); a non-nil tint paints mark, dot, and
-    /// digits in that exact colour (attention).
+    /// template" (calm/disconnected); a non-nil tint paints mark, badge, and
+    /// digits in that exact colour (attention). `dotShape == nil` omits the
+    /// badge entirely.
     private static func composite(
-        tint: Color?, alpha: CGFloat, isTemplate: Bool, showDot: Bool, countText: String?
+        tint: Color?, alpha: CGFloat, isTemplate: Bool, dotShape: Brand.BadgeShape?, countText: String?
     ) -> NSImage {
         let markSide = barHeight
         let digitFont = NSFont.monospacedDigitSystemFont(ofSize: digitFontSize, weight: .semibold)
@@ -109,16 +120,19 @@ enum MenuBarIcon {
                 tinted.draw(in: markRect, from: .zero, operation: .sourceOver, fraction: alpha)
             }
 
-            if showDot {
+            if let dotShape {
                 let dotRect = NSRect(
                     x: markRect.maxX - dotDiameter - 1,
                     y: markRect.maxY - dotDiameter - 1,
                     width: dotDiameter,
                     height: dotDiameter
                 )
-                let path = NSBezierPath(ovalIn: dotRect)
+                let path = badgePath(dotShape, in: dotRect)
                 color.setFill()
                 path.fill()
+                // A dark hairline keeps the badge legible where it overlaps a
+                // light bar or the mark's own strokes. It also sharpens the
+                // silhouette, which is the point of having shapes at all.
                 NSColor.black.withAlphaComponent(0.4).setStroke()
                 path.lineWidth = 0.75
                 path.stroke()
@@ -136,6 +150,31 @@ enum MenuBarIcon {
         }
         image.isTemplate = isTemplate
         return image
+    }
+
+    /// The badge silhouette for a herd state, inscribed in `rect`. Drawn as
+    /// paths rather than glyphs so the shapes stay crisp at 7 pt on both 1x
+    /// and 2x bars — an SF Symbol at this size would blur into a smudge.
+    private static func badgePath(_ shape: Brand.BadgeShape, in rect: NSRect) -> NSBezierPath {
+        switch shape {
+        case .circle:
+            return NSBezierPath(ovalIn: rect)
+        case .diamond:
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: rect.midX, y: rect.maxY))
+            path.line(to: NSPoint(x: rect.maxX, y: rect.midY))
+            path.line(to: NSPoint(x: rect.midX, y: rect.minY))
+            path.line(to: NSPoint(x: rect.minX, y: rect.midY))
+            path.close()
+            return path
+        case .triangle:
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: rect.midX, y: rect.maxY))
+            path.line(to: NSPoint(x: rect.maxX, y: rect.minY))
+            path.line(to: NSPoint(x: rect.minX, y: rect.minY))
+            path.close()
+            return path
+        }
     }
 
     /// Recolour a template (alpha-mask) image to a solid colour: fill a
