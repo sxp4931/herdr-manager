@@ -4,10 +4,11 @@
 *.xcodeproj
 xcuserdata/
 
-# Built app bundle
+# Built app bundle and release artifacts
 HerdrManager.app/
 Shepherd.app/
 *.zip
+*.dmg
 
 # macOS
 .DS_Store
