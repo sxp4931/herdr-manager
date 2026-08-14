@@ -98,6 +98,16 @@ final class AppModel {
     /// successful snapshot so protocol/version mismatches surface quickly.
     var adapterHealth: AdapterHealth?
 
+    /// Latest setup-check report. Always re-run live, never restored from disk.
+    private(set) var preflightReport: PreflightReport = .checking()
+    /// Persisted: Shepherd has completed at least one herdr handshake.
+    private(set) var hasEverConnected: Bool = false
+    /// Persisted: user dismissed the one-time MCP hookup card.
+    private(set) var dismissedMCPCard: Bool = false
+    /// In-session first-success row. Cleared on dismiss or when the panel
+    /// closes and reopens. Not persisted.
+    var showFirstSuccessBanner: Bool = false
+
     /// Read-only local usage data. The snapshot contains all locally readable
     /// provider activity plus best-effort attribution to the current herd.
     private(set) var usageSnapshot: TokenMeterSnapshot = .empty
@@ -123,12 +133,24 @@ final class AppModel {
     /// to seed the "New agent" flow's cwd guess.
     private var lastHerdAgents: [HerdrAgentInfo] = []
     private var lastTabNames: [String: String] = [:]
+    private let preflightRunner: PreflightRunner
+    private var preflightTask: Task<Void, Never>?
+    /// `hasEverConnected` as loaded from disk. Distinguishes a returning user
+    /// from a first-run so the quiet first-success row is not shown again.
+    private var hadConnectedBeforeThisLaunch = false
+    private var settingsLoadFinished = false
+    private var hasAnnouncedFirstSuccess = false
 
     // MARK: - Init
 
     init() {
         let socketPath = Self.resolveSocketPath()
         self.adapter = LiveHerdrAdapter(socketPath: socketPath)
+        self.preflightRunner = PreflightRunner(
+            environment: SystemPreflightEnvironment(),
+            socketPath: socketPath,
+            supportedProtocols: LiveHerdrAdapter.supportedProtocolRange
+        )
         // Notification authorization is gated on the user setting inside
         // NotificationManager; only request when enabled.
         if notificationManager.isEnabled {
@@ -150,7 +172,16 @@ final class AppModel {
     // keeps working, but the view only updates when an outcome actually changes.
 
     private func setConnection(_ state: HerdrConnectionState) {
-        if connectionState != state { connectionState = state }
+        let previous = connectionState
+        guard previous != state else { return }
+        connectionState = state
+        if state == .disconnected {
+            requestPreflight()
+        } else if state == .connected {
+            markConnectedIfNeeded()
+            considerFirstSuccess()
+            requestPreflight()
+        }
     }
 
     private func setLastError(_ message: String?) {
@@ -173,6 +204,7 @@ final class AppModel {
         workspaceOptions = snapshot.workspaceNames
             .map { WorkspaceOption(id: $0.key, name: $0.value) }
             .sorted { $0.name < $1.name }
+        considerFirstSuccess()
     }
 
     // MARK: - Lifecycle
@@ -198,17 +230,28 @@ final class AppModel {
                 if self.metadataWriteBackEnabled != snap.metadataWriteBackEnabled {
                     self.metadataWriteBackEnabled = snap.metadataWriteBackEnabled
                 }
+                self.hadConnectedBeforeThisLaunch = snap.hasEverConnected
+                if snap.hasEverConnected {
+                    self.hasEverConnected = true
+                }
+                if snap.dismissedMCPCard {
+                    self.dismissedMCPCard = true
+                }
+                self.settingsLoadFinished = true
+                self.considerFirstSuccess()
                 let loadedPriceBook = TokenMeterPriceBook(entries: snap.tokenMeterPrices)
                 if self.tokenMeterPriceBook != loadedPriceBook {
                     self.tokenMeterPriceBook = loadedPriceBook
                     await self.refreshUsage()
                 }
             } catch {
+                self.settingsLoadFinished = true
                 self.setLastError("Settings load failed: \(error.localizedDescription)")
             }
         }
 
         startUsageLoop()
+        requestPreflight()
 
         eventTask?.cancel()
         eventTask = Task { [weak self] in
@@ -262,8 +305,8 @@ final class AppModel {
                 do {
                     let snapshot = try await self.adapter.herdSnapshot()
                     // Probe succeeded -> we are (back) online.
-                    self.setConnection(.connected)
                     self.applyHerd(snapshot)
+                    self.setConnection(.connected)
                     self.setHealth(self.adapter.health())
                     self.updateDwellForAllAgents()
                     if !self.hasRestoredDwell {
@@ -309,6 +352,7 @@ final class AppModel {
             } catch {
                 self.setLastError("Resync failed: \(error.localizedDescription)")
             }
+            self.requestPreflight()
         }
     }
 
@@ -318,9 +362,9 @@ final class AppModel {
         setConnection(.connecting)
         do {
             try await adapter.connect()
-            setConnection(.connected)
             let snapshot = try await adapter.herdSnapshot()
             applyHerd(snapshot)
+            setConnection(.connected)
             setHealth(adapter.health())
             updateDwellForAllAgents()
             if !hasRestoredDwell {
@@ -466,13 +510,14 @@ final class AppModel {
             // periodic poll in refreshTask/start(), all coalesced via setConnection.
             switch event {
             case .connected:
-                setConnection(.connected)
-                // Re-sync on reconnect
+                // Re-sync on reconnect, then flip the UI: applyHerd before
+                // setConnection so preflight sees the real agent count.
                 Task { [weak self] in
                     guard let self else { return }
                     do {
                         let snapshot = try await self.adapter.herdSnapshot()
                         self.applyHerd(snapshot)
+                        self.setConnection(.connected)
                         self.setHealth(self.adapter.health())
                         self.updateDwellForAllAgents()
                         if !self.hasRestoredDwell {
@@ -907,5 +952,50 @@ final class AppModel {
 
     private static func resolveSocketPath() -> String {
         return LiveHerdrAdapter.resolveSocketPath()
+    }
+
+    // MARK: - Preflight
+
+    /// Run setup checks on launch, on connection-state change, and on
+    /// explicit resync (⌘R / "Check again"). Never on a timer.
+    func requestPreflight() {
+        preflightTask?.cancel()
+        preflightReport = .checking()
+        let agentCount = store.agents.count
+        preflightTask = Task { [weak self] in
+            guard let self else { return }
+            let report = await self.preflightRunner.run(agentCount: agentCount)
+            guard !Task.isCancelled else { return }
+            self.preflightReport = report
+        }
+    }
+
+    private func markConnectedIfNeeded() {
+        guard !hasEverConnected else { return }
+        hasEverConnected = true
+        Task { [weak self] in
+            try? await self?.settingsStore.markHasEverConnected()
+        }
+    }
+
+    private func considerFirstSuccess() {
+        guard settingsLoadFinished else { return }
+        guard !hadConnectedBeforeThisLaunch else { return }
+        guard !hasAnnouncedFirstSuccess else { return }
+        guard connectionState == .connected else { return }
+        guard !store.agents.isEmpty else { return }
+        showFirstSuccessBanner = true
+        hasAnnouncedFirstSuccess = true
+    }
+
+    func dismissFirstSuccessBanner() {
+        showFirstSuccessBanner = false
+    }
+
+    func dismissMCPCard() {
+        dismissedMCPCard = true
+        Task { [weak self] in
+            try? await self?.settingsStore.setDismissedMCPCard(true)
+        }
     }
 }

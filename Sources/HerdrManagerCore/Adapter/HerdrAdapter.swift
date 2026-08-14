@@ -780,6 +780,16 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     // MARK: - Health
 
+    /// Lowest herdr wire protocol this adapter was built and verified against.
+    public static let minSupportedProtocolVersion = 17
+
+    /// Protocols this build treats as fully supported. herdr's protocol has
+    /// been append-only, so anything newer than the verified version is
+    /// included; anything older is out of range (reads continue, writes
+    /// disable). There is no published upper bound.
+    public static let supportedProtocolRange: ClosedRange<Int> =
+        minSupportedProtocolVersion...Int.max
+
     public func health() -> AdapterHealth {
         let proto = latestProtocol()
         // Protocol 17 is the version this adapter was built and verified
@@ -787,7 +797,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         // protocol has been append-only in practice) so a routine herdr bump
         // doesn't silently disable every write in the app; anything older is
         // unverified and left disabled.
-        let minSupportedVersion = 17
+        let minSupportedVersion = Self.minSupportedProtocolVersion
         if proto == 0 {
             return AdapterHealth(protocolVersion: 0, compatible: false, writesEnabled: false, reason: "protocol unknown")
         }

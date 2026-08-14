@@ -24,6 +24,9 @@ struct PanelView: View {
     /// Workspace groups the user has folded away (All scope only).
     @State private var collapsedGroups: Set<String> = []
     @State private var showUsageDashboard = false
+    /// On-demand setup checks (⌘⇧S). Disconnected already shows the checklist
+    /// as the empty state; this flag opens it while connected too.
+    @State private var showSetupChecks = false
 
     /// The clock the panel's durations are read against, advanced on a timer
     /// rather than read at render time.
@@ -107,6 +110,10 @@ struct PanelView: View {
                 showUsageDashboard = false
                 return .handled
             }
+            if showSetupChecks && appModel.connectionState == .connected {
+                showSetupChecks = false
+                return .handled
+            }
             if searchFocused {
                 searchFocused = false
                 return .handled
@@ -124,21 +131,25 @@ struct PanelView: View {
         }
         .onKeyPress(.upArrow) {
             guard !searchFocused else { return .ignored }
+            guard !showingSetupChecklist else { return .ignored }
             moveSelection(up: true)
             return .handled
         }
         .onKeyPress(.downArrow) {
             guard !searchFocused else { return .ignored }
+            guard !showingSetupChecklist else { return .ignored }
             moveSelection(up: false)
             return .handled
         }
         .onKeyPress(.return) {
             guard !searchFocused else { return .ignored }
+            guard !showingSetupChecklist else { return .ignored }
             jumpSelected()
             return .handled
         }
         .onKeyPress(" ") {
             guard !searchFocused else { return .ignored }
+            guard !showingSetupChecklist else { return .ignored }
             togglePeekSelected()
             return .handled
         }
@@ -147,6 +158,11 @@ struct PanelView: View {
         // most wrong. If this never fires the figures are at worst one tick
         // stale, which the loop below corrects on its own.
         .onAppear { now = Date() }
+        .onChange(of: controlActiveState) { _, newValue in
+            if newValue == .inactive {
+                appModel.dismissFirstSuccessBanner()
+            }
+        }
         // Keyed on the window's active state rather than on a view-lifecycle
         // callback: `controlActiveState` is driven by AppKit's own window
         // notifications, so it reports the panel closing without depending on
@@ -174,7 +190,7 @@ struct PanelView: View {
         // Keyboard-first: the panel opens with the filter field focused so
         // "type to filter" works immediately; Esc drops to arrow-key triage
         // (the .onKeyPress handlers below already gate on searchFocused).
-        .defaultFocus($searchFocused, true)
+        .defaultFocus($searchFocused, !showingSetupChecklist)
         .onChange(of: appModel.selectedAgentId) { _, _ in
             resetExpansion()
         }
@@ -250,6 +266,25 @@ struct PanelView: View {
         )
     }
 
+    /// Setup checks replace the herd list when disconnected (or connecting)
+    /// and when the user opens them on demand.
+    private var showingSetupChecklist: Bool {
+        showSetupChecks || appModel.connectionState != .connected
+    }
+
+    private var showingMCPCard: Bool {
+        appModel.connectionState == .connected
+            && appModel.hasEverConnected
+            && !appModel.dismissedMCPCard
+            && !showSetupChecks
+    }
+
+    private var showingFirstSuccess: Bool {
+        appModel.showFirstSuccessBanner
+            && appModel.connectionState == .connected
+            && !showSetupChecks
+    }
+
     /// The triage surface, factored out of `body` so `visibleHerd` can be
     /// computed once and handed to each part that needs it.
     private var triagePanel: some View {
@@ -257,8 +292,10 @@ struct PanelView: View {
         return VStack(alignment: .leading, spacing: 0) {
             header(herd: herd)
             Divider()
-            filterBar(herd: herd)
-            Divider()
+            if !showingSetupChecklist {
+                filterBar(herd: herd)
+                Divider()
+            }
             if !appModel.pendingActions.isEmpty {
                 PendingActionsView()
                 Divider()
@@ -287,7 +324,7 @@ struct PanelView: View {
         /// how tall the scroll area is, so being a few points off costs at worst
         /// a slightly early scrollbar.
         static let listCeilingHeight: CGFloat = 540
-        static let emptyStateHeight: CGFloat = 210
+        static let emptyStateHeight: CGFloat = 260
         static let rowBaseHeight: CGFloat = 64
         static let rowCostHeight: CGFloat = 16
         static let rowActionsHeight: CGFloat = 40
@@ -365,6 +402,15 @@ struct PanelView: View {
             iconButton(system: "arrow.clockwise", help: "Resync (⌘R)", label: "Resync", shortcut: "r") {
                 appModel.resync()
             }
+            iconButton(
+                system: "stethoscope",
+                help: "Setup checks (⌘⇧S)",
+                label: "Setup checks",
+                shortcut: "s",
+                modifiers: [.command, .shift]
+            ) {
+                showSetupChecks.toggle()
+            }
             Menu {
                 Text("keep the herd moving")
                 Divider()
@@ -386,7 +432,12 @@ struct PanelView: View {
     }
 
     private func iconButton(
-        system: String, help: String, label: String, shortcut: Character, action: @escaping () -> Void
+        system: String,
+        help: String,
+        label: String,
+        shortcut: Character,
+        modifiers: EventModifiers = .command,
+        action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             Image(systemName: system)
@@ -397,7 +448,7 @@ struct PanelView: View {
         .buttonStyle(.borderless)
         .help(help)
         .accessibilityLabel(label)
-        .keyboardShortcut(KeyEquivalent(shortcut), modifiers: .command)
+        .keyboardShortcut(KeyEquivalent(shortcut), modifiers: modifiers)
     }
 
     // MARK: - Filter bar (scope + search)
@@ -486,7 +537,18 @@ struct PanelView: View {
     private func content(herd: VisibleHerd) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 3, pinnedViews: [.sectionHeaders]) {
-                if appModel.scope == .all {
+                if showingFirstSuccess {
+                    FirstSuccessRow(
+                        agentCount: appModel.store.agents.count,
+                        onDismiss: { appModel.dismissFirstSuccessBanner() }
+                    )
+                }
+                if showingSetupChecklist {
+                    SetupChecklistView(
+                        report: appModel.preflightReport,
+                        onRecheck: { appModel.resync() }
+                    )
+                } else if appModel.scope == .all {
                     if herd.groups.isEmpty {
                         emptyStateBody(herd: herd)
                     } else {
@@ -496,6 +558,12 @@ struct PanelView: View {
                     emptyStateBody(herd: herd)
                 } else {
                     flatList(herd.rows)
+                }
+                if showingMCPCard {
+                    MCPHookupCard(
+                        resolution: MCPBridgePath.resolve(),
+                        onDismiss: { appModel.dismissMCPCard() }
+                    )
                 }
             }
             .padding(.vertical, 6)
@@ -512,10 +580,21 @@ struct PanelView: View {
     /// Collapsed groups still contribute their header, so folding a group
     /// shrinks the panel to fit rather than leaving dead space behind.
     private func listHeight(herd: VisibleHerd) -> CGFloat {
-        let headers = CGFloat(herd.groups.count) * Layout.groupHeaderHeight
-        guard !herd.rows.isEmpty || headers > 0 else { return Layout.emptyStateHeight }
+        var extras: CGFloat = 0
+        if showingFirstSuccess { extras += FirstSuccessRow.estimatedHeight }
+        if showingMCPCard { extras += MCPHookupCard.estimatedHeight }
 
-        var height: CGFloat = 12 + headers // list's own vertical padding
+        if showingSetupChecklist {
+            let checks = SetupChecklistView.estimatedHeight(report: appModel.preflightReport)
+            return min(checks + extras, listMaxHeight)
+        }
+
+        let headers = CGFloat(herd.groups.count) * Layout.groupHeaderHeight
+        guard !herd.rows.isEmpty || headers > 0 else {
+            return min(Layout.emptyStateHeight + extras, listMaxHeight)
+        }
+
+        var height: CGFloat = 12 + headers + extras // list's own vertical padding
         for agent in herd.rows {
             height += rowHeight(agent)
         }
@@ -980,9 +1059,7 @@ struct PanelView: View {
 
     @ViewBuilder
     private func emptyStateBody(herd: VisibleHerd) -> some View {
-        if appModel.connectionState != .connected {
-            disconnectedEmptyState
-        } else if appModel.store.agents.isEmpty {
+        if appModel.store.agents.isEmpty {
             noAgentsEmptyState
         } else if !searchText.trimmingCharacters(in: .whitespaces).isEmpty {
             emptyState(
@@ -1020,46 +1097,22 @@ struct PanelView: View {
             : "\(herd.running) agents are working. Nothing needs you."
     }
 
-    private var disconnectedEmptyState: some View {
+    private var noAgentsEmptyState: some View {
         VStack(spacing: 10) {
-            FlockMark(size: 40, glow: false, dimmed: true)
-            Text("herdr isn't running")
+            FlockMark(size: 40, glow: true)
+            Text("No agents yet")
                 .font(.system(size: 15, weight: .semibold))
-            Text("Your herd's live status will appear here once herdr is up.")
+            Text("Shepherd watches the panes herdr is running. Start one and it appears here within a second.")
                 .font(.system(size: 12.5))
                 .foregroundStyle(Brand.secondaryText)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
-            Text("Looked for it at:")
-                .font(.system(size: 12.5))
-                .foregroundStyle(Brand.secondaryText)
             Text(LiveHerdrAdapter.resolveSocketPath())
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(Brand.secondaryText)
                 .textSelection(.enabled)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
-            Text("Start herdr, then press ⌘R to resync.")
-                .font(.system(size: 12))
-                .foregroundStyle(Brand.secondaryText)
-                .padding(.top, 2)
-            Link("Get herdr", destination: URL(string: "https://herdr.dev")!)
-                .font(.system(size: 12))
-                .foregroundStyle(Brand.amber)
-                .padding(.top, 2)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 34)
-    }
-
-    private var noAgentsEmptyState: some View {
-        VStack(spacing: 10) {
-            FlockMark(size: 40, glow: true)
-            Text("No agents yet")
-                .font(.system(size: 15, weight: .semibold))
-            Text("Start one below to get going.")
-                .font(.system(size: 12.5))
-                .foregroundStyle(Brand.secondaryText)
             newAgentMenu(label: "New agent", prominent: true)
                 .padding(.top, 2)
         }

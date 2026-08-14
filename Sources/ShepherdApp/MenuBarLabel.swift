@@ -10,7 +10,11 @@ struct MenuBarLabel: View {
 
     var body: some View {
         let signal = self.signal
-        let summary = Self.summary(signal, connected: appModel.connectionState == .connected)
+        let summary = Self.summary(
+            signal,
+            connected: appModel.connectionState == .connected,
+            hasEverConnected: appModel.hasEverConnected
+        )
         return Image(nsImage: MenuBarIcon.rendered(
             state: herdState(signal: signal), attentionCount: signal.total
         ))
@@ -35,8 +39,12 @@ struct MenuBarLabel: View {
     /// worst-first order the colour and shape rank them by. Only non-zero
     /// counts appear — a herd with two blocked agents and nothing else should
     /// not have to read "0 silent, 0 done" to learn that.
-    private static func summary(_ signal: AttentionSignal, connected: Bool) -> String {
-        guard connected else { return "herdr not connected" }
+    private static func summary(_ signal: AttentionSignal, connected: Bool, hasEverConnected: Bool) -> String {
+        guard connected else {
+            // Before the first handshake, a calm "0" or "all quiet" would
+            // fabricate a healthy empty herd. Name the gap instead.
+            return hasEverConnected ? "herdr not connected" : "not connected to herdr"
+        }
         var parts: [String] = []
         if signal.blocked > 0 { parts.append("\(signal.blocked) blocked") }
         if signal.gone > 0 { parts.append("\(signal.gone) gone") }

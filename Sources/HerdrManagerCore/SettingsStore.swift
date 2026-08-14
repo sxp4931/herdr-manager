@@ -13,6 +13,13 @@ public struct Settings: Codable, Sendable {
     /// Editable API-equivalent prices. Old settings files predate the usage
     /// meter, so decoding falls back to the bundled price book.
     public var tokenMeterPrices: [String: TokenMeterPricing] = TokenMeterPriceBook.defaults.entries
+    /// True after Shepherd has completed at least one herdr handshake. Old
+    /// settings files omit this key; decoding falls back to false so a
+    /// returning user is not treated as already onboarded until they connect
+    /// once on this build.
+    public var hasEverConnected: Bool = false
+    /// User dismissed the one-time MCP hookup card. Never shown twice.
+    public var dismissedMCPCard: Bool = false
 
     public init() {}
 
@@ -22,6 +29,8 @@ public struct Settings: Codable, Sendable {
         case occupantOverrides
         case metadataWriteBackEnabled
         case tokenMeterPrices
+        case hasEverConnected
+        case dismissedMCPCard
     }
 
     public init(from decoder: Decoder) throws {
@@ -34,6 +43,8 @@ public struct Settings: Codable, Sendable {
             [String: TokenMeterPricing].self,
             forKey: .tokenMeterPrices
         ) ?? TokenMeterPriceBook.defaults.entries
+        hasEverConnected = try container.decodeIfPresent(Bool.self, forKey: .hasEverConnected) ?? false
+        dismissedMCPCard = try container.decodeIfPresent(Bool.self, forKey: .dismissedMCPCard) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -43,6 +54,8 @@ public struct Settings: Codable, Sendable {
         try container.encode(occupantOverrides, forKey: .occupantOverrides)
         try container.encode(metadataWriteBackEnabled, forKey: .metadataWriteBackEnabled)
         try container.encode(tokenMeterPrices, forKey: .tokenMeterPrices)
+        try container.encode(hasEverConnected, forKey: .hasEverConnected)
+        try container.encode(dismissedMCPCard, forKey: .dismissedMCPCard)
     }
 }
 
@@ -122,6 +135,17 @@ public actor SettingsStore {
 
     public func setTokenMeterPriceBook(_ priceBook: TokenMeterPriceBook) throws {
         settings.tokenMeterPrices = priceBook.entries
+        try save()
+    }
+
+    public func markHasEverConnected() throws {
+        guard !settings.hasEverConnected else { return }
+        settings.hasEverConnected = true
+        try save()
+    }
+
+    public func setDismissedMCPCard(_ dismissed: Bool) throws {
+        settings.dismissedMCPCard = dismissed
         try save()
     }
 
