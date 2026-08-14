@@ -120,6 +120,111 @@ struct TokenMeterPricingTests {
         #expect(book.pricing(for: .qwen, model: "tencent/hy3:free")?.outputPerMillion == 0.0)
         #expect(book.pricing(for: .deepseek, model: "deepseek-v4-flash-free")?.outputPerMillion == 0.0)
     }
+
+    @Test("Resolves newly added verified price keys")
+    func newlyAddedVerifiedPrices() {
+        let book = TokenMeterPriceBook.defaults
+
+        #expect(book.pricing(for: .kimi, model: "kimi-k3")?.inputPerMillion == 3.0)
+        #expect(book.pricing(for: .kimi, model: "kimi-k3")?.cacheReadPerMillion == 0.30)
+        #expect(book.pricing(for: .kimi, model: "kimi-k3")?.outputPerMillion == 15.0)
+        #expect(book.pricing(for: .kimi, model: "kimi-k2.7-code")?.inputPerMillion == 0.95)
+        #expect(book.pricing(for: .kimi, model: "kimi-k2.7-code")?.outputPerMillion == 4.0)
+        #expect(book.pricing(for: .kimi, model: "kimi-k2-7-code")?.inputPerMillion == 0.95)
+        #expect(book.pricing(for: .kimi, model: "kimi-k2.7-code-highspeed")?.outputPerMillion == 8.0)
+        #expect(book.pricing(for: .kimi, model: "kimi-k2-7-code-highspeed")?.inputPerMillion == 1.90)
+        #expect(book.pricing(for: .kimi, model: nil)?.inputPerMillion == 0.95)
+
+        #expect(book.pricing(for: .grok, model: "grok-4.6")?.inputPerMillion == 2.0)
+        #expect(book.pricing(for: .grok, model: "grok-4.6")?.cacheReadPerMillion == 0.50)
+        #expect(book.pricing(for: .grok, model: "grok-4-6")?.outputPerMillion == 6.0)
+        #expect(book.pricing(for: .grok, model: "grok-4.20")?.inputPerMillion == 1.25)
+        #expect(book.pricing(for: .grok, model: "grok-4-20")?.outputPerMillion == 2.50)
+        #expect(book.pricing(for: .grok, model: "grok-code-fast-1")?.inputPerMillion == 1.0)
+
+        #expect(book.pricing(for: .codex, model: "gpt-5.2")?.inputPerMillion == 1.75)
+        #expect(book.pricing(for: .codex, model: "gpt-5.2")?.outputPerMillion == 14.0)
+        #expect(book.pricing(for: .codex, model: "gpt-5.2-pro")?.inputPerMillion == 21.0)
+        #expect(book.pricing(for: .codex, model: "gpt-5.2-pro")?.outputPerMillion == 168.0)
+
+        #expect(book.pricing(for: .deepseek, model: "deepseek-v4-pro-0813")?.inputPerMillion == 0.435)
+        #expect(book.pricing(for: .deepseek, model: "deepseek-v4-pro-0813")?.outputPerMillion == 0.87)
+    }
+
+    @Test("isCovered agrees with pricing lookup")
+    func isCoveredAgreesWithPricing() {
+        let book = TokenMeterPriceBook.defaults
+        let samples: [(TokenMeterProvider, String?)] = [
+            (.kimi, "kimi-k3"),
+            (.kimi, "kimi-k2.7-code"),
+            (.kimi, nil),
+            (.grok, "grok-4.6"),
+            (.codex, "gpt-5.2"),
+            (.claude, "claude-sonnet-4.5"),
+            (.claude, "claude-future-9"),
+            (.kimi, "kimi-unreleased-9"),
+        ]
+
+        for (provider, model) in samples {
+            #expect(book.isCovered(provider: provider, model: model) == (book.pricing(for: provider, model: model) != nil))
+        }
+    }
+
+    @Test("suggestedPricing is a prefill hint and never leaks into pricing")
+    func suggestedPricingDoesNotLeakIntoPricing() {
+        let book = TokenMeterPriceBook.defaults
+
+        let grokUnknown = "grok-4.7-fast"
+        let grokHint = book.suggestedPricing(for: .grok, model: grokUnknown)
+        #expect(grokHint == book.pricing(for: .grok, model: "grok-4.20"))
+        #expect(book.pricing(for: .grok, model: grokUnknown) == nil)
+        #expect(book.isCovered(provider: .grok, model: grokUnknown) == false)
+
+        // "kimi-k3-nightly" would substring-match the "kimi-k3" key; use a
+        // sibling that shares the k2 family without containing a priced id.
+        let kimiUnknown = "kimi-k2.8-code"
+        let kimiHint = book.suggestedPricing(for: .kimi, model: kimiUnknown)
+        #expect(kimiHint == book.pricing(for: .kimi, model: "kimi-k2.7-code-highspeed"))
+        #expect(book.pricing(for: .kimi, model: kimiUnknown) == nil)
+
+        let noFamily = "totally-unknown-model"
+        #expect(book.suggestedPricing(for: .kimi, model: noFamily) == book.pricing(for: .kimi, model: nil))
+        #expect(book.pricing(for: .kimi, model: noFamily) == nil)
+    }
+
+    @Test("uncoveredModels lists heaviest gaps and skips covered or zero usage")
+    func uncoveredModelsAreHeaviestFirst() {
+        let heavy = TokenMeterSummary(usage: TokenUsage(inputTokens: 1_000, outputTokens: 500))
+        let light = TokenMeterSummary(usage: TokenUsage(inputTokens: 10, outputTokens: 5))
+        let covered = TokenMeterSummary(usage: TokenUsage(inputTokens: 99_000, outputTokens: 1))
+        let zero = TokenMeterSummary(usage: TokenUsage())
+        let snapshot = TokenMeterSnapshot(
+            generatedAt: .distantPast,
+            overall: [:],
+            providers: [
+                .claude: [
+                    .day: TokenMeterSummary(models: ["mystery-heavy", "claude-sonnet-4.5", "mystery-zero"])
+                ],
+                .kimi: [
+                    .day: TokenMeterSummary(models: ["mystery-light"])
+                ],
+            ],
+            agents: [:],
+            models: [
+                "mystery-heavy": [.day: heavy],
+                "mystery-light": [.day: light],
+                "claude-sonnet-4.5": [.day: covered],
+                "mystery-zero": [.day: zero],
+            ]
+        )
+
+        let uncovered = snapshot.uncoveredModels(in: .day, priceBook: .defaults)
+        #expect(uncovered.map(\.model) == ["mystery-heavy", "mystery-light"])
+        #expect(uncovered.map(\.provider) == [.claude, .kimi])
+        #expect(uncovered[0].summary.usage.totalTokens == 1_500)
+        #expect(uncovered[1].summary.usage.totalTokens == 15)
+        #expect(uncovered.allSatisfy { $0.id == "\($0.provider.rawValue):\($0.model)" })
+    }
 }
 
 @Suite("LocalTokenMeter log adapters")

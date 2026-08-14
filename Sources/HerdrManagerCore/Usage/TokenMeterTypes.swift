@@ -208,6 +208,81 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
         return entries[provider.rawValue]
     }
 
+    /// Whether a logged model resolves to a price. Thin, deliberate wrapper over
+    /// `pricing(for:model:)` so callers asking a coverage question read as a
+    /// coverage question.
+    public func isCovered(provider: TokenMeterProvider, model: String?) -> Bool {
+        pricing(for: provider, model: model) != nil
+    }
+
+    /// A starting point for the price-entry form when a model has no price yet.
+    ///
+    /// This is a *prefill hint for a human to confirm*, never a price. It is not
+    /// consulted by `pricing(for:model:)` and cannot make an unpriced model show a
+    /// dollar figure: fabricating a rate the user never confirmed is exactly what
+    /// `pricing(for:model:)` refuses to do.
+    ///
+    /// Matching rule: consider this provider's scoped keys and unscoped model
+    /// keys (never another provider's scoped or bare-provider keys). Prefer the
+    /// longest key that shares a leading family fragment — the prefix through
+    /// the first digit run, so "grok-4.7-fast" and "grok-4.5" share "grok-4".
+    /// Equal-length keys break ties lexicographically, latest last. If no
+    /// family-mate exists, return the bare provider fallback, or nil.
+    public func suggestedPricing(for provider: TokenMeterProvider, model: String) -> TokenMeterPricing? {
+        let modelKey = model.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !modelKey.isEmpty else { return entries[provider.rawValue] }
+
+        let family = Self.familyPrefix(modelKey)
+        let scopedPrefix = "\(provider.rawValue):"
+        let providerKeys = Set(TokenMeterProvider.allCases.map(\.rawValue))
+        let providerScopedPrefixes = TokenMeterProvider.allCases.map { "\($0.rawValue):" }
+
+        let familyMatches = entries.compactMap { key, value -> (String, TokenMeterPricing)? in
+            let lower = key.lowercased()
+            let fragment: String
+            if lower.hasPrefix(scopedPrefix) {
+                fragment = String(lower.dropFirst(scopedPrefix.count))
+            } else if providerScopedPrefixes.contains(where: { lower.hasPrefix($0) }) {
+                return nil
+            } else if providerKeys.contains(lower) {
+                return nil
+            } else {
+                fragment = lower
+            }
+            guard !fragment.isEmpty, Self.familyPrefix(fragment) == family else {
+                return nil
+            }
+            return (fragment, value)
+        }
+        .sorted { lhs, rhs in
+            if lhs.0.count != rhs.0.count { return lhs.0.count > rhs.0.count }
+            return lhs.0 > rhs.0
+        }
+
+        if let match = familyMatches.first {
+            return match.1
+        }
+        return entries[provider.rawValue]
+    }
+
+    /// Leading family fragment: characters through the first run of digits.
+    /// "grok-4.7-fast", "grok-4.5", and "grok-4-6" all reduce to "grok-4".
+    static func familyPrefix(_ model: String) -> String {
+        var prefix = ""
+        var seenDigit = false
+        for character in model {
+            if character.isNumber {
+                seenDigit = true
+                prefix.append(character)
+            } else if seenDigit {
+                break
+            } else {
+                prefix.append(character)
+            }
+        }
+        return prefix
+    }
+
     public mutating func setProviderPricing(_ pricing: TokenMeterPricing, for provider: TokenMeterProvider) {
         entries[provider.rawValue] = pricing
     }
@@ -414,6 +489,25 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             cacheWrite1hPerMillion: 1.75,
             outputPerMillion: 14.0
         ),
+        // OpenAI GPT-5.2 short-context list rates, verified against
+        // https://platform.openai.com/docs/pricing (and the markdown
+        // equivalent at https://developers.openai.com/api/docs/pricing.md)
+        // on 2026-08-14. Must be listed explicitly: otherwise the "gpt-5"
+        // fragment would silently misprice it.
+        "gpt-5.2": TokenMeterPricing(
+            inputPerMillion: 1.75,
+            cacheReadPerMillion: 0.175,
+            cacheWrite5mPerMillion: 1.75,
+            cacheWrite1hPerMillion: 1.75,
+            outputPerMillion: 14.0
+        ),
+        "gpt-5.2-pro": TokenMeterPricing(
+            inputPerMillion: 21.0,
+            cacheReadPerMillion: 21.0,
+            cacheWrite5mPerMillion: 21.0,
+            cacheWrite1hPerMillion: 21.0,
+            outputPerMillion: 168.0
+        ),
         "gpt-5": TokenMeterPricing(
             inputPerMillion: 1.25,
             cacheReadPerMillion: 0.125,
@@ -438,6 +532,57 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             outputPerMillion: 12.0
         ),
 
+        // Moonshot / Kimi rates, verified against
+        // https://platform.kimi.ai/docs/pricing/chat-k3.md and
+        // https://platform.kimi.ai/docs/pricing/chat-k27-code.md on 2026-08-14.
+        // Cache-hit is billed as cache read; there is no separate cache-write
+        // tier, so writes use the cache-miss (input) rate. The provider
+        // fallback uses the K2.7 Code mid-tier coding rate.
+        "kimi-k3": TokenMeterPricing(
+            inputPerMillion: 3.0,
+            cacheReadPerMillion: 0.30,
+            cacheWrite5mPerMillion: 3.0,
+            cacheWrite1hPerMillion: 3.0,
+            outputPerMillion: 15.0
+        ),
+        "kimi-k2.7-code": TokenMeterPricing(
+            inputPerMillion: 0.95,
+            cacheReadPerMillion: 0.19,
+            cacheWrite5mPerMillion: 0.95,
+            cacheWrite1hPerMillion: 0.95,
+            outputPerMillion: 4.0
+        ),
+        // Dashed spelling of kimi-k2.7-code; CLIs log both forms.
+        "kimi-k2-7-code": TokenMeterPricing(
+            inputPerMillion: 0.95,
+            cacheReadPerMillion: 0.19,
+            cacheWrite5mPerMillion: 0.95,
+            cacheWrite1hPerMillion: 0.95,
+            outputPerMillion: 4.0
+        ),
+        "kimi-k2.7-code-highspeed": TokenMeterPricing(
+            inputPerMillion: 1.90,
+            cacheReadPerMillion: 0.38,
+            cacheWrite5mPerMillion: 1.90,
+            cacheWrite1hPerMillion: 1.90,
+            outputPerMillion: 8.0
+        ),
+        // Dashed spelling of kimi-k2.7-code-highspeed.
+        "kimi-k2-7-code-highspeed": TokenMeterPricing(
+            inputPerMillion: 1.90,
+            cacheReadPerMillion: 0.38,
+            cacheWrite5mPerMillion: 1.90,
+            cacheWrite1hPerMillion: 1.90,
+            outputPerMillion: 8.0
+        ),
+        "kimi": TokenMeterPricing(
+            inputPerMillion: 0.95,
+            cacheReadPerMillion: 0.19,
+            cacheWrite5mPerMillion: 0.95,
+            cacheWrite1hPerMillion: 0.95,
+            outputPerMillion: 4.0
+        ),
+
         // DeepSeek rates, verified against
         // https://api-docs.deepseek.com/quick_start/pricing on 2026-08-06.
         // DeepSeek has no separate cache-write tier; writes bill at the cache
@@ -460,6 +605,15 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             outputPerMillion: 0.28
         ),
         "deepseek-v4-pro": TokenMeterPricing(
+            inputPerMillion: 0.435,
+            cacheReadPerMillion: 0.003625,
+            cacheWrite5mPerMillion: 0.435,
+            cacheWrite1hPerMillion: 0.435,
+            outputPerMillion: 0.87
+        ),
+        // The -0813 suffix is the versioned snapshot id on DeepSeek's
+        // pricing page (DeepSeek-V4-Pro-0813); it prices identically to v4-pro.
+        "deepseek-v4-pro-0813": TokenMeterPricing(
             inputPerMillion: 0.435,
             cacheReadPerMillion: 0.003625,
             cacheWrite5mPerMillion: 0.435,
@@ -568,6 +722,38 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             inputPerMillion: 1.25,
             cacheReadPerMillion: 0.20,
             outputPerMillion: 2.50
+        ),
+        // xAI rates, verified against https://docs.x.ai/docs/models
+        // (__XAI_PUBLIC_MODELS__) on 2026-08-14. grok-4.6 cache-hit is $0.50,
+        // not the grok-4.5 $0.30 rate.
+        "grok-4.6": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 6.0
+        ),
+        // Dashed spelling of grok-4.6.
+        "grok-4-6": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 6.0
+        ),
+        "grok-4.20": TokenMeterPricing(
+            inputPerMillion: 1.25,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.50
+        ),
+        // Dashed spelling of grok-4.20.
+        "grok-4-20": TokenMeterPricing(
+            inputPerMillion: 1.25,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.50
+        ),
+        // Alias of grok-build-0.1; xAI lists grok-code-fast / grok-code-fast-1
+        // as aliases of that model.
+        "grok-code-fast": TokenMeterPricing(
+            inputPerMillion: 1.0,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.0
         ),
         "grok": TokenMeterPricing(
             inputPerMillion: 2.0,
@@ -753,5 +939,47 @@ public struct TokenMeterSnapshot: Equatable, Sendable {
 
     public func knownModels(for provider: TokenMeterProvider) -> [String] {
         Set(providers[provider]?.values.flatMap(\.models) ?? []).sorted()
+    }
+
+    /// Models with usage in this window that no price covers, heaviest first.
+    public func uncoveredModels(
+        in window: UsageWindow,
+        priceBook: TokenMeterPriceBook
+    ) -> [UncoveredModel] {
+        var seen: Set<String> = []
+        var result: [UncoveredModel] = []
+        for provider in TokenMeterProvider.allCases {
+            for model in knownModels(for: provider) {
+                let summary = modelSummary(for: model, window: window)
+                guard summary.hasUsage,
+                      !priceBook.isCovered(provider: provider, model: model) else {
+                    continue
+                }
+                let uncovered = UncoveredModel(provider: provider, model: model, summary: summary)
+                guard seen.insert(uncovered.id).inserted else { continue }
+                result.append(uncovered)
+            }
+        }
+        return result.sorted { lhs, rhs in
+            if lhs.summary.usage.totalTokens != rhs.summary.usage.totalTokens {
+                return lhs.summary.usage.totalTokens > rhs.summary.usage.totalTokens
+            }
+            return lhs.model < rhs.model
+        }
+    }
+}
+
+/// A model that has real logged usage but no configured price, with the volume
+/// behind it so the UI can put the expensive gaps first.
+public struct UncoveredModel: Equatable, Sendable, Identifiable {
+    public let provider: TokenMeterProvider
+    public let model: String
+    public let summary: TokenMeterSummary
+    public var id: String { "\(provider.rawValue):\(model)" }
+
+    public init(provider: TokenMeterProvider, model: String, summary: TokenMeterSummary) {
+        self.provider = provider
+        self.model = model
+        self.summary = summary
     }
 }

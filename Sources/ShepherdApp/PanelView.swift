@@ -191,9 +191,10 @@ struct PanelView: View {
         // "type to filter" works immediately; Esc drops to arrow-key triage
         // (the .onKeyPress handlers below already gate on searchFocused).
         .defaultFocus($searchFocused, !showingSetupChecklist)
-        .onChange(of: appModel.selectedAgentId) { _, _ in
-            resetExpansion()
-        }
+        // Expansion is reset in `onSelect` and `moveSelection`, not here.
+        // Peek / Nudge on an unselected tile select that tile as part of
+        // the same explicit action that opens the expansion; an `onChange`
+        // wipe would run after that action returns and cancel the peek.
     }
 
     /// What the current scope actually puts on screen, derived once.
@@ -326,7 +327,11 @@ struct PanelView: View {
         static let listCeilingHeight: CGFloat = 540
         static let emptyStateHeight: CGFloat = 260
         static let rowBaseHeight: CGFloat = 64
-        static let rowCostHeight: CGFloat = 16
+        /// Cost chip and the always-visible Peek/Jump/Nudge cluster share one
+        /// line on every tile. Sized to the small bordered buttons, not the
+        /// 10.5 pt caption: underestimating here clips the cluster on a short
+        /// list that hasn't yet hit the scroll ceiling.
+        static let rowCostHeight: CGFloat = 26
         static let rowActionsHeight: CGFloat = 40
         static let rowInlineHeight: CGFloat = 36
         static let groupHeaderHeight: CGFloat = 33
@@ -627,15 +632,15 @@ struct PanelView: View {
     }
 
     /// Height of one row: two text lines plus padding, and whatever the row
-    /// grows by while it is the selected/expanded one.
+    /// grows by while it is the selected/expanded one. Every tile now draws
+    /// the cost chip and Peek/Jump/Nudge on one shared line, so that height
+    /// is no longer gated on `hasUsage`.
     private func rowHeight(_ agent: Agent) -> CGFloat {
         var height = Layout.rowBaseHeight
         if let reason = agent.verdict.reasonText {
             height += reasonHeight(reason)
         }
-        if appModel.usageSnapshot.agentSummary(for: agent.id, window: .day).hasUsage {
-            height += Layout.rowCostHeight
-        }
+        height += Layout.rowCostHeight
         guard appModel.selectedAgentId == agent.id else { return height }
 
         height += Layout.rowActionsHeight
@@ -732,10 +737,18 @@ struct PanelView: View {
             dwellBucket: DwellBucket.current(for: agent, now: now),
             nudgeDraft: nudgeText,
             nudgeText: $nudgeText,
-            onSelect: { appModel.selectedAgentId = agent.id },
+            onSelect: {
+                // Clicking a different row must close the previous expansion.
+                // This used to live on `selectedAgentId` `onChange`; it cannot,
+                // because Peek/Nudge select as part of opening an expansion
+                // and that wipe would cancel them. Same-row clicks leave the
+                // expansion alone — matching the old onChange (no-op on equal).
+                if appModel.selectedAgentId != agent.id { resetExpansion() }
+                appModel.selectedAgentId = agent.id
+            },
             onJump: { jump(agent) },
             onPeekToggle: { togglePeek(agent) },
-            onNudgeOpen: { openNudge() },
+            onNudgeOpen: { openNudge(for: agent) },
             onNudgeSubmit: { submitNudge(agent) },
             onCloseRequest: { expansion = .closeConfirm },
             onCloseConfirm: { confirmClose(agent) },
@@ -1170,13 +1183,16 @@ struct PanelView: View {
         let visible = flatAgentsForKeyboardNav
         guard !visible.isEmpty else { return }
 
+        let newId: AgentID
         if let current = appModel.selectedAgentId,
            let idx = visible.firstIndex(where: { $0.id == current }) {
             let newIdx = up ? max(0, idx - 1) : min(visible.count - 1, idx + 1)
-            appModel.selectedAgentId = visible[newIdx].id
+            newId = visible[newIdx].id
         } else {
-            appModel.selectedAgentId = visible.first?.id
+            newId = visible[0].id
         }
+        if appModel.selectedAgentId != newId { resetExpansion() }
+        appModel.selectedAgentId = newId
     }
 
     private func jumpSelected() {
@@ -1201,6 +1217,17 @@ struct PanelView: View {
     // MARK: - Peek / Nudge / Close
 
     private func togglePeek(_ agent: Agent) {
+        // Expansion only renders on the selected row. Peek on another tile
+        // is an explicit action, so selecting that tile is not auto-focus —
+        // it is how the expansion has a place to appear. Switching agents
+        // is an open, not a toggle-closed of whoever was peeked before.
+        let alreadySelected = appModel.selectedAgentId == agent.id
+        if !alreadySelected {
+            appModel.selectedAgentId = agent.id
+            nudgeText = ""
+            beginPeekLoad(agent)
+            return
+        }
         if case .peek = expansion {
             expansion = .none
             return
@@ -1208,6 +1235,10 @@ struct PanelView: View {
         if case .peekLoading = expansion {
             return
         }
+        beginPeekLoad(agent)
+    }
+
+    private func beginPeekLoad(_ agent: Agent) {
         expansion = .peekLoading
         let paneId = agent.id.raw // herdr uses full session-qualified IDs (e.g. "w5:p2")
         Task {
@@ -1238,7 +1269,10 @@ struct PanelView: View {
         }
     }
 
-    private func openNudge() {
+    private func openNudge(for agent: Agent) {
+        if appModel.selectedAgentId != agent.id {
+            appModel.selectedAgentId = agent.id
+        }
         nudgeText = ""
         expansion = .nudge
     }

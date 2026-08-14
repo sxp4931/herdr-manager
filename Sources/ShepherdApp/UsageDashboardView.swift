@@ -20,6 +20,17 @@ struct UsageDashboardView: View {
     @State private var saveError: String?
     /// Transient confirmation after a successful pricing save.
     @State private var saveNotice: String?
+    /// Set by "Set price" so the provider picker's onChange does not wipe the
+    /// model id we are about to load. See `onChange(of: pricingProvider)`.
+    @State private var coverWorkflowModel: String?
+    /// Non-nil while the editor holds a provider-fallback suggestion that has
+    /// not been saved — distinct from a loaded saved rate.
+    @State private var pricingSuggestion: PricingSuggestion?
+    @State private var pricingScrollToken = 0
+    @FocusState private var pricingFocus: PricingFocus?
+
+    private static let pricingSectionID = "pricing-editor"
+    private static let uncoveredListCap = 5
 
     /// The dashboard is taller than the triage panel; cap it to the screen so
     /// a small or scaled display never clips the pricing section behind the
@@ -37,15 +48,29 @@ struct UsageDashboardView: View {
             modelPicker
             Divider()
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    overallCard
-                    modelSection
-                    providerSection
-                    agentSection
-                    pricingSection
-                    explanation
+                ScrollViewReader { proxy in
+                    VStack(alignment: .leading, spacing: 12) {
+                        overallCard
+                        modelSection
+                        providerSection
+                        agentSection
+                        uncoveredSection
+                        pricingSection
+                            .id(Self.pricingSectionID)
+                        explanation
+                    }
+                    .padding(14)
+                    .onChange(of: pricingScrollToken) { _, _ in
+                        // DisclosureGroup lays out its fields a beat after
+                        // `showPricing` flips; scrolling or focusing earlier
+                        // lands on the collapsed header.
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .milliseconds(80))
+                            proxy.scrollTo(Self.pricingSectionID, anchor: .top)
+                            pricingFocus = .inputPrice
+                        }
+                    }
                 }
-                .padding(14)
             }
             .frame(maxHeight: .infinity)
         }
@@ -58,6 +83,15 @@ struct UsageDashboardView: View {
             modelFilter = nil
         }
         .onChange(of: pricingProvider) { _, _ in
+            // "Set price" assigns provider then model in one gesture. This
+            // handler is the picker path and would otherwise clear
+            // `pricingModelKey` before the model id is applied.
+            if let model = coverWorkflowModel {
+                coverWorkflowModel = nil
+                pricingModelKey = model
+                loadSuggestedFallbackPricing()
+                return
+            }
             pricingModelKey = ""
             loadPricingFields()
         }
@@ -82,6 +116,7 @@ struct UsageDashboardView: View {
                 Text("API-equivalent list-price estimate")
                     .font(.system(size: 11))
                     .foregroundStyle(Brand.secondaryText)
+                freshnessLabel
             }
             Spacer(minLength: 8)
             Button {
@@ -98,6 +133,21 @@ struct UsageDashboardView: View {
         .padding(.horizontal, 14)
         .padding(.top, 13)
         .padding(.bottom, 11)
+    }
+
+    private var freshnessLabel: some View {
+        let generatedAt = appModel.usageSnapshot.generatedAt
+        let isUnread = generatedAt == .distantPast
+        return Label(
+            UsageFormatter.freshness(generatedAt),
+            systemImage: isUnread ? "questionmark.circle" : "clock"
+        )
+        .font(.system(size: 10))
+        .foregroundStyle(Brand.secondaryText)
+        .labelStyle(.titleAndIcon)
+        .help(isUnread
+              ? "No usage snapshot has been read yet"
+              : "When this usage snapshot was generated")
     }
 
     private var windowPicker: some View {
@@ -123,6 +173,21 @@ struct UsageDashboardView: View {
                     .modelSummary(for: right, window: window).costUSD ?? 0
                 return leftCost > rightCost
             }
+    }
+
+    /// Window total used as the share bar's single denominator. Nil or zero
+    /// means there is nothing honest to proportion against — no bar, no %.
+    private var windowCostUSD: Double? {
+        appModel.usageSnapshot.overallSummary(for: window).costUSD
+    }
+
+    private func costShare(for summary: TokenMeterSummary) -> Double? {
+        guard let cost = summary.costUSD,
+              let total = windowCostUSD,
+              total > 0 else {
+            return nil
+        }
+        return min(1, max(0, cost / total))
     }
 
     private var modelPicker: some View {
@@ -164,7 +229,7 @@ struct UsageDashboardView: View {
             summary = appModel.usageSnapshot.overallSummary(for: window)
         }
         return VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .top, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(modelFilter ?? "All local activity")
                         .font(.system(size: 12, weight: .semibold))
@@ -174,14 +239,23 @@ struct UsageDashboardView: View {
                         .font(.system(size: 11))
                         .foregroundStyle(Brand.secondaryText)
                 }
-                Spacer()
-                Text(UsageFormatter.cost(summary))
-                    .font(.system(size: 22, weight: .bold, design: .rounded))
-                    .foregroundStyle(Brand.amber)
+                Spacer(minLength: 8)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(UsageFormatter.cost(summary))
+                        .font(.system(size: 26, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(Brand.amber)
+                        .minimumScaleFactor(0.65)
+                        .lineLimit(1)
+                    Text("Estimate — not a bill")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Brand.secondaryText)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(
+                    "\(UsageFormatter.cost(summary)), estimate, not a bill"
+                )
             }
-            Text("Estimate — not a bill")
-                .font(.system(size: 10))
-                .foregroundStyle(Brand.secondaryText)
             HStack(spacing: 12) {
                 Label(UsageFormatter.tokens(summary.usage.totalTokens), systemImage: "number")
                 Label("\(summary.sessions) sessions", systemImage: "rectangle.stack")
@@ -202,9 +276,12 @@ struct UsageDashboardView: View {
                         .lineLimit(2)
                 }
                 if summary.hasUnpricedUsage {
-                    Text("One or more logged models have no configured price.")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Brand.warn)
+                    Label(
+                        "One or more logged models have no configured price.",
+                        systemImage: "tag.slash"
+                    )
+                    .font(.system(size: 10))
+                    .foregroundStyle(Brand.warn)
                 }
             } else {
                 Text("No supported local session usage found in this window.")
@@ -233,13 +310,16 @@ struct UsageDashboardView: View {
                     .foregroundStyle(Brand.secondaryText)
                     .padding(.vertical, 4)
             } else {
-                ForEach(models, id: \.self) { model in
-                    UsageSummaryRow(
-                        title: model,
-                        subtitle: UsageFormatter.tokenBreakdown(
-                            appModel.usageSnapshot.modelSummary(for: model, window: window)
-                        ),
-                        summary: appModel.usageSnapshot.modelSummary(for: model, window: window)
+                ForEach(Array(models.enumerated()), id: \.element) { index, model in
+                    let summary = appModel.usageSnapshot
+                        .modelSummary(for: model, window: window)
+                    ModelUsageRow(
+                        rank: index + 1,
+                        model: model,
+                        subtitle: UsageFormatter.tokenBreakdown(summary),
+                        summary: summary,
+                        share: costShare(for: summary),
+                        isLeading: index == 0
                     )
                 }
             }
@@ -305,6 +385,91 @@ struct UsageDashboardView: View {
         }
     }
 
+    /// Logged models with usage in this window and no model-specific price.
+    /// They drop out of the dollar total until the user covers them.
+    private var uncoveredModels: [UncoveredModel] {
+        var seen: Set<String> = []
+        var result: [UncoveredModel] = []
+        for provider in TokenMeterProvider.allCases {
+            for model in appModel.usageSnapshot.knownModels(for: provider) {
+                let key = "\(provider.rawValue):\(model)"
+                guard seen.insert(key).inserted else { continue }
+                let summary = appModel.usageSnapshot.modelSummary(for: model, window: window)
+                guard summary.hasUsage,
+                      appModel.tokenMeterPriceBook.pricing(for: provider, model: model) == nil
+                else { continue }
+                result.append(UncoveredModel(provider: provider, model: model, summary: summary))
+            }
+        }
+        return result.sorted {
+            if $0.summary.usage.totalTokens != $1.summary.usage.totalTokens {
+                return $0.summary.usage.totalTokens > $1.summary.usage.totalTokens
+            }
+            if $0.model != $1.model {
+                return $0.model < $1.model
+            }
+            return $0.provider.rawValue < $1.provider.rawValue
+        }
+    }
+
+    @ViewBuilder
+    private var uncoveredSection: some View {
+        let uncovered = uncoveredModels
+        if !uncovered.isEmpty {
+            let visible = Array(uncovered.prefix(Self.uncoveredListCap))
+            let remaining = uncovered.count - visible.count
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Not yet priced", systemImage: "tag.slash")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Brand.warn)
+                Text("These models appear in the logs but have no configured price, so they are left out of the dollar total.")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Brand.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(visible) { item in
+                    HStack(alignment: .center, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.model)
+                                .font(.system(size: 12, weight: .semibold))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .help(item.model)
+                            Text("\(item.provider.displayName) · \(UsageFormatter.tokens(item.summary.usage.totalTokens)) tokens")
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundStyle(Brand.secondaryText)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Spacer(minLength: 8)
+                        Button("Set price") {
+                            beginCoverPricing(provider: item.provider, model: item.model)
+                        }
+                        .controlSize(.small)
+                        .accessibilityLabel("Set price for \(item.model)")
+                        .help("Open the pricing editor with a suggested starting point for \(item.model)")
+                    }
+                }
+                if remaining > 0 {
+                    Text("+\(remaining) more")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(Brand.secondaryText)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Brand.warn.opacity(0.09))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Brand.warn.opacity(0.25), lineWidth: 1)
+            )
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Not yet priced")
+        }
+    }
+
     private var pricingSection: some View {
         DisclosureGroup("Configure model prices and fallbacks", isExpanded: $showPricing) {
             VStack(alignment: .leading, spacing: 8) {
@@ -315,6 +480,7 @@ struct UsageDashboardView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
+                .accessibilityLabel("Provider")
 
                 HStack(spacing: 6) {
                     TextField(
@@ -324,6 +490,7 @@ struct UsageDashboardView: View {
                     .textFieldStyle(.roundedBorder)
                     Button("Load") { loadPricingFields() }
                         .controlSize(.small)
+                        .accessibilityLabel("Load saved price")
                 }
 
                 let detectedModels = appModel.usageSnapshot.knownModels(for: pricingProvider)
@@ -341,14 +508,23 @@ struct UsageDashboardView: View {
                                     }
                                     .buttonStyle(.link)
                                     .font(.system(size: 10, design: .monospaced))
+                                    .accessibilityLabel("Load \(model)")
                                 }
                             }
                         }
                     }
                 }
 
+                if let pricingSuggestion {
+                    Label(pricingSuggestion.message, systemImage: "lightbulb")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Brand.warn)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityLabel(pricingSuggestion.message)
+                }
+
                 HStack(spacing: 6) {
-                    priceField("Input", text: $inputPrice)
+                    priceField("Input", text: $inputPrice, focus: .inputPrice)
                     priceField("Cache read", text: $cacheReadPrice)
                     priceField("5m write", text: $cacheWrite5mPrice)
                     priceField("1h write", text: $cacheWrite1hPrice)
@@ -370,6 +546,7 @@ struct UsageDashboardView: View {
                     Spacer()
                     Button("Save") { savePricing() }
                         .controlSize(.small)
+                        .accessibilityLabel("Save prices")
                 }
             }
             .padding(.top, 6)
@@ -381,10 +558,15 @@ struct UsageDashboardView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("How this is counted")
                 .font(.system(size: 11.5, weight: .semibold))
-            Text("Reads local CLI logs only. A tilde means the source logged totals without an input/output split; “partial” means a model price is missing. Subscription marginal cost is still $0—the dollar figure is what the same tokens would cost at the configured API list rates.")
-                .font(.system(size: 10.5))
-                .foregroundStyle(Brand.secondaryText)
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Reads local CLI logs only.")
+                Text("A tilde means the source logged totals without an input/output split.")
+                Text("“partial” means a model price is missing.")
+                Text("Subscription marginal cost is still $0 — the dollar figure is what the same tokens would cost at the configured API list rates.")
+            }
+            .font(.system(size: 10.5))
+            .foregroundStyle(Brand.secondaryText)
+            .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.top, 3)
     }
@@ -396,38 +578,90 @@ struct UsageDashboardView: View {
             .foregroundStyle(Brand.secondaryText)
     }
 
-    private func priceField(_ label: String, text: Binding<String>) -> some View {
+    private func priceField(
+        _ label: String,
+        text: Binding<String>,
+        focus: PricingFocus? = nil
+    ) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label)
                 .font(.system(size: 10))
                 .foregroundStyle(Brand.secondaryText)
                 .lineLimit(1)
-            TextField("0", text: text)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 10.5, design: .monospaced))
-                .frame(width: 72)
+            Group {
+                if let focus {
+                    TextField("0", text: text)
+                        .focused($pricingFocus, equals: focus)
+                } else {
+                    TextField("0", text: text)
+                }
+            }
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 10.5, design: .monospaced))
+            .frame(width: 72)
+            .accessibilityLabel("\(label) price per million tokens")
         }
+    }
+
+    /// Jump the editor to an uncovered model and prefill the provider
+    /// fallback as a suggestion — never as an applied rate.
+    private func beginCoverPricing(provider: TokenMeterProvider, model: String) {
+        saveError = nil
+        saveNotice = nil
+        showPricing = true
+        if pricingProvider == provider {
+            coverWorkflowModel = nil
+            pricingModelKey = model
+            loadSuggestedFallbackPricing()
+        } else {
+            coverWorkflowModel = model
+            pricingProvider = provider
+        }
+        pricingScrollToken += 1
+    }
+
+    private func loadSuggestedFallbackPricing() {
+        saveNotice = nil
+        guard let pricing = appModel.tokenMeterPriceBook.pricing(
+            for: pricingProvider,
+            model: nil
+        ) else {
+            clearPricingFields()
+            pricingSuggestion = .noneAvailable
+            return
+        }
+        applyPricingToFields(pricing)
+        pricingSuggestion = .providerFallback
     }
 
     private func loadPricingFields() {
         saveNotice = nil
+        pricingSuggestion = nil
         let model = pricingModelKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let pricing = appModel.tokenMeterPriceBook.pricing(
             for: pricingProvider,
             model: model.isEmpty ? nil : model
         ) else {
-            inputPrice = ""
-            cacheReadPrice = ""
-            cacheWrite5mPrice = ""
-            cacheWrite1hPrice = ""
-            outputPrice = ""
+            clearPricingFields()
             return
         }
+        applyPricingToFields(pricing)
+    }
+
+    private func applyPricingToFields(_ pricing: TokenMeterPricing) {
         inputPrice = String(pricing.inputPerMillion)
         cacheReadPrice = String(pricing.cacheReadPerMillion)
         cacheWrite5mPrice = String(pricing.cacheWrite5mPerMillion)
         cacheWrite1hPrice = String(pricing.cacheWrite1hPerMillion)
         outputPrice = String(pricing.outputPerMillion)
+    }
+
+    private func clearPricingFields() {
+        inputPrice = ""
+        cacheReadPrice = ""
+        cacheWrite5mPrice = ""
+        cacheWrite1hPrice = ""
+        outputPrice = ""
     }
 
     private func savePricing() {
@@ -458,11 +692,146 @@ struct UsageDashboardView: View {
                 pricing: pricing
             )
         }
+        pricingSuggestion = nil
         saveNotice = "Saved"
         Task {
             try? await Task.sleep(for: .seconds(2))
             if saveNotice == "Saved" { saveNotice = nil }
         }
+    }
+}
+
+private enum PricingFocus: Hashable {
+    case inputPrice
+}
+
+/// Prefill source for the cover-this-model editor. Neither case is a saved rate.
+private enum PricingSuggestion {
+    case providerFallback
+    case noneAvailable
+
+    var message: String {
+        switch self {
+        case .providerFallback:
+            return "Suggested starting point from the provider fallback — not applied to any figure until you Save."
+        case .noneAvailable:
+            return "No provider fallback is configured. Enter list rates and Save to cover this model."
+        }
+    }
+}
+
+private struct UncoveredModel: Identifiable {
+    let provider: TokenMeterProvider
+    let model: String
+    let summary: TokenMeterSummary
+
+    var id: String { "\(provider.rawValue):\(model)" }
+}
+
+private struct ModelUsageRow: View {
+    let rank: Int
+    let model: String
+    let subtitle: String
+    let summary: TokenMeterSummary
+    let share: Double?
+    let isLeading: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text("\(rank)")
+                .font(.system(
+                    size: isLeading ? 13 : 11,
+                    weight: isLeading ? .bold : .semibold,
+                    design: .rounded
+                ))
+                .monospacedDigit()
+                .foregroundStyle(isLeading ? Brand.amber : Brand.secondaryText)
+                .frame(width: 18, alignment: .trailing)
+                .accessibilityLabel("Rank \(rank)")
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model)
+                    .font(.system(
+                        size: isLeading ? 13.5 : 12,
+                        weight: isLeading ? .bold : .semibold
+                    ))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(model)
+                Text(subtitle)
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(Brand.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(subtitle)
+            }
+
+            Spacer(minLength: 8)
+
+            VStack(alignment: .trailing, spacing: 4) {
+                if summary.costUSD != nil {
+                    Text(UsageFormatter.cost(summary))
+                        .font(.system(
+                            size: isLeading ? 14 : 12.5,
+                            weight: isLeading ? .bold : .semibold,
+                            design: .rounded
+                        ))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                } else {
+                    Label("price missing", systemImage: "tag.slash")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Brand.warn)
+                        .labelStyle(.titleAndIcon)
+                }
+
+                if let share {
+                    HStack(spacing: 6) {
+                        if share > 0 {
+                            CostShareBar(share: share)
+                        }
+                        Text(UsageFormatter.costSharePercent(share))
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(Brand.secondaryText)
+                            .monospacedDigit()
+                            .frame(minWidth: 28, alignment: .trailing)
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(
+                        "\(UsageFormatter.costSharePercent(share)) of window cost"
+                    )
+                }
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, isLeading ? 9 : 7)
+        .background(Color.primary.opacity(isLeading ? 0.07 : 0.045))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Track width is fixed so every row's 100% is the same number of points.
+/// The fill is proportional to the window total; a nil/zero total never
+/// reaches this view, so we never draw a full bar for "unknown".
+private struct CostShareBar: View {
+    let share: Double
+
+    private static let width: CGFloat = 72
+    private static let height: CGFloat = 6
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.primary.opacity(0.10))
+                Capsule()
+                    .fill(Brand.amber)
+                    .frame(width: max(2, geo.size.width * share))
+            }
+        }
+        .frame(width: Self.width, height: Self.height)
+        .accessibilityHidden(true)
     }
 }
 
@@ -500,6 +869,7 @@ private struct UsageSummaryRow: View {
             Spacer(minLength: 8)
             Text(UsageFormatter.cost(summary))
                 .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                .monospacedDigit()
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 7)

@@ -59,4 +59,31 @@ enum UsageFormatter {
         guard !summary.models.isEmpty else { return nil }
         return summary.models.joined(separator: " · ")
     }
+
+    /// Snapshot freshness for the dashboard header. `.distantPast` is the
+    /// empty-snapshot sentinel; printing it would show a year-1 date.
+    static func freshness(_ generatedAt: Date) -> String {
+        guard generatedAt != .distantPast else {
+            return "Usage has not been read yet"
+        }
+        return "as of \(timeFormatter.string(from: generatedAt))"
+    }
+
+    /// Share of the window's priced total. The printed percent is the signal;
+    /// a bar next to it is only a visual echo of this number.
+    static func costSharePercent(_ fraction: Double) -> String {
+        let percent = max(0, min(1, fraction)) * 100
+        if percent > 0 && percent < 1 {
+            return "<1%"
+        }
+        return String(format: "%.0f%%", percent.rounded())
+    }
+
+    /// User's locale time — 12/24-hour, not a hardcoded "HH:MM" pattern.
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter
+    }()
 }

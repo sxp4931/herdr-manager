@@ -88,6 +88,18 @@ enum DwellBucket: Equatable {
     }
 }
 
+/// What one tile's cost chip prints. Four states, none of them a
+/// fabricated `$0.00`. Kept next to `DwellBucket` because it is the same
+/// kind of value: a presentation reading captured from data the row
+/// already holds, not a new stored input `AgentRow.==` would have to see.
+private struct CostFace {
+    let text: String
+    let symbol: String?
+    let color: Color
+    let help: String
+    let spoken: String
+}
+
 struct AgentRow: View, Equatable {
     @Environment(AppModel.self) private var appModel
     let agent: Agent
@@ -193,11 +205,61 @@ struct AgentRow: View, Equatable {
 
     /// Takes the state and dwell figure the row is actually rendering rather
     /// than re-deriving them, so the sighted and spoken versions of a row
-    /// always quote the same state and the same number.
+    /// always quote the same state and the same number. Cost is always
+    /// spoken, including the two unknown cases: fabricating silence here
+    /// would make VoiceOver less honest than the chip.
     private func accessibilityDescription(face: Brand.StateFace, dwell: String) -> String {
         let reason = agent.verdict.reasonText ?? "no issues"
-        let cost = dailyCost.hasUsage ? ", today \(UsageFormatter.cost(dailyCost)) API equivalent" : ""
-        return "\(titleText), \(kindLabel), \(face.word), \(dwell)\(cost), \(reason)"
+        return "\(titleText), \(kindLabel), \(face.word), \(dwell), \(costFace.spoken), \(reason)"
+    }
+
+    /// The four honest readings of today's cost. Unknown is unknown: a
+    /// missing price is never printed as `$0.00`, and an agent with no local
+    /// log is told apart from one that spent nothing. Each case carries a
+    /// word, a colour, and (where it is a warning) a glyph, so none of them
+    /// is hue-only. Derived from `dailyCost`, which `==` already compares —
+    /// this is not a stored property, and must not become one, or it would
+    /// have to be listed in `==` for a value the row already sees change.
+    private var costFace: CostFace {
+        let estimateHelp = "API list-price estimate, not a bill. Shepherd prices local CLI session logs at configured rates."
+        if !dailyCost.hasUsage {
+            return CostFace(
+                text: "no local log",
+                symbol: nil,
+                color: Brand.secondaryText,
+                help: "No local log. Shepherd only reads local CLI session logs, and cannot see this agent's tokens.",
+                spoken: "no local log"
+            )
+        }
+        if dailyCost.costUSD == nil {
+            return CostFace(
+                text: "price missing",
+                symbol: "exclamationmark.triangle.fill",
+                color: Brand.warn,
+                help: estimateHelp,
+                spoken: "price missing"
+            )
+        }
+        // `UsageFormatter.cost` already appends "partial" when some models
+        // are unpriced; that is the same plain-word incomplete marker the
+        // usage dashboard uses, so the chip does not invent a second one.
+        let figure = UsageFormatter.cost(dailyCost)
+        if dailyCost.hasUnpricedUsage {
+            return CostFace(
+                text: "\(figure) today incomplete",
+                symbol: "exclamationmark.triangle.fill",
+                color: Brand.warn,
+                help: estimateHelp,
+                spoken: "today \(figure) API equivalent, incomplete"
+            )
+        }
+        return CostFace(
+            text: "\(figure) today",
+            symbol: "chart.line.uptrend.xyaxis",
+            color: Brand.amber,
+            help: estimateHelp,
+            spoken: "today \(figure) API equivalent"
+        )
     }
 
     /// The state as a tinted chip rather than plain grey text — at a glance the
@@ -247,11 +309,18 @@ struct AgentRow: View, Equatable {
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .help(titleText)
+                        // The row container already speaks title, state, dwell
+                        // and cost as one summary; repeating each fragment as
+                        // its own VoiceOver stop would make thirty tiles
+                        // unnavigable. Buttons stay exposed — see `.contain`.
+                        .accessibilityHidden(true)
                     Spacer(minLength: 8)
                     statePill(face: face)
+                        .accessibilityHidden(true)
                     Text(dwellText)
                         .font(.system(size: 11.5, weight: dwell.weight, design: .monospaced))
                         .foregroundStyle(dwell.color)
+                        .accessibilityHidden(true)
                         // Says what the figure measures without naming a state
                         // that would contradict the rest of the row. This is
                         // time in herdr's *status*, which for a silent or gone
@@ -275,6 +344,7 @@ struct AgentRow: View, Equatable {
                         .foregroundStyle(reasonColor)
                         .lineLimit(2)
                         .help(reason)
+                        .accessibilityHidden(true)
                 }
 
                 // Line 3: workspace · tab · ~cwd-basename.
@@ -285,20 +355,20 @@ struct AgentRow: View, Equatable {
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .help(locationLine)
+                        .accessibilityHidden(true)
                 }
 
-                if dailyCost.hasUsage {
-                    HStack(spacing: 5) {
-                        Image(systemName: "chart.line.uptrend.xyaxis")
-                        Text("Today \(UsageFormatter.cost(dailyCost)) API equivalent")
-                            .lineLimit(1)
-                    }
-                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                    .foregroundStyle(Brand.amber)
+                // Line 4: cost chip (every tile, so the figures form a
+                // column) and the always-visible Peek / Jump / Nudge cluster.
+                // One cluster only — selected rows do not redraw these three.
+                HStack(alignment: .center, spacing: 8) {
+                    costChip
+                    Spacer(minLength: 8)
+                    primaryActionCluster
                 }
 
                 if isSelected {
-                    actionRow
+                    selectedActionRow
                     expansionView
                 }
             }
@@ -322,8 +392,13 @@ struct AgentRow: View, Equatable {
         .contentShape(Rectangle())
         .onHover { hovering in isHovering = hovering }
         .background(ClickCatcher(onSelect: onSelect, onDoubleClick: onJump))
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
+        // `.contain` (not `.combine`): Peek / Jump / Nudge now live on every
+        // tile, and flattening the row into one element would swallow them.
+        // The container still speaks the summary; each button stays its own
+        // reachable, labelled control. `.isButton` is deliberately omitted —
+        // a group that is also a button is a VoiceOver trap that hides
+        // children. Select remains an explicit `accessibilityAction`.
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityDescription(face: face, dwell: dwellText))
         .accessibilityHint("Double-click to jump to this agent")
         .accessibilityAction { onSelect() }
@@ -337,10 +412,74 @@ struct AgentRow: View, Equatable {
         }
     }
 
-    // MARK: - Action row (selected row only)
+    // MARK: - Cost chip (every tile)
+
+    private var costChip: some View {
+        let face = costFace
+        return HStack(spacing: 4) {
+            if let symbol = face.symbol {
+                Image(systemName: symbol)
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            Text(face.text)
+                .lineLimit(1)
+        }
+        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+        .monospacedDigit()
+        .foregroundStyle(face.color)
+        .help(face.help)
+        .accessibilityHidden(true)
+    }
+
+    // MARK: - Primary actions (every tile)
+
+    /// Peek / Jump / Nudge, always. Resting emphasis is quiet so thirty
+    /// copies do not drown the status signal; hover and selection lift the
+    /// labels to primary without dropping the resting state below AA —
+    /// `Brand.secondaryText` is already the AA-safe grey, and opacity is
+    /// not reduced on top of it. These sit in the content tree above
+    /// `ClickCatcher`, so their mouse-downs should hit the buttons, not
+    /// the row: a Peek click must not also select-via-catcher, and a
+    /// double-click on Peek must not jump.
+    private var primaryActionCluster: some View {
+        let live = isHovering || isSelected
+        let rest = live ? Color.primary : Brand.secondaryText
+        return HStack(spacing: 5) {
+            Button { onPeekToggle() } label: {
+                Label("Peek", systemImage: "eye")
+                    .foregroundStyle(rest)
+            }
+            .help("Show the last 20 lines of this pane")
+
+            Button { onJump() } label: {
+                Label("Jump", systemImage: "arrow.right.to.line")
+                    // Dimmed by hand while a write is in flight: an explicit
+                    // `foregroundStyle` wins over the button style's own
+                    // disabled treatment, so without this Jump would look
+                    // live while refusing every click. Same trap as Deny.
+                    .foregroundStyle(writeInFlight ? Brand.secondaryText.opacity(0.4) : rest)
+            }
+            .disabled(writeInFlight)
+            .help("Focus this agent's workspace and pane")
+
+            Button { onNudgeOpen() } label: {
+                Label("Nudge", systemImage: "bubble.left")
+                    .foregroundStyle(writeInFlight ? Brand.secondaryText.opacity(0.4) : rest)
+            }
+            .disabled(writeInFlight)
+            .help("Send a message to this agent")
+        }
+        .labelStyle(.titleAndIcon)
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .font(.system(size: 11, weight: live ? .semibold : .medium))
+        .fixedSize()
+    }
+
+    // MARK: - Selected-only actions (Approve / Deny / overflow)
 
     @ViewBuilder
-    private var actionRow: some View {
+    private var selectedActionRow: some View {
         HStack(spacing: 7) {
             if agent.verdict.isAwaitingInput {
                 // Approve and Deny used to be two filled buttons that differed
@@ -377,17 +516,6 @@ struct AgentRow: View, Equatable {
                 .disabled(writeInFlight)
                 .help("Sends Esc to dismiss the prompt")
             }
-            Button("Peek") { onPeekToggle() }
-                .buttonStyle(.bordered)
-                .help("Show the last 20 lines of this pane")
-            Button("Jump") { onJump() }
-                .buttonStyle(.bordered)
-                .disabled(writeInFlight)
-                .help("Focus this agent's workspace and pane")
-            Button("Nudge") { onNudgeOpen() }
-                .buttonStyle(.bordered)
-                .disabled(writeInFlight)
-                .help("Send a message to this agent")
             Spacer(minLength: 0)
             Menu {
                 Button("Close agent", role: .destructive) { onCloseRequest() }
