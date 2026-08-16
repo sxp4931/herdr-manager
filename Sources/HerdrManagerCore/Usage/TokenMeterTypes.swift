@@ -38,8 +38,9 @@ public enum TokenMeterProvider: String, Codable, CaseIterable, Hashable, Identif
         case "claude", "claude-code", "claude_code", "anthropic": self = .claude
         case "codex", "openai": self = .codex
         case "kimi", "kimi-code", "kimi_code": self = .kimi
-        case "grok", "xai": self = .grok
-        case "cursor", "cursor-agent", "cursor_agent": self = .cursor
+        case "grok", "grok-build", "grok-build-plan", "grok-cli", "grok-code", "xai":
+            self = .grok
+        case "cursor", "cursor-cli", "cursor-agent", "cursor_agent": self = .cursor
         case "deepseek", "deepseek-r1", "deepseek_v3": self = .deepseek
         case "qwen", "alibaba", "dashscope", "qwen-coder": self = .qwen
         default: return nil
@@ -758,6 +759,17 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             outputPerMillion: 6.0
         ),
         "cursor-grok-4-6-high": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 6.0
+        ),
+        // Cursor CLI `stop` hook logs `cursor-grok-4.6-high-fast`.
+        "cursor-grok-4.6-high-fast": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 6.0
+        ),
+        "cursor-grok-4-6-high-fast": TokenMeterPricing(
             inputPerMillion: 2.0,
             cacheReadPerMillion: 0.50,
             outputPerMillion: 6.0

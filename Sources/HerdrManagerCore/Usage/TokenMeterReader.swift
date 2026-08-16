@@ -355,29 +355,49 @@ public actor LocalTokenMeter {
 
     private func scanGrokUpdates(_ file: URL, cwd: String?) -> [TokenUsageEvent] {
         guard let contents = try? String(contentsOf: file, encoding: .utf8) else { return [] }
+        let session = file.deletingLastPathComponent()
+        let sessionMeta = grokSessionMeta(at: session)
+        let cwd = sessionMeta.cwd ?? cwd
         let fallbackDate = modificationDate(of: file)
         var records: [String: (total: Int64, date: Date, model: String?)] = [:]
+        var lastSeenModel: String?
         var lineNumber = 0
         for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
             defer { lineNumber += 1 }
             guard let data = String(line).data(using: .utf8),
                   let object = try? JSONSerialization.jsonObject(with: data),
                   let record = object as? [String: Any],
-                  let params = record["params"] as? [String: Any],
-                  let metadata = params["_meta"] as? [String: Any],
-                  let total = integerOptional(metadata["totalTokens"]),
-                  total > 0 else { continue }
-            let promptID = (metadata["promptId"] as? String) ?? "line-\(lineNumber)"
-            let date = epochDate(metadata["agentTimestampMs"] ?? metadata["turnStartMs"], milliseconds: true)
-                ?? fallbackDate
-            let model = params["model"] as? String
-            if let existing = records[promptID], existing.total > total {
+                  let params = record["params"] as? [String: Any] else {
                 continue
             }
-            records[promptID] = (total: total, date: date, model: model)
+
+            if let lineModel = grokModel(fromParams: params) {
+                lastSeenModel = lineModel
+            }
+
+            guard let metadata = params["_meta"] as? [String: Any],
+                  let total = integerOptional(metadata["totalTokens"]),
+                  total > 0 else {
+                continue
+            }
+            let promptID = nonEmptyString(metadata["promptId"]) ?? "line-\(lineNumber)"
+            let date = epochDate(metadata["agentTimestampMs"] ?? metadata["turnStartMs"], milliseconds: true)
+                ?? fallbackDate
+            let model = lastSeenModel ?? sessionMeta.model
+            if let existing = records[promptID] {
+                if existing.total > total {
+                    if existing.model == nil, let model {
+                        records[promptID] = (total: existing.total, date: existing.date, model: model)
+                    }
+                    continue
+                }
+                records[promptID] = (total: total, date: date, model: existing.model ?? model)
+            } else {
+                records[promptID] = (total: total, date: date, model: model)
+            }
         }
 
-        let sessionID = file.deletingLastPathComponent().lastPathComponent
+        let sessionID = session.lastPathComponent
         return records.map { promptID, record in
             TokenUsageEvent(
                 id: "grok:\(sessionID):\(promptID)",
@@ -391,15 +411,85 @@ public actor LocalTokenMeter {
         }.sorted { $0.date < $1.date }
     }
 
+    private func grokModel(fromParams params: [String: Any]) -> String? {
+        if let model = nonEmptyString(params["model"]) {
+            return model
+        }
+        if let metadata = params["_meta"] as? [String: Any],
+           let model = nonEmptyString(metadata["modelId"]) ?? nonEmptyString(metadata["model"]) {
+            return model
+        }
+        guard let update = params["update"] as? [String: Any] else {
+            return nil
+        }
+        if let updateMeta = update["_meta"] as? [String: Any],
+           let model = nonEmptyString(updateMeta["modelId"]) ?? nonEmptyString(updateMeta["model"]) {
+            return model
+        }
+        return nonEmptyString(update["model"])
+    }
+
+    private struct GrokSessionMeta {
+        var cwd: String?
+        var model: String?
+    }
+
+    private func grokSessionMeta(at session: URL) -> GrokSessionMeta {
+        var meta = GrokSessionMeta()
+        let summaryURL = session.appendingPathComponent("summary.json")
+        if let data = try? Data(contentsOf: summaryURL),
+           let object = try? JSONSerialization.jsonObject(with: data),
+           let record = object as? [String: Any] {
+            meta.model = nonEmptyString(record["current_model_id"])
+            if let info = record["info"] as? [String: Any] {
+                meta.cwd = normalizedPath(info["cwd"] as? String)
+            }
+        }
+        if meta.model == nil {
+            meta.model = grokLastEventModelID(
+                at: session.appendingPathComponent("events.jsonl")
+            )
+        }
+        return meta
+    }
+
+    private func grokLastEventModelID(at file: URL) -> String? {
+        guard let contents = try? String(contentsOf: file, encoding: .utf8) else {
+            return nil
+        }
+        var last: String?
+        for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let data = String(line).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data),
+                  let record = object as? [String: Any] else {
+                continue
+            }
+            if let model = nonEmptyString(record["model_id"]) {
+                last = model
+                continue
+            }
+            for value in record.values {
+                if let nested = value as? [String: Any],
+                   let model = nonEmptyString(nested["model_id"]) {
+                    last = model
+                }
+            }
+        }
+        return last
+    }
+
     // MARK: - Cursor agent
 
     /// Cursor stores billed usage in two local places:
     ///
-    /// 1. `~/.cursor/herdr-usage.jsonl` — one line per `afterAgentResponse`
-    ///    hook, with the model id (e.g. `grok-4.6` / `cursor-grok-4.6-high`)
-    ///    and token counts. This is how Grok-backed Cursor sessions become
-    ///    visible: the chat store does not persist xAI usage the way it
-    ///    persists Anthropic `usage` objects.
+    /// 1. `~/.cursor/herdr-usage.jsonl` — one line per Cursor `stop` hook
+    ///    (`afterAgentResponse` does not fire in Cursor CLI). Lines carry
+    ///    the model id (e.g. `cursor-grok-4.6-high-fast` / `grok-4.6`)
+    ///    and token counts. `stop` and `afterAgentResponse` report the
+    ///    same `generation_id`; those lines are de-duplicated. This is how
+    ///    Grok-backed Cursor sessions become visible: the chat store does
+    ///    not persist xAI usage the way it persists Anthropic `usage`
+    ///    objects.
     /// 2. `~/.cursor/chats/<project>/<session>/store.db` — Anthropic-shaped
     ///    `usage` JSON embedded in conversation blobs, plus `lastUsedModel`
     ///    and `cwd` from the session meta.
@@ -413,7 +503,7 @@ public actor LocalTokenMeter {
     private func scanCursorUsageLog() -> [TokenUsageEvent] {
         let file = homeDirectory.appendingPathComponent(".cursor/herdr-usage.jsonl")
         guard let contents = try? String(contentsOf: file, encoding: .utf8) else { return [] }
-        var events: [TokenUsageEvent] = []
+        var eventsByID: [String: TokenUsageEvent] = [:]
         var lineNumber = 0
         for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
             defer { lineNumber += 1 }
@@ -421,17 +511,18 @@ public actor LocalTokenMeter {
                   let object = try? JSONSerialization.jsonObject(with: data),
                   let record = object as? [String: Any] else { continue }
 
-            let input = integer(record["input_tokens"] ?? record["inputTokens"])
-            let output = integer(record["output_tokens"] ?? record["outputTokens"])
-            let cacheRead = integer(
-                record["cache_read_tokens"]
-                    ?? record["cacheReadTokens"]
-                    ?? record["cache_read_input_tokens"]
+            let usageObject = record["usage"] as? [String: Any]
+            let input = cursorLogInteger(["input_tokens", "inputTokens"], record, usageObject)
+            let output = cursorLogInteger(["output_tokens", "outputTokens"], record, usageObject)
+            let cacheRead = cursorLogInteger(
+                ["cache_read_tokens", "cacheReadTokens", "cache_read_input_tokens"],
+                record,
+                usageObject
             )
-            let cacheWrite = integer(
-                record["cache_write_tokens"]
-                    ?? record["cacheWriteTokens"]
-                    ?? record["cache_creation_input_tokens"]
+            let cacheWrite = cursorLogInteger(
+                ["cache_write_tokens", "cacheWriteTokens", "cache_creation_input_tokens"],
+                record,
+                usageObject
             )
             // Cursor's raw `inputTokens` already includes cache. Treat the
             // logged input as billed input and keep cache splits for pricing.
@@ -444,26 +535,62 @@ public actor LocalTokenMeter {
             )
             guard tokenUsage.totalTokens > 0 else { continue }
 
-            let sessionID = (record["conversation_id"] as? String)
-                ?? (record["conversationId"] as? String)
+            let sessionID = nonEmptyString(record["conversation_id"])
+                ?? nonEmptyString(record["conversationId"])
                 ?? "line-\(lineNumber)"
-            let model = (record["model"] as? String)
-                ?? (record["modelName"] as? String)
+            let model = cursorLogModel(record, usageObject)
             let cwd = normalizedPath(record["cwd"] as? String)
             let date = epochDate(record["ts_ms"] ?? record["timestamp_ms"], milliseconds: true)
                 ?? parseDate(record["ts"] ?? record["timestamp"])
                 ?? modificationDate(of: file)
-            events.append(TokenUsageEvent(
-                id: "cursor-log:\(sessionID):\(lineNumber)",
+            let generationID = nonEmptyString(record["generation_id"])
+                ?? nonEmptyString(record["generationId"])
+            let eventID = generationID.map { "cursor-log:\(sessionID):\($0)" }
+                ?? "cursor-log:\(sessionID):\(lineNumber)"
+            let event = TokenUsageEvent(
+                id: eventID,
                 sessionID: sessionID,
                 provider: .cursor,
                 model: model,
                 cwd: cwd,
                 date: date,
                 usage: tokenUsage
-            ))
+            )
+            if let existing = eventsByID[eventID],
+               tokenUsage.totalTokens < existing.usage.totalTokens {
+                continue
+            }
+            eventsByID[eventID] = event
         }
-        return events
+        return eventsByID.values.sorted { $0.date < $1.date }
+    }
+
+    private func cursorLogInteger(
+        _ keys: [String],
+        _ record: [String: Any],
+        _ usage: [String: Any]?
+    ) -> Int64 {
+        for key in keys {
+            if let value = integerOptional(record[key]) { return value }
+        }
+        if let usage {
+            for key in keys {
+                if let value = integerOptional(usage[key]) { return value }
+            }
+        }
+        return 0
+    }
+
+    private func cursorLogModel(_ record: [String: Any], _ usage: [String: Any]?) -> String? {
+        for key in ["model", "model_id", "modelName", "modelId"] {
+            if let model = nonEmptyString(record[key]) { return model }
+        }
+        if let usage {
+            for key in ["model", "model_id", "modelName", "modelId"] {
+                if let model = nonEmptyString(usage[key]) { return model }
+            }
+        }
+        return nil
     }
 
     private func scanCursorChats() -> [TokenUsageEvent] {
@@ -836,6 +963,12 @@ public actor LocalTokenMeter {
 
     private func integer(_ value: Any?) -> Int64 {
         integerOptional(value) ?? 0
+    }
+
+    private func nonEmptyString(_ value: Any?) -> String? {
+        guard let string = value as? String else { return nil }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func integerOptional(_ value: Any?) -> Int64? {

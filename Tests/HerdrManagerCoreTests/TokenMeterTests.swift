@@ -141,8 +141,16 @@ struct TokenMeterPricingTests {
         #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high")?.inputPerMillion == 2.0)
         #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high")?.cacheReadPerMillion == 0.50)
         #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high")?.outputPerMillion == 6.0)
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high-fast")?.inputPerMillion == 2.0)
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high-fast")?.cacheReadPerMillion == 0.50)
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high-fast")?.outputPerMillion == 6.0)
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4-6-high-fast")?.outputPerMillion == 6.0)
         #expect(book.pricing(for: .cursor, model: "grok-4.6")?.outputPerMillion == 6.0)
+        #expect(TokenMeterProvider(rawValue: "grok-build") == .grok)
+        #expect(TokenMeterProvider(rawValue: "grok-build-plan") == .grok)
+        #expect(TokenMeterProvider(rawValue: "cursor-cli") == .cursor)
         #expect(TokenMeterProvider(rawValue: "cursor-agent") == .cursor)
+        #expect(TokenMeterProvider(rawValue: "agent") == nil)
         #expect(TokenMeterProvider(agentKind: .custom("cursor")) == .cursor)
         #expect(book.pricing(for: .grok, model: "grok-4.20")?.inputPerMillion == 1.25)
         #expect(book.pricing(for: .grok, model: "grok-4-20")?.outputPerMillion == 2.50)
@@ -476,6 +484,134 @@ struct LocalTokenMeterTests {
         #expect(provider.models.contains("grok-4.6") || provider.models.contains("cursor-grok-4.6-high"))
         #expect(provider.costUSD != nil)
         #expect(snapshot.agentSummary(for: agent.id, window: .day).usage.totalTokens == 64)
+    }
+
+    @Test("Reads Grok nested session model from summary.json and prices grok-4.6")
+    func readsGrokNestedSessionModelAndTokens() async throws {
+        let home = try makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let session = home
+            .appendingPathComponent(".grok/sessions/%2Frepo", isDirectory: true)
+            .appendingPathComponent("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", isDirectory: true)
+        try writeLines([
+            #"{"timestamp":"2026-01-15T11:00:00Z","method":"session/update","params":{"sessionId":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","update":{"sessionUpdate":"agent_message_chunk","content":{}},"_meta":{"totalTokens":10000,"promptId":"prompt-1","agentTimestampMs":1768474800000}}}"#,
+        ], to: session.appendingPathComponent("updates.jsonl"))
+        let summary = #"{"current_model_id":"grok-4.6","agent_name":"grok-build-plan","info":{"cwd":"/repo","id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}}"#
+        try summary.write(
+            to: session.appendingPathComponent("summary.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let agent = Agent(
+            id: AgentID("w1:grok"),
+            kind: .custom("grok"),
+            enteredAt: date("2026-01-15T10:00:00Z"),
+            cwd: "/repo"
+        )
+        let meter = LocalTokenMeter(homeDirectory: home)
+        let snapshot = await meter.snapshot(
+            agents: [agent],
+            priceBook: TokenMeterPriceBook.defaults,
+            now: date("2026-01-15T13:00:00Z"),
+            calendar: utcCalendar()
+        )
+
+        let provider = snapshot.providerSummary(for: .grok, window: .day)
+        let usage = TokenUsage.totalOnly(10_000)
+        let grok46 = TokenMeterPriceBook.defaults.pricing(for: .grok, model: "grok-4.6")
+        let grokFallback = TokenMeterPriceBook.defaults.pricing(for: .grok, model: nil)
+        #expect(provider.usage.totalTokens == 10_000)
+        #expect(provider.models == ["grok-4.6"])
+        #expect(provider.costUSD != nil)
+        #expect(grok46?.cacheReadPerMillion == 0.50)
+        #expect(grokFallback?.cacheReadPerMillion == 0.30)
+        #expect(abs((provider.costUSD ?? 0) - (grok46?.cost(for: usage) ?? -1)) < 0.000001)
+        #expect(abs((provider.costUSD ?? 0) - (grokFallback?.cost(for: usage) ?? 0)) > 0.000001)
+
+        let individual = snapshot.agentSummary(for: agent.id, window: .day)
+        #expect(individual.usage.totalTokens == 10_000)
+        #expect(individual.costUSD != nil)
+        #expect(snapshot.ambiguousAttributionCount == 0)
+    }
+
+    @Test("Reads Grok modelId from update._meta without a summary")
+    func readsGrokModelIdFromUpdateMeta() async throws {
+        let home = try makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let file = home
+            .appendingPathComponent(".grok/sessions/%2Frepo", isDirectory: true)
+            .appendingPathComponent("bbbbbbbb-cccc-dddd-eeee-ffffffffffff", isDirectory: true)
+            .appendingPathComponent("updates.jsonl")
+        try writeLines([
+            #"{"timestamp":"2026-01-15T11:00:00Z","method":"session/update","params":{"update":{"_meta":{"modelId":"grok-4.6"}},"_meta":{"totalTokens":8000,"promptId":"prompt-2","agentTimestampMs":1768474800000}}}"#,
+        ], to: file)
+
+        let agent = Agent(
+            id: AgentID("w1:grok"),
+            kind: .custom("grok"),
+            enteredAt: date("2026-01-15T10:00:00Z"),
+            cwd: "/repo"
+        )
+        let meter = LocalTokenMeter(homeDirectory: home)
+        let snapshot = await meter.snapshot(
+            agents: [agent],
+            priceBook: TokenMeterPriceBook.defaults,
+            now: date("2026-01-15T13:00:00Z"),
+            calendar: utcCalendar()
+        )
+
+        let provider = snapshot.providerSummary(for: .grok, window: .day)
+        let usage = TokenUsage.totalOnly(8_000)
+        let grok46 = TokenMeterPriceBook.defaults.pricing(for: .grok, model: "grok-4.6")
+        #expect(provider.usage.totalTokens == 8_000)
+        #expect(provider.models == ["grok-4.6"])
+        #expect(provider.costUSD != nil)
+        #expect(abs((provider.costUSD ?? 0) - (grok46?.cost(for: usage) ?? -1)) < 0.000001)
+        #expect(snapshot.agentSummary(for: agent.id, window: .day).costUSD != nil)
+    }
+
+    @Test("Reads Cursor stop-hook JSONL with model_id and de-duplicates generation_id")
+    func readsCursorStopHookAndDedupesGeneration() async throws {
+        let home = try makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let file = home.appendingPathComponent(".cursor/herdr-usage.jsonl")
+        try writeLines([
+            #"{"hook_event_name":"stop","ts":"2026-01-15T11:00:00Z","conversation_id":"sess-cli","generation_id":"gen-1","cwd":"/repo","model":"cursor-grok-4.6-high-fast","model_id":"grok-4.6","input_tokens":1000,"output_tokens":50,"cache_read_tokens":200,"cache_write_tokens":100}"#,
+            #"{"hook_event_name":"afterAgentResponse","ts":"2026-01-15T11:01:00Z","conversation_id":"sess-cli","generation_id":"gen-1","cwd":"/repo","model_id":"grok-4.6","usage":{"input_tokens":1000,"output_tokens":50,"cache_read_tokens":200,"cache_write_tokens":100}}"#,
+        ], to: file)
+
+        let agent = Agent(
+            id: AgentID("w1:cursor-cli"),
+            kind: .custom("cursor-cli"),
+            enteredAt: date("2026-01-15T10:00:00Z"),
+            cwd: "/repo"
+        )
+        let meter = LocalTokenMeter(homeDirectory: home)
+        let snapshot = await meter.snapshot(
+            agents: [agent],
+            priceBook: TokenMeterPriceBook.defaults,
+            now: date("2026-01-15T13:00:00Z"),
+            calendar: utcCalendar()
+        )
+
+        let provider = snapshot.providerSummary(for: .cursor, window: .day)
+        #expect(provider.usage.inputTokens == 1000)
+        #expect(provider.usage.cacheReadTokens == 200)
+        #expect(provider.usage.cacheWrite5mTokens == 100)
+        #expect(provider.usage.outputTokens == 50)
+        #expect(provider.usage.totalTokens == 1050)
+        #expect(
+            provider.models == ["cursor-grok-4.6-high-fast"]
+                || provider.models == ["grok-4.6"]
+        )
+        #expect(provider.costUSD != nil)
+        #expect(provider.sessions == 1)
+
+        let individual = snapshot.agentSummary(for: agent.id, window: .day)
+        #expect(individual.usage.totalTokens == 1050)
+        #expect(individual.costUSD != nil)
+        #expect(snapshot.ambiguousAttributionCount == 0)
     }
 
     private func writeCursorStore(to url: URL, model: String, blob: String) throws {

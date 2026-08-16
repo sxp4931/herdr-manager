@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Append Cursor afterAgentResponse token usage for Shepherd's local meter.
+"""Append Cursor `stop` hook token usage for Shepherd's local meter.
 
-Cursor's chat store records Anthropic-shaped `usage` objects when the model
-exposes them, but Grok-backed sessions often omit that payload. This hook
-writes one JSONL line per agent response to ~/.cursor/herdr-usage.jsonl so
-Shepherd can price those tokens at the configured list rates.
+Cursor CLI fires `stop` (not `afterAgentResponse`) with model and token
+fields. This hook still works if invoked as afterAgentResponse: both
+report the same values for a given `generation_id`. Shepherd de-duplicates
+those lines.
+
+Writes one JSONL line to ~/.cursor/herdr-usage.jsonl so Shepherd can
+price those tokens at the configured list rates.
 
 Fails open: never blocks the agent.
 """
@@ -21,6 +24,23 @@ def _int(value) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return 0
+
+
+def _first_str(*values) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _pick_int(sources: tuple[object, ...], *keys: str) -> int:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            if key in source:
+                return _int(source.get(key))
+    return 0
 
 
 def _cwd_for_conversation(home: Path, conversation_id: str | None) -> str | None:
@@ -49,23 +69,35 @@ def main() -> None:
     if not isinstance(payload, dict):
         payload = {}
 
-    conversation_id = (
-        payload.get("conversation_id")
-        or payload.get("conversationId")
-        or payload.get("session_id")
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    sources = (payload, usage)
+
+    conversation_id = _first_str(
+        payload.get("conversation_id"),
+        payload.get("conversationId"),
+        payload.get("session_id"),
     )
-    model = payload.get("model") or payload.get("modelName")
-    input_tokens = _int(payload.get("input_tokens") or payload.get("inputTokens"))
-    output_tokens = _int(payload.get("output_tokens") or payload.get("outputTokens"))
-    cache_read = _int(
-        payload.get("cache_read_tokens")
-        or payload.get("cacheReadTokens")
-        or payload.get("cache_read_input_tokens")
+    model = _first_str(
+        payload.get("model"),
+        payload.get("modelName"),
+        payload.get("model_id"),
+        payload.get("modelId"),
+        usage.get("model"),
+        usage.get("modelName"),
+        usage.get("model_id"),
+        usage.get("modelId"),
     )
-    cache_write = _int(
-        payload.get("cache_write_tokens")
-        or payload.get("cacheWriteTokens")
-        or payload.get("cache_creation_input_tokens")
+    generation_id = _first_str(
+        payload.get("generation_id"),
+        payload.get("generationId"),
+    )
+    input_tokens = _pick_int(sources, "input_tokens", "inputTokens")
+    output_tokens = _pick_int(sources, "output_tokens", "outputTokens")
+    cache_read = _pick_int(
+        sources, "cache_read_tokens", "cacheReadTokens", "cache_read_input_tokens"
+    )
+    cache_write = _pick_int(
+        sources, "cache_write_tokens", "cacheWriteTokens", "cache_creation_input_tokens"
     )
     if input_tokens + output_tokens + cache_read + cache_write <= 0:
         print("{}")
@@ -74,9 +106,7 @@ def main() -> None:
     home = Path.home()
     cwd = payload.get("cwd") or payload.get("workspace_dir")
     if not isinstance(cwd, str) or not cwd:
-        cwd = _cwd_for_conversation(
-            home, conversation_id if isinstance(conversation_id, str) else None
-        )
+        cwd = _cwd_for_conversation(home, conversation_id)
 
     record = {
         "ts_ms": int(time.time() * 1000),
@@ -88,6 +118,8 @@ def main() -> None:
         "cache_read_tokens": cache_read,
         "cache_write_tokens": cache_write,
     }
+    if generation_id:
+        record["generation_id"] = generation_id
     out = home / ".cursor" / "herdr-usage.jsonl"
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
