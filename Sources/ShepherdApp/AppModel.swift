@@ -459,6 +459,11 @@ final class AppModel {
     /// Saves a model-specific price. This is preferred whenever the local log
     /// contains a model id; the provider fallback is reserved for records
     /// whose CLI omitted the model.
+    /// Covers a logged model at $0. Use for local LLMs and OpenRouter free slugs.
+    func markTokenMeterModelFree(provider: TokenMeterProvider, model: String) {
+        updateTokenMeterModelPricing(provider: provider, model: model, pricing: .zero)
+    }
+
     func updateTokenMeterModelPricing(
         provider: TokenMeterProvider,
         model: String,

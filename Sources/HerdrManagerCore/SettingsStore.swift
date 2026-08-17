@@ -85,6 +85,12 @@ public actor SettingsStore {
         guard let data = FileManager.default.contents(atPath: fileURL.path) else { return }
         let decoder = JSONDecoder()
         settings = try decoder.decode(Settings.self, from: data)
+        let merged = TokenMeterPriceBook(entries: settings.tokenMeterPrices)
+            .mergingMissingDefaults()
+        if merged.entries != settings.tokenMeterPrices {
+            settings.tokenMeterPrices = merged.entries
+            try save()
+        }
     }
 
     public func save() throws {

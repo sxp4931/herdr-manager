@@ -119,6 +119,9 @@ struct TokenMeterPricingTests {
 
         #expect(book.pricing(for: .qwen, model: "tencent/hy3:free")?.outputPerMillion == 0.0)
         #expect(book.pricing(for: .deepseek, model: "deepseek-v4-flash-free")?.outputPerMillion == 0.0)
+        #expect(book.pricing(for: .qwen, model: "openrouter/free")?.isZero == true)
+        #expect(book.pricing(for: .qwen, model: "google/gemma-3-12b-it:free")?.isZero == true)
+        #expect(book.pricing(for: .qwen, model: "gemma4:12b")?.isZero == true)
     }
 
     @Test("Resolves newly added verified price keys")
@@ -155,6 +158,15 @@ struct TokenMeterPricingTests {
         #expect(book.pricing(for: .grok, model: "grok-4.20")?.inputPerMillion == 1.25)
         #expect(book.pricing(for: .grok, model: "grok-4-20")?.outputPerMillion == 2.50)
         #expect(book.pricing(for: .grok, model: "grok-code-fast-1")?.inputPerMillion == 1.0)
+        #expect(book.pricing(for: .grok, model: "grok-4.5")?.cacheReadPerMillion == 0.30)
+        #expect(book.pricing(for: .grok, model: "grok-4-5")?.outputPerMillion == 6.0)
+        #expect(book.pricing(for: .grok, model: "grok-4.3")?.inputPerMillion == 1.25)
+        #expect(book.pricing(for: .grok, model: "grok-4-3")?.outputPerMillion == 2.50)
+        #expect(book.pricing(for: .grok, model: "grok-4.20-0309-reasoning")?.inputPerMillion == 1.25)
+        #expect(book.pricing(for: .grok, model: "grok-4.20-0309-non-reasoning")?.outputPerMillion == 2.50)
+        #expect(book.pricing(for: .grok, model: "grok-4.20-multi-agent-0309")?.cacheReadPerMillion == 0.20)
+        #expect(book.pricing(for: .grok, model: "grok-build-0.1")?.inputPerMillion == 1.0)
+        #expect(book.pricing(for: .grok, model: "grok-code-fast")?.outputPerMillion == 2.0)
 
         #expect(book.pricing(for: .codex, model: "gpt-5.2")?.inputPerMillion == 1.75)
         #expect(book.pricing(for: .codex, model: "gpt-5.2")?.outputPerMillion == 14.0)
@@ -163,6 +175,20 @@ struct TokenMeterPricingTests {
 
         #expect(book.pricing(for: .deepseek, model: "deepseek-v4-pro-0813")?.inputPerMillion == 0.435)
         #expect(book.pricing(for: .deepseek, model: "deepseek-v4-pro-0813")?.outputPerMillion == 0.87)
+    }
+
+    @Test("Merges missing default model prices without overwriting edits")
+    func mergingMissingDefaultsKeepsOverrides() {
+        let custom = TokenMeterPricing(inputPerMillion: 9, outputPerMillion: 11)
+        var stale = TokenMeterPriceBook(entries: [
+            "grok": TokenMeterPricing(inputPerMillion: 2.0, cacheReadPerMillion: 0.30, outputPerMillion: 6.0),
+            "grok-4.5": custom,
+        ])
+        stale = stale.mergingMissingDefaults()
+
+        #expect(stale.pricing(for: .grok, model: "grok-4.6")?.cacheReadPerMillion == 0.50)
+        #expect(stale.pricing(for: .grok, model: "grok-4.5") == custom)
+        #expect(stale.pricing(for: .grok, model: nil)?.cacheReadPerMillion == 0.30)
     }
 
     @Test("isCovered agrees with pricing lookup")

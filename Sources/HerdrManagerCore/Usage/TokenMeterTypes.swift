@@ -121,6 +121,24 @@ public struct TokenMeterPricing: Codable, Equatable, Sendable {
         self.outputPerMillion = outputPerMillion
     }
 
+    /// Local / OpenRouter-free list rate. Covered at $0 so the tile says
+    /// Free instead of "price missing".
+    public static let zero = TokenMeterPricing(
+        inputPerMillion: 0,
+        cacheReadPerMillion: 0,
+        cacheWrite5mPerMillion: 0,
+        cacheWrite1hPerMillion: 0,
+        outputPerMillion: 0
+    )
+
+    public var isZero: Bool {
+        inputPerMillion == 0
+            && cacheReadPerMillion == 0
+            && cacheWrite5mPerMillion == 0
+            && cacheWrite1hPerMillion == 0
+            && outputPerMillion == 0
+    }
+
     public func cost(for usage: TokenUsage) -> Double {
         if usage.isSplit {
             let uncached = max(
@@ -161,6 +179,16 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
 
     public init(entries: [String: TokenMeterPricing] = TokenMeterPriceBook.defaults.entries) {
         self.entries = entries
+    }
+
+    /// Fill in official keys that a saved book does not have. Existing keys
+    /// win, so a user edit is never replaced by a later default.
+    public func mergingMissingDefaults() -> TokenMeterPriceBook {
+        var merged = TokenMeterPriceBook.defaults.entries
+        for (key, value) in entries {
+            merged[key] = value
+        }
+        return TokenMeterPriceBook(entries: merged)
     }
 
     public func pricing(for provider: TokenMeterProvider, model: String?) -> TokenMeterPricing? {
@@ -687,68 +715,122 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             outputPerMillion: 1.101
         ),
 
-        // Free / local models — priced at $0 so they show as $0 instead of
-        // "price missing".
-        "tencent/hy3:free": TokenMeterPricing(
-            inputPerMillion: 0.0,
-            cacheReadPerMillion: 0.0,
-            cacheWrite5mPerMillion: 0.0,
-            cacheWrite1hPerMillion: 0.0,
-            outputPerMillion: 0.0
-        ),
-        "deepseek-v4-flash-free": TokenMeterPricing(
-            inputPerMillion: 0.0,
-            cacheReadPerMillion: 0.0,
-            cacheWrite5mPerMillion: 0.0,
-            cacheWrite1hPerMillion: 0.0,
-            outputPerMillion: 0.0
-        ),
-        "qwen3.6-35b-a3b": TokenMeterPricing(
-            inputPerMillion: 0.0,
-            cacheReadPerMillion: 0.0,
-            cacheWrite5mPerMillion: 0.0,
-            cacheWrite1hPerMillion: 0.0,
-            outputPerMillion: 0.0
-        ),
+        // Free / local models — priced at $0 so they show as Free instead of
+        // "price missing". The `:free` fragment covers OpenRouter free slugs
+        // such as `provider/model:free`.
+        "tencent/hy3:free": .zero,
+        "deepseek-v4-flash-free": .zero,
+        "qwen3.6-35b-a3b": .zero,
+        "openrouter/free": .zero,
+        ":free": .zero,
+        "gemma4:12b": .zero,
 
-        // xAI rates used by TokenMeter's total-only Grok adapter.
+        // xAI text API short-context list rates, verified against
+        // https://docs.x.ai/developers/pricing on 2026-08-16. Long-context
+        // (≥200k prompt) rows are not modelled: the local logs do not say
+        // whether a turn crossed that threshold.
+        "grok-4.6": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 6.0
+        ),
+        "grok-4-6": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 6.0
+        ),
+        // grok-4.5 cache-hit is $0.30, not the grok-4.6 $0.50 rate.
         "grok-4.5": TokenMeterPricing(
             inputPerMillion: 2.0,
             cacheReadPerMillion: 0.30,
             outputPerMillion: 6.0
         ),
-        "grok-build-0.1": TokenMeterPricing(
-            inputPerMillion: 1.0,
-            cacheReadPerMillion: 0.20,
-            outputPerMillion: 2.0
+        "grok-4-5": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.30,
+            outputPerMillion: 6.0
         ),
         "grok-4.3": TokenMeterPricing(
             inputPerMillion: 1.25,
             cacheReadPerMillion: 0.20,
             outputPerMillion: 2.50
         ),
-        // xAI rates, verified against https://docs.x.ai/docs/models
-        // (__XAI_PUBLIC_MODELS__) on 2026-08-14. grok-4.6 cache-hit is $0.50,
-        // not the grok-4.5 $0.30 rate.
-        "grok-4.6": TokenMeterPricing(
-            inputPerMillion: 2.0,
-            cacheReadPerMillion: 0.50,
-            outputPerMillion: 6.0
+        "grok-4-3": TokenMeterPricing(
+            inputPerMillion: 1.25,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.50
         ),
-        // Dashed spelling of grok-4.6.
-        "grok-4-6": TokenMeterPricing(
-            inputPerMillion: 2.0,
-            cacheReadPerMillion: 0.50,
-            outputPerMillion: 6.0
+        // grok-4.20 family (0309 dated slugs and the undated alias) shares
+        // grok-4.3 short-context rates.
+        "grok-4.20": TokenMeterPricing(
+            inputPerMillion: 1.25,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.50
         ),
-        // Cursor agent logs `cursor-grok-4.6-high` (and the dashed form)
-        // rather than the bare xAI id. Same list rates as grok-4.6.
+        "grok-4-20": TokenMeterPricing(
+            inputPerMillion: 1.25,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.50
+        ),
+        "grok-4.20-0309-reasoning": TokenMeterPricing(
+            inputPerMillion: 1.25,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.50
+        ),
+        "grok-4-20-0309-reasoning": TokenMeterPricing(
+            inputPerMillion: 1.25,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.50
+        ),
+        "grok-4.20-0309-non-reasoning": TokenMeterPricing(
+            inputPerMillion: 1.25,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.50
+        ),
+        "grok-4-20-0309-non-reasoning": TokenMeterPricing(
+            inputPerMillion: 1.25,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.50
+        ),
+        "grok-4.20-multi-agent-0309": TokenMeterPricing(
+            inputPerMillion: 1.25,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.50
+        ),
+        "grok-4-20-multi-agent-0309": TokenMeterPricing(
+            inputPerMillion: 1.25,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.50
+        ),
+        "grok-build-0.1": TokenMeterPricing(
+            inputPerMillion: 1.0,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.0
+        ),
+        // Alias of grok-build-0.1; xAI lists grok-code-fast / grok-code-fast-1
+        // as aliases of that model.
+        "grok-code-fast": TokenMeterPricing(
+            inputPerMillion: 1.0,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.0
+        ),
+        "grok-code-fast-1": TokenMeterPricing(
+            inputPerMillion: 1.0,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.0
+        ),
+        // Cursor agent / CLI logs `cursor-grok-*` rather than the bare xAI id.
         "cursor-grok-4.6": TokenMeterPricing(
             inputPerMillion: 2.0,
             cacheReadPerMillion: 0.50,
             outputPerMillion: 6.0
         ),
         "cursor-grok-4.6-high": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 6.0
+        ),
+        "cursor-grok-4.6-high-fast": TokenMeterPricing(
             inputPerMillion: 2.0,
             cacheReadPerMillion: 0.50,
             outputPerMillion: 6.0
@@ -763,34 +845,20 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             cacheReadPerMillion: 0.50,
             outputPerMillion: 6.0
         ),
-        // Cursor CLI `stop` hook logs `cursor-grok-4.6-high-fast`.
-        "cursor-grok-4.6-high-fast": TokenMeterPricing(
-            inputPerMillion: 2.0,
-            cacheReadPerMillion: 0.50,
-            outputPerMillion: 6.0
-        ),
         "cursor-grok-4-6-high-fast": TokenMeterPricing(
             inputPerMillion: 2.0,
             cacheReadPerMillion: 0.50,
             outputPerMillion: 6.0
         ),
-        "grok-4.20": TokenMeterPricing(
-            inputPerMillion: 1.25,
-            cacheReadPerMillion: 0.20,
-            outputPerMillion: 2.50
+        "cursor-grok-4.5": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.30,
+            outputPerMillion: 6.0
         ),
-        // Dashed spelling of grok-4.20.
-        "grok-4-20": TokenMeterPricing(
-            inputPerMillion: 1.25,
-            cacheReadPerMillion: 0.20,
-            outputPerMillion: 2.50
-        ),
-        // Alias of grok-build-0.1; xAI lists grok-code-fast / grok-code-fast-1
-        // as aliases of that model.
-        "grok-code-fast": TokenMeterPricing(
-            inputPerMillion: 1.0,
-            cacheReadPerMillion: 0.20,
-            outputPerMillion: 2.0
+        "cursor-grok-4-5": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.30,
+            outputPerMillion: 6.0
         ),
         "grok": TokenMeterPricing(
             inputPerMillion: 2.0,

@@ -37,7 +37,9 @@ enum UsageFormatter {
     static func cost(_ summary: TokenMeterSummary) -> String {
         guard let value = summary.costUSD else { return "n/a" }
         let amount: String
-        if value > 0 && value < 0.01 {
+        if value == 0 {
+            amount = "Free"
+        } else if value > 0 && value < 0.01 {
             amount = "<$0.01"
         } else {
             amount = currency(value)

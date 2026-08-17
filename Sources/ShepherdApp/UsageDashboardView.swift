@@ -313,13 +313,18 @@ struct UsageDashboardView: View {
                 ForEach(Array(models.enumerated()), id: \.element) { index, model in
                     let summary = appModel.usageSnapshot
                         .modelSummary(for: model, window: window)
+                    let isFree = summary.costUSD == 0
                     ModelUsageRow(
                         rank: index + 1,
                         model: model,
                         subtitle: UsageFormatter.tokenBreakdown(summary),
                         summary: summary,
-                        share: costShare(for: summary),
-                        isLeading: index == 0
+                        share: isFree ? nil : costShare(for: summary),
+                        isLeading: index == 0,
+                        isFree: isFree,
+                        onMarkFree: summary.costUSD == nil
+                            ? { markModelsFree(model) }
+                            : nil
                     )
                 }
             }
@@ -441,6 +446,12 @@ struct UsageDashboardView: View {
                                 .truncationMode(.middle)
                         }
                         Spacer(minLength: 8)
+                        Button("Mark free") {
+                            markModelFree(provider: item.provider, model: item.model)
+                        }
+                        .controlSize(.small)
+                        .accessibilityLabel("Mark \(item.model) as free")
+                        .help("Cover \(item.model) at $0 — local and OpenRouter free models")
                         Button("Set price") {
                             beginCoverPricing(provider: item.provider, model: item.model)
                         }
@@ -605,6 +616,24 @@ struct UsageDashboardView: View {
 
     /// Jump the editor to an uncovered model and prefill the provider
     /// fallback as a suggestion — never as an applied rate.
+    private func markModelsFree(_ model: String) {
+        let providers = TokenMeterProvider.allCases.filter {
+            appModel.usageSnapshot.knownModels(for: $0).contains(model)
+        }
+        if providers.isEmpty {
+            return
+        }
+        for provider in providers {
+            markModelFree(provider: provider, model: model)
+        }
+    }
+
+    private func markModelFree(provider: TokenMeterProvider, model: String) {
+        appModel.markTokenMeterModelFree(provider: provider, model: model)
+        saveNotice = "Marked \(model) free"
+        saveError = nil
+    }
+
     private func beginCoverPricing(provider: TokenMeterProvider, model: String) {
         saveError = nil
         saveNotice = nil
@@ -735,6 +764,8 @@ private struct ModelUsageRow: View {
     let summary: TokenMeterSummary
     let share: Double?
     let isLeading: Bool
+    let isFree: Bool
+    var onMarkFree: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -745,19 +776,36 @@ private struct ModelUsageRow: View {
                     design: .rounded
                 ))
                 .monospacedDigit()
-                .foregroundStyle(isLeading ? Brand.amber : Brand.secondaryText)
+                .foregroundStyle(
+                    isFree ? Brand.working : (isLeading ? Brand.amber : Brand.secondaryText)
+                )
                 .frame(width: 18, alignment: .trailing)
                 .accessibilityLabel("Rank \(rank)")
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(model)
-                    .font(.system(
-                        size: isLeading ? 13.5 : 12,
-                        weight: isLeading ? .bold : .semibold
-                    ))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(model)
+                HStack(spacing: 6) {
+                    Text(model)
+                        .font(.system(
+                            size: isLeading ? 13.5 : 12,
+                            weight: isLeading ? .bold : .semibold
+                        ))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(model)
+                    if isFree {
+                        Text("FREE")
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .tracking(0.4)
+                            .foregroundStyle(Brand.working)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(Brand.working.opacity(0.16))
+                            )
+                            .accessibilityHidden(true)
+                    }
+                }
                 Text(subtitle)
                     .font(.system(size: 10.5, design: .monospaced))
                     .foregroundStyle(Brand.secondaryText)
@@ -769,7 +817,17 @@ private struct ModelUsageRow: View {
             Spacer(minLength: 8)
 
             VStack(alignment: .trailing, spacing: 4) {
-                if summary.costUSD != nil {
+                if isFree {
+                    Label("Free", systemImage: "leaf.fill")
+                        .font(.system(
+                            size: isLeading ? 13 : 11.5,
+                            weight: isLeading ? .bold : .semibold,
+                            design: .rounded
+                        ))
+                        .foregroundStyle(Brand.working)
+                        .labelStyle(.titleAndIcon)
+                        .lineLimit(1)
+                } else if summary.costUSD != nil {
                     Text(UsageFormatter.cost(summary))
                         .font(.system(
                             size: isLeading ? 14 : 12.5,
@@ -779,10 +837,18 @@ private struct ModelUsageRow: View {
                         .monospacedDigit()
                         .lineLimit(1)
                 } else {
-                    Label("price missing", systemImage: "tag.slash")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(Brand.warn)
-                        .labelStyle(.titleAndIcon)
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Label("price missing", systemImage: "tag.slash")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Brand.warn)
+                            .labelStyle(.titleAndIcon)
+                        if let onMarkFree {
+                            Button("Mark free", action: onMarkFree)
+                                .controlSize(.small)
+                                .accessibilityLabel("Mark \(model) as free")
+                                .help("Cover this model at $0 — local LLM or OpenRouter free")
+                        }
+                    }
                 }
 
                 if let share {
@@ -805,9 +871,17 @@ private struct ModelUsageRow: View {
         }
         .padding(.horizontal, 9)
         .padding(.vertical, isLeading ? 9 : 7)
-        .background(Color.primary.opacity(isLeading ? 0.07 : 0.045))
+        .background(
+            (isFree ? Brand.working : Color.primary)
+                .opacity(isFree ? 0.10 : (isLeading ? 0.07 : 0.045))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(isFree ? Brand.working.opacity(0.28) : Color.clear, lineWidth: 1)
+        )
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: onMarkFree == nil ? .combine : .contain)
+        .accessibilityLabel(isFree ? "\(model), free" : model)
     }
 }
 

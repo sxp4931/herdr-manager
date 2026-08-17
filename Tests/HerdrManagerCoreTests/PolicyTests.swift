@@ -319,6 +319,42 @@ struct SettingsStoreTests {
         #expect(snap.metadataWriteBackEnabled == false)
     }
 
+    @Test("Load fills missing default model prices from an old settings file")
+    func loadMergesMissingTokenMeterPrices() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fileURL = dir.appendingPathComponent("settings.json")
+        let stale = """
+        {
+          "defaultThresholdMinutes": 5,
+          "agentOverrides": {},
+          "occupantOverrides": {},
+          "metadataWriteBackEnabled": true,
+          "hasEverConnected": true,
+          "dismissedMCPCard": false,
+          "tokenMeterPrices": {
+            "grok": {
+              "inputPerMillion": 2,
+              "cacheReadPerMillion": 0.3,
+              "cacheWrite5mPerMillion": 2,
+              "cacheWrite1hPerMillion": 2,
+              "outputPerMillion": 6
+            }
+          }
+        }
+        """
+        try stale.write(to: fileURL, atomically: true, encoding: .utf8)
+
+        let store = SettingsStore(fileURL: fileURL)
+        try await store.load()
+        let book = TokenMeterPriceBook(
+            entries: await store.settingsSnapshot().tokenMeterPrices
+        )
+        #expect(book.pricing(for: .grok, model: "grok-4.6")?.cacheReadPerMillion == 0.50)
+        #expect(book.pricing(for: .grok, model: nil)?.cacheReadPerMillion == 0.30)
+    }
+
     @Test("Load from nonexistent file is a no-op")
     func loadNonexistent() async throws {
         let dir = FileManager.default.temporaryDirectory
