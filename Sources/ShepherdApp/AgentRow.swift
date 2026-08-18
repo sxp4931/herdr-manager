@@ -133,6 +133,7 @@ struct AgentRow: View, Equatable {
     let onCancelExpansion: () -> Void
 
     @State private var isHovering = false
+    @FocusState private var nudgeFieldFocused: Bool
 
     nonisolated static func == (lhs: AgentRow, rhs: AgentRow) -> Bool {
         lhs.agent == rhs.agent
@@ -625,6 +626,8 @@ struct AgentRow: View, Equatable {
                     TextField("Send a message…", text: $nudgeText)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 12))
+                        .focused($nudgeFieldFocused)
+                        .onAppear { nudgeFieldFocused = true }
                         .onChange(of: nudgeText) { _, newValue in
                             if newValue.count > NudgeLimits.maxLength {
                                 nudgeText = String(newValue.prefix(NudgeLimits.maxLength))

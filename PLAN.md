@@ -1,5 +1,10 @@
 # Herdr Manager — design and build plan
 
+This is the original design and build plan, written against a live herdr
+install. It is not a user guide. Where this document and the shipped code
+disagree, the code is the authority. Some scale notes refer to the author's
+own herd.
+
 Target: herdr `v0.7.5`, source HEAD `e16d7d8c07a20f5ee0b4111808680bbcfd7df9ac` (2026-07-28), wire protocol version **17** (integer `uint32` in the schema). Compatibility is **capability-based**, not version-string-assumed (§0.2, §3.2).
 
 ## 0. Verification status, and the version problem

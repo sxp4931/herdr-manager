@@ -5,6 +5,8 @@ Shepherd is a macOS menu-bar app that triages a herd of AI coding agents managed
 It answers "does anything need me?" at a glance and gets you from blocked to unblocked
 in one or two actions.
 
+![Shepherd panel: attention counts, Needs you / Running / All scopes, and a filter field](docs/panel.png)
+
 - **Live status** — subscription-driven view of every agent pane, with a
   worst-state-wins menu-bar signal.
 - **Attention triage** — attention-first panel (not a census): blocked agents, silent
@@ -65,12 +67,24 @@ reconnect with ⌘R.
 ./build-app.sh
 ```
 
-Produces an ad-hoc-signed `Shepherd.app` bundle (launch with `open Shepherd.app`).
-If Gatekeeper blocks the bundle on another Mac (ad-hoc signing carries no
-notarization), right-click → Open once to launch it.
+Produces a signed `Shepherd.app` bundle (launch with `open Shepherd.app`).
+If a Developer ID identity is available the script uses it; otherwise the
+bundle is ad-hoc signed. If Gatekeeper blocks an ad-hoc build on another Mac,
+right-click → Open once to launch it.
 The bundle also includes the MCP server as a helper binary at
 `Shepherd.app/Contents/Helpers/herdr-manager-mcp`, giving agent hosts a stable
 command path.
+
+Current bundle version is **0.1.1**.
+
+### Disk image
+
+```sh
+./build-dmg.sh
+```
+
+Builds a drag-to-Applications `Shepherd-<version>.dmg`. Pass `SKIP_APP_BUILD=1`
+to reuse an existing `Shepherd.app`.
 
 ## Other executables
 
@@ -99,7 +113,7 @@ policy-gated and bounded by design — no free-form shell passthrough.
 swift test
 ```
 
-Runs the Swift Testing suite (161 tests) covering adapter decoding, policy decisions,
+Runs the Swift Testing suite (182 tests) covering adapter decoding, policy decisions,
 persistence, redaction, and state classification.
 
 Package layout:
@@ -112,7 +126,9 @@ Package layout:
 | `Sources/herdr-manager-mcp/` | stdio JSON-RPC/MCP server |
 | `Tests/HerdrManagerCoreTests/` | Core unit tests |
 
-See [PLAN.md](PLAN.md) for protocol findings, architecture, and design documentation.
+Contributor conventions live in [AGENTS.md](AGENTS.md). [PLAN.md](PLAN.md) is
+the original protocol and architecture research — a design diary, not a user
+guide. Shipped code wins where they disagree.
 
 ## License
 

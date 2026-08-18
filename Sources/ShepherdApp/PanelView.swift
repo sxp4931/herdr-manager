@@ -130,26 +130,22 @@ struct PanelView: View {
             return .handled
         }
         .onKeyPress(.upArrow) {
-            guard !searchFocused else { return .ignored }
-            guard !showingSetupChecklist else { return .ignored }
+            guard triageKeysActive else { return .ignored }
             moveSelection(up: true)
             return .handled
         }
         .onKeyPress(.downArrow) {
-            guard !searchFocused else { return .ignored }
-            guard !showingSetupChecklist else { return .ignored }
+            guard triageKeysActive else { return .ignored }
             moveSelection(up: false)
             return .handled
         }
         .onKeyPress(.return) {
-            guard !searchFocused else { return .ignored }
-            guard !showingSetupChecklist else { return .ignored }
+            guard triageKeysActive else { return .ignored }
             jumpSelected()
             return .handled
         }
         .onKeyPress(" ") {
-            guard !searchFocused else { return .ignored }
-            guard !showingSetupChecklist else { return .ignored }
+            guard triageKeysActive else { return .ignored }
             togglePeekSelected()
             return .handled
         }
@@ -890,6 +886,17 @@ struct PanelView: View {
         return false
     }
 
+    /// Arrow / Space / Return triage. Stands down whenever a field or
+    /// confirm dialog is using those keys. The filter field already did;
+    /// nudge did not, so Space-to-peek closed the field on the first space
+    /// of a typed sentence.
+    private var triageKeysActive: Bool {
+        !searchFocused
+            && !showingSetupChecklist
+            && expansion != .nudge
+            && expansion != .closeConfirm
+    }
+
     /// The panel is keyboard-first and, until now, silent about it: arrow keys,
     /// Space-to-peek, and Return-to-jump were documented in `PRODUCT.md` and
     /// nowhere on screen. This is the quietest place to say so — one 10 pt line
@@ -904,21 +911,38 @@ struct PanelView: View {
     /// returns `.ignored` while it is — so advertising "↑↓ move" in the state
     /// the panel opens in would be advertising a key that does nothing. While
     /// the field holds focus the hint names the one key that does work, which
-    /// is also the key that unlocks the others.
+    /// is also the key that unlocks the others. Nudge and close-confirm do
+    /// the same so the line never names a key the panel would swallow.
     @ViewBuilder
     private func keyboardHints(hasRows: Bool) -> some View {
         if hasRows && !isStartingAgent {
-            Text(searchFocused ? "esc to browse" : "↑↓ move · space peek · ⏎ jump")
+            Text(keyboardHintText)
                 .font(.system(size: 10))
                 .foregroundStyle(Brand.secondaryText)
                 .lineLimit(1)
                 .fixedSize()
-                .accessibilityLabel(
-                    searchFocused
-                        ? "Keyboard: press escape to leave the filter field and browse agents"
-                        : "Keyboard: up and down arrows move, space peeks, return jumps to the agent"
-                )
+                .accessibilityLabel(keyboardHintSpoken)
         }
+    }
+
+    private var keyboardHintText: String {
+        if searchFocused { return "esc to browse" }
+        if expansion == .nudge { return "⏎ send · esc cancel" }
+        if expansion == .closeConfirm { return "esc cancel" }
+        return "↑↓ move · space peek · ⏎ jump"
+    }
+
+    private var keyboardHintSpoken: String {
+        if searchFocused {
+            return "Keyboard: press escape to leave the filter field and browse agents"
+        }
+        if expansion == .nudge {
+            return "Keyboard: return sends the nudge, escape cancels"
+        }
+        if expansion == .closeConfirm {
+            return "Keyboard: press escape to cancel closing the agent"
+        }
+        return "Keyboard: up and down arrows move, space peeks, return jumps to the agent"
     }
 
     private var notificationToggle: some View {
@@ -1277,6 +1301,9 @@ struct PanelView: View {
         }
         nudgeText = ""
         expansion = .nudge
+        // Drop filter focus so the field that just appeared can take it.
+        // Triage keys then stand down via `triageKeysActive`.
+        searchFocused = false
     }
 
     private func submitNudge(_ agent: Agent) {
