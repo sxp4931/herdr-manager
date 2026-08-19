@@ -962,7 +962,7 @@ struct PanelView: View {
         switch appModel.connectionState {
         case .connected:
             HStack(spacing: 4) {
-                // Brand.working, not system .green: it is the herd-light
+                // Brand.working, not system .green: it is the navy herd-light
                 // vocabulary and resolves correctly in both appearances.
                 Circle().fill(Brand.working).frame(width: 7, height: 7)
                 Text("connected").font(.system(size: 11)).foregroundStyle(Brand.secondaryText)

@@ -1,22 +1,22 @@
 ---
 name: Shepherd
-description: A calm, warm macOS menu-bar utility for triaging a herd of AI coding agents
+description: A calm, navy macOS menu-bar utility for triaging a herd of AI coding agents
 colors:
   amber: "#8A5A00"
   amber-deep: "#6B4500"
   blocked: "#B3261E"
   silent: "#8A5A00"
   done: "#1E4BD2"
-  working: "#1E7138"
-  idle: "#5B6B64"
+  working: "#1A3A69"
+  idle: "#586274"
   unknown: "#5F666B"
   warn: "#C2410C"
-  approve-fill: "#1E7138"
+  approve-fill: "#1A3A69"
   pill-blocked: "#991A12"
   pill-silent: "#6B4500"
   pill-done: "#17389E"
-  pill-working: "#145126"
-  pill-idle: "#3E4A45"
+  pill-working: "#142D54"
+  pill-idle: "#3C4452"
   pill-unknown: "#43474C"
   secondary-text: "#5A5F64"
 typography:
@@ -114,13 +114,13 @@ The palette is deliberately two-layered: an adaptive body layer that resolves pe
 - **Blocked Red** (#B3261E / #FF6B6B): needs you NOW — blocked or process-gone.
 - **Silent Amber** (#8A5A00 / #FFC94D): waiting quietly past its threshold.
 - **Done Blue** (#1E4BD2 / #6CA6FF): finished work.
-- **Working Green** (#1E7138 / #54D98E): actively working.
+- **Working Navy** (#1A3A69 / #8BADDC): actively working.
 - **Idle Grey** (#5B6B64 / #8FA8A0): alive and idle.
 - **Unknown Grey** (#5F666B / #929A9F): state unclassifiable.
 
 ### Operational
 - **Warning Orange** (#C2410C / #FFA726): operational warnings only — health banner, pending actions, unpriced usage. Distinct from silent-amber and blocked-red.
-- **Approve Fill** (#1E7138 / #145126): the affirmative button fill; dark enough that white label text holds ≥4.5:1 in both appearances (system `.green` leaves white at ~2.2:1).
+- **Approve Fill** (#1A3A69 / #102445): the affirmative button fill; dark navy so white label text holds ≥4.5:1 in both appearances.
 
 ### Named Rules
 **The One Accent Rule.** Amber is the single accent, used sparingly (selection strokes, cost figures, the mark). Status colors carry information; they are not decoration. Two ambers on one row (silent pill + cost) is the documented exception, and they are distinguished by pill fill vs. text.
@@ -168,7 +168,7 @@ Continuous rounded rectangles everywhere: 10pt cards (agent rows, usage cards), 
 
 ### Buttons
 - **Shape:** rounded rectangles (7pt radius), regular control size.
-- **Approve / affirmative:** bordered-prominent with the Approve Fill green (#1E7138 / #145126); white label holds AA in both appearances.
+- **Approve / affirmative:** bordered-prominent with the Approve Fill navy (#1A3A69 / #102445); white label holds AA in both appearances.
 - **Destructive / deny:** bordered-prominent tinted blocked red, or `role: .destructive` for the system treatment.
 - **Secondary:** bordered style with default label color; used for Peek / Jump / Nudge / Retry / Cancel.
 - **Icon buttons:** 30pt borderless circles (6% primary fill) with SF Symbols and `.help()` tooltips — the panel header (usage, resync) and dashboard header (back, refresh).

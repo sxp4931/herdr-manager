@@ -7,9 +7,9 @@
 //  Usage: swift Tools/GenerateIcon/main.swift
 //
 //  Art direction:
-//  - A single warm-gold shepherd's crook forming an understated "S"
-//  - Three pearl nodes held inside the crook, representing guided agents
-//  - Deep pine enamel, generous margins, and enough weight to read at 16 px
+//  - A bronze shepherd's crook gathering three pearl lights
+//  - Dark navy field (not teal or green)
+//  - Enough weight to read at 16 px
 //
 
 import Cocoa

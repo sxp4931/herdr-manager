@@ -71,12 +71,12 @@ enum Brand {
         dark: (0.424, 0.651, 1.00)    // #6CA6FF
     )
     static let working = adaptive(
-        light: (0.118, 0.443, 0.220), // #1E7138
-        dark: (0.329, 0.851, 0.557)   // #54D98E
+        light: (0.102, 0.227, 0.412), // #1A3A69
+        dark: (0.545, 0.678, 0.863)   // #8BADDC
     )
     static let idle = adaptive(
-        light: (0.357, 0.420, 0.392), // #5B6B64
-        dark: (0.561, 0.659, 0.627)   // #8FA8A0
+        light: (0.345, 0.384, 0.455), // #586274
+        dark: (0.561, 0.604, 0.671)   // #8F9AAB
     )
     static let unknown = adaptive(
         light: (0.373, 0.400, 0.420), // #5F666B
@@ -100,12 +100,12 @@ enum Brand {
         dark: (0.54, 0.72, 1.00)    // #8AB8FF
     )
     static let pillWorking = adaptive(
-        light: (0.08, 0.32, 0.15),  // #145126
-        dark: (0.44, 0.90, 0.63)    // #70E6A1
+        light: (0.078, 0.176, 0.329), // #142D54
+        dark: (0.651, 0.761, 0.922)   // #A6C2EB
     )
     static let pillIdle = adaptive(
-        light: (0.24, 0.29, 0.27),  // #3E4A45
-        dark: (0.66, 0.76, 0.72)    // #A8C2BA
+        light: (0.235, 0.267, 0.322), // #3C4452
+        dark: (0.659, 0.698, 0.761)   // #A8B2C2
     )
     static let pillUnknown = adaptive(
         light: (0.26, 0.28, 0.30),  // #43474C
@@ -139,12 +139,11 @@ enum Brand {
         dark: (1.00, 0.655, 0.149)     // #FFA726
     )
 
-    /// Fill for the affirmative Approve button. System `.green` leaves white
-    /// label text at ~2.2:1; this darkened green keeps white ≥4.5:1 in both
-    /// appearances and ties approval to the working/active state family.
+    /// Fill for the affirmative Approve button. Dark navy keeps white label
+    /// text ≥4.5:1 in both appearances and ties approval to the working family.
     static let approveFill = adaptive(
-        light: (0.118, 0.443, 0.220), // #1E7138
-        dark: (0.08, 0.32, 0.15)      // #145126
+        light: (0.102, 0.227, 0.412), // #1A3A69
+        dark: (0.063, 0.141, 0.271)   // #102445
     )
 
     /// AA-safe secondary text grey. System `.secondary`/`.tertiary` drop to
@@ -249,7 +248,7 @@ enum Brand {
         if blocked > 0 { return Color(nsColor: .systemRed) }
         if silent > 0 { return Color(nsColor: .systemYellow) }
         if done > 0 { return Color(nsColor: .systemBlue) }
-        return Color(nsColor: .systemGreen)
+        return Color(nsColor: NSColor(srgbRed: 0.35, green: 0.48, blue: 0.68, alpha: 1))
     }
 
     /// Shape of the menu-bar attention badge, ranked by the same worst-state

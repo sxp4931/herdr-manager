@@ -1,0 +1,25 @@
+{
+  "name": "shepherd-launch",
+  "private": true,
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "remotion render ShepherdLaunch ../out/shepherd-launch.mp4 --overwrite --scale=2 --crf=16 --muted && python3 scripts/mux_audio.py",
+    "still-wide": "remotion still HeroWide ../out/hero-16x9.png --overwrite",
+    "still-square": "remotion still HeroSquare ../out/hero-1x1.png --overwrite",
+    "still-story": "remotion still HeroStory ../out/hero-9x16.png --overwrite",
+    "stills": "npm run still-wide && npm run still-square && npm run still-story"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.513",
+    "@remotion/google-fonts": "4.0.513",
+    "@remotion/media": "4.0.513",
+    "@remotion/transitions": "4.0.513",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "remotion": "^4.0.513"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "typescript": "^5.7.3"
+  }
+}

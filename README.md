@@ -5,6 +5,13 @@ Shepherd is a macOS menu-bar app that triages a herd of AI coding agents managed
 It answers "does anything need me?" at a glance and gets you from blocked to unblocked
 in one or two actions.
 
+[![Shepherd launch film](docs/hero-16x9.png)](docs/shepherd-launch.mp4)
+
+[Watch the 32s launch film](docs/shepherd-launch.mp4)
+
+<video src="docs/shepherd-launch.mp4" controls playsinline preload="metadata" poster="docs/hero-16x9.png" width="100%">
+</video>
+
 ![Shepherd panel: attention counts, Needs you / Running / All scopes, and a filter field](docs/panel.png)
 
 - **Live status** — subscription-driven view of every agent pane, with a
