@@ -640,6 +640,78 @@ struct LocalTokenMeterTests {
         #expect(snapshot.ambiguousAttributionCount == 0)
     }
 
+    @Test("Skips a huge non-usage JSONL line without dropping later token events")
+    func skipsHugeNonUsageLine() async throws {
+        let home = try makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let file = home
+            .appendingPathComponent(".codex/sessions/2026/01", isDirectory: true)
+            .appendingPathComponent("rollout-huge.jsonl")
+        let junk = String(repeating: "x", count: 120_000)
+        try writeLines([
+            #"{"timestamp":"2026-01-15T11:00:00Z","type":"session_meta","payload":{"id":"session-huge","cwd":"/repo"}}"#,
+            #"{"timestamp":"2026-01-15T11:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}}}"#,
+            #"{"type":"user","content":"\#(junk)"}"#,
+            #"{"timestamp":"2026-01-15T11:02:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":250,"cached_input_tokens":0,"output_tokens":20}}}}"#,
+        ], to: file)
+
+        let meter = LocalTokenMeter(homeDirectory: home)
+        let snapshot = await meter.snapshot(
+            agents: [],
+            priceBook: TokenMeterPriceBook.defaults,
+            now: date("2026-01-15T13:00:00Z"),
+            calendar: utcCalendar()
+        )
+
+        let provider = snapshot.providerSummary(for: .codex, window: .day)
+        #expect(provider.usage.inputTokens == 250)
+        #expect(provider.usage.outputTokens == 20)
+    }
+
+    @Test("Rereads a log after it grows and keeps totals stable when it does not")
+    func rereadsGrownLogsAndKeepsStableTotals() async throws {
+        let home = try makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let file = home
+            .appendingPathComponent(".codex/sessions/2026/01", isDirectory: true)
+            .appendingPathComponent("rollout-cache.jsonl")
+        try writeLines([
+            #"{"timestamp":"2026-01-15T11:00:00Z","type":"session_meta","payload":{"id":"session-cache","cwd":"/repo"}}"#,
+            #"{"timestamp":"2026-01-15T11:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}}}"#,
+        ], to: file)
+
+        let meter = LocalTokenMeter(homeDirectory: home)
+        let first = await meter.snapshot(
+            agents: [],
+            priceBook: TokenMeterPriceBook.defaults,
+            now: date("2026-01-15T13:00:00Z"),
+            calendar: utcCalendar()
+        )
+        let second = await meter.snapshot(
+            agents: [],
+            priceBook: TokenMeterPriceBook.defaults,
+            now: date("2026-01-15T13:00:00Z"),
+            calendar: utcCalendar()
+        )
+        #expect(first.providerSummary(for: .codex, window: .day) == second.providerSummary(for: .codex, window: .day))
+        #expect(first.providerSummary(for: .codex, window: .day).usage.inputTokens == 100)
+
+        try writeLines([
+            #"{"timestamp":"2026-01-15T11:00:00Z","type":"session_meta","payload":{"id":"session-cache","cwd":"/repo"}}"#,
+            #"{"timestamp":"2026-01-15T11:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}}}"#,
+            #"{"timestamp":"2026-01-15T11:02:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":400,"cached_input_tokens":0,"output_tokens":40}}}}"#,
+        ], to: file)
+
+        let third = await meter.snapshot(
+            agents: [],
+            priceBook: TokenMeterPriceBook.defaults,
+            now: date("2026-01-15T13:00:00Z"),
+            calendar: utcCalendar()
+        )
+        #expect(third.providerSummary(for: .codex, window: .day).usage.inputTokens == 400)
+        #expect(third.providerSummary(for: .codex, window: .day).usage.outputTokens == 40)
+    }
+
     private func writeCursorStore(to url: URL, model: String, blob: String) throws {
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),

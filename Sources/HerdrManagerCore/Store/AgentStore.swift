@@ -400,6 +400,7 @@ public final class AgentStore {
                 guard let self else { return }
 
                 let workingAgents = self.agents.values.filter { $0.status == .working }
+                await poller.prune(keeping: Set(self.agents.keys))
                 let updates = await poller.poll(agents: workingAgents, adapter: adapter)
 
                 // Apply lastOutputAt updates on MainActor

@@ -4,7 +4,7 @@ import Foundation
 
 public protocol HerdrAdapter: Sendable {
     func snapshot() async throws -> HerdrSnapshot
-    func read(paneId: String, source: PaneReadSource) async throws -> PaneReadResult
+    func read(paneId: String, source: PaneReadSource, lines: Int?) async throws -> PaneReadResult
     func explain(paneId: String) async throws -> AgentExplainResult
     func processInfo(paneId: String) async throws -> ProcessInfoResult
     func focus(paneId: String) async throws
@@ -19,6 +19,12 @@ public protocol HerdrAdapter: Sendable {
     func startAgent(paneId: String, kind: String, name: String) async throws
     func waitStatus(paneId: String, until: [String], timeoutMs: Int) async throws -> Bool
     func reportMetadata(paneId: String, source: String, tokens: [String: String], ttlMs: Int) async throws
+}
+
+public extension HerdrAdapter {
+    func read(paneId: String, source: PaneReadSource) async throws -> PaneReadResult {
+        try await read(paneId: paneId, source: source, lines: nil)
+    }
 }
 
 // MARK: - LiveHerdrAdapter

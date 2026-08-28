@@ -24,7 +24,7 @@ private struct MockHerdrAdapter: HerdrAdapter {
         return result
     }
     
-    func read(paneId: String, source: PaneReadSource) async throws -> PaneReadResult {
+    func read(paneId: String, source: PaneReadSource, lines: Int?) async throws -> PaneReadResult {
         guard let result = readResult else { throw NSError(domain: "Mock", code: 1) }
         return result
     }
@@ -296,6 +296,21 @@ struct HeartbeatPollerHashTests {
         let hash1 = HeartbeatPoller.sha256(content1)
         let hash2 = HeartbeatPoller.sha256(content2)
         #expect(hash1 != hash2, "Hash should change when pane output changes")
+    }
+
+    @Test("Prune drops last-output dates for agents that left the herd")
+    func pruneDropsClosedAgents() async throws {
+        var adapter = MockHerdrAdapter()
+        adapter.readResult = PaneReadResult(text: "screen", source: "detection")
+        let keep = Agent(id: AgentID("w1:p1"), status: .working)
+        let drop = Agent(id: AgentID("w1:p2"), status: .working)
+        let poller = HeartbeatPoller()
+        _ = await poller.poll(agents: [keep, drop], adapter: adapter)
+        #expect(await poller.lastOutputDate(for: keep.id) != nil)
+        #expect(await poller.lastOutputDate(for: drop.id) != nil)
+        await poller.prune(keeping: [keep.id])
+        #expect(await poller.lastOutputDate(for: keep.id) != nil)
+        #expect(await poller.lastOutputDate(for: drop.id) == nil)
     }
 }
 

@@ -30,7 +30,9 @@ public actor HeartbeatPoller {
         for agent in agents {
             let paneId = agent.id.raw  // herdr uses full session-qualified IDs
             do {
-                let result = try await adapter.read(paneId: paneId, source: .detection)
+                // Detection is a screen-sized buffer. Cap the read so a
+                // misbehaving herdr cannot ship full scrollback into RSS.
+                let result = try await adapter.read(paneId: paneId, source: .detection, lines: 80)
                 let hash = Self.sha256(result.text)
                 let now = Date()
 
@@ -58,6 +60,12 @@ public actor HeartbeatPoller {
     public func remove(agentId: AgentID) {
         hashes.removeValue(forKey: agentId)
         lastOutputDates.removeValue(forKey: agentId)
+    }
+
+    /// Drop hashes for panes that left the herd.
+    public func prune(keeping ids: Set<AgentID>) {
+        hashes = hashes.filter { ids.contains($0.key) }
+        lastOutputDates = lastOutputDates.filter { ids.contains($0.key) }
     }
 
     /// Clear all tracking state.

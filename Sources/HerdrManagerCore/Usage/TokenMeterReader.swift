@@ -9,6 +9,10 @@ import SQLite3
 public actor LocalTokenMeter {
     private let homeDirectory: URL
     private let iso8601Formatter: ISO8601DateFormatter
+    /// Parsed usage events for files whose size+mtime have not changed.
+    /// Avoids re-reading multi-gigabyte JSONL/SQLite logs every 30s.
+    private var fileEventCache: [String: CachedFileEvents] = [:]
+    private var seenCacheKeysThisScan: Set<String> = []
 
     public init(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) {
         self.homeDirectory = homeDirectory
@@ -29,6 +33,7 @@ public actor LocalTokenMeter {
             cwdHints[claudeProjectKey(for: cwd)] = cwd
         }
 
+        seenCacheKeysThisScan.removeAll(keepingCapacity: true)
         var events: [TokenUsageEvent] = []
         events.append(contentsOf: scanClaude(cwdHints: cwdHints))
         events.append(contentsOf: scanCodex())
@@ -36,6 +41,7 @@ public actor LocalTokenMeter {
         events.append(contentsOf: scanGrok())
         events.append(contentsOf: scanCursor())
         events.append(contentsOf: scanOpenCode())
+        fileEventCache = fileEventCache.filter { seenCacheKeysThisScan.contains($0.key) }
 
         return TokenMeterAggregator.snapshot(
             events: events,
@@ -62,34 +68,36 @@ public actor LocalTokenMeter {
         for project in projectDirectories where isDirectory(project) {
             let projectHint = cwdHints[project.lastPathComponent]
             for file in jsonlFiles(in: project) {
-                result.append(contentsOf: scanClaudeTranscript(file, cwdHint: projectHint))
+                result.append(contentsOf: cachedEvents(for: file, extra: projectHint ?? "") {
+                    scanClaudeTranscript(file, cwdHint: projectHint)
+                })
             }
         }
         return result
     }
 
     private func scanClaudeTranscript(_ file: URL, cwdHint: String?) -> [TokenUsageEvent] {
-        guard let contents = try? String(contentsOf: file, encoding: .utf8) else { return [] }
         let fallbackDate = modificationDate(of: file)
         let sessionID = claudeSessionID(for: file)
         var currentCwd = cwdHint
         var eventsByID: [String: TokenUsageEvent] = [:]
 
-        for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard let data = String(line).data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data),
-                  let record = object as? [String: Any] else {
-                continue
-            }
+        forEachJSONLLine(in: file) { lineNumber, data in
+            let looksLikeUsage = dataContains(data, "\"assistant\"") && dataContains(data, "\"usage\"")
+            let looksLikeCwd = dataContains(data, "\"cwd\"") && data.count <= 65_536
+            guard looksLikeUsage || looksLikeCwd else { return }
+
+            guard let record = jsonObject(from: data) else { return }
 
             if let cwd = record["cwd"] as? String, !cwd.isEmpty {
                 currentCwd = cwd
             }
-            guard record["type"] as? String == "assistant",
+            guard looksLikeUsage,
+                  record["type"] as? String == "assistant",
                   let message = record["message"] as? [String: Any],
                   let usage = message["usage"] as? [String: Any],
                   integerOptional(usage["output_tokens"]) != nil else {
-                continue
+                return
             }
 
             let output = integer(usage["output_tokens"])
@@ -104,7 +112,7 @@ public actor LocalTokenMeter {
             let model = message["model"] as? String
             let usageID = (message["id"] as? String)
                 ?? (record["uuid"] as? String)
-                ?? "(file.lastPathComponent):(lineNumber)"
+                ?? "\(file.lastPathComponent):\(lineNumber)"
             let toolCount = toolUseCount(message["content"])
             let tokenUsage = TokenUsage(
                 inputTokens: input + cacheCreation + cacheRead,
@@ -143,40 +151,48 @@ public actor LocalTokenMeter {
         let root = homeDirectory.appendingPathComponent(".codex/sessions", isDirectory: true)
         var result: [TokenUsageEvent] = []
         for file in jsonlFiles(in: root) {
-            result.append(contentsOf: scanCodexSession(file))
+            result.append(contentsOf: cachedEvents(for: file) {
+                scanCodexSession(file)
+            })
         }
         return result
     }
 
     private func scanCodexSession(_ file: URL) -> [TokenUsageEvent] {
-        guard let contents = try? String(contentsOf: file, encoding: .utf8),
-              let firstLine = contents.split(separator: "\n", omittingEmptySubsequences: true).first,
-              let firstData = String(firstLine).data(using: .utf8),
-              let firstObject = try? JSONSerialization.jsonObject(with: firstData),
-              let metadata = firstObject as? [String: Any],
-              metadata["type"] as? String == "session_meta",
-              let metadataPayload = metadata["payload"] as? [String: Any],
-              let cwd = normalizedPath(metadataPayload["cwd"] as? String),
-              !cwd.isEmpty else {
-            return []
-        }
-
-        let sessionID = (metadataPayload["id"] as? String)
-            ?? (metadataPayload["session_id"] as? String)
-            ?? file.deletingPathExtension().lastPathComponent
-        let fallbackDate = parseDate(metadata["timestamp"]) ?? modificationDate(of: file)
+        var sessionID: String?
+        var cwd: String?
+        var fallbackDate = modificationDate(of: file)
         var previous: TokenUsage?
         var currentModel: String?
         var events: [TokenUsageEvent] = []
-        var lineNumber = 0
+        var accepted = false
+        var sawFirstLine = false
 
-        for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
-            defer { lineNumber += 1 }
-            guard let data = String(line).data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data),
-                  let record = object as? [String: Any],
+        forEachJSONLLine(in: file) { lineNumber, data in
+            if !sawFirstLine {
+                sawFirstLine = true
+                guard let metadata = jsonObject(from: data),
+                      metadata["type"] as? String == "session_meta",
+                      let metadataPayload = metadata["payload"] as? [String: Any],
+                      let parsedCwd = normalizedPath(metadataPayload["cwd"] as? String),
+                      !parsedCwd.isEmpty else {
+                    return
+                }
+                accepted = true
+                cwd = parsedCwd
+                sessionID = (metadataPayload["id"] as? String)
+                    ?? (metadataPayload["session_id"] as? String)
+                    ?? file.deletingPathExtension().lastPathComponent
+                fallbackDate = parseDate(metadata["timestamp"]) ?? fallbackDate
+                return
+            }
+            guard accepted else { return }
+
+            guard dataContains(data, "token_count")
+                    || dataContains(data, "\"model\"") else { return }
+            guard let record = jsonObject(from: data),
                   let payload = record["payload"] as? [String: Any] else {
-                continue
+                return
             }
 
             if let model = payload["model"] as? String, !model.isEmpty {
@@ -190,7 +206,7 @@ public actor LocalTokenMeter {
             guard payload["type"] as? String == "token_count",
                   let info = payload["info"] as? [String: Any],
                   let totals = info["total_token_usage"] as? [String: Any] else {
-                continue
+                return
             }
 
             let current = TokenUsage(
@@ -201,7 +217,7 @@ public actor LocalTokenMeter {
             )
             let delta = deltaUsage(current, previous: previous)
             previous = current
-            guard delta.totalTokens > 0 else { continue }
+            guard delta.totalTokens > 0, let sessionID, let cwd else { return }
 
             events.append(TokenUsageEvent(
                 id: "codex:\(sessionID):\(lineNumber)",
@@ -213,7 +229,7 @@ public actor LocalTokenMeter {
                 usage: delta
             ))
         }
-        return events
+        return accepted ? events : []
     }
 
     private func deltaUsage(_ current: TokenUsage, previous: TokenUsage?) -> TokenUsage {
@@ -231,25 +247,22 @@ public actor LocalTokenMeter {
 
     private func scanKimi() -> [TokenUsageEvent] {
         let index = homeDirectory.appendingPathComponent(".kimi-code/session_index.jsonl")
-        guard let contents = try? String(contentsOf: index, encoding: .utf8) else { return [] }
-        var sessionDirectories: [URL] = []
+        var sessions: [(directory: URL, workDir: String?)] = []
         var seen: Set<String> = []
 
-        for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard let data = String(line).data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data),
-                  let record = object as? [String: Any],
+        forEachJSONLLine(in: index) { _, data in
+            guard let record = jsonObject(from: data),
                   let path = record["sessionDir"] as? String,
-                  !path.isEmpty else { continue }
+                  !path.isEmpty else { return }
             let url = URL(fileURLWithPath: path)
-            if FileManager.default.fileExists(atPath: url.path), seen.insert(url.path).inserted {
-                sessionDirectories.append(url)
-            }
+            guard FileManager.default.fileExists(atPath: url.path),
+                  seen.insert(url.path).inserted else { return }
+            sessions.append((directory: url, workDir: normalizedPath(record["workDir"] as? String)))
         }
 
         var result: [TokenUsageEvent] = []
-        for directory in sessionDirectories {
-            let agentsDirectory = directory.appendingPathComponent("agents", isDirectory: true)
+        for session in sessions {
+            let agentsDirectory = session.directory.appendingPathComponent("agents", isDirectory: true)
             guard let agentDirectories = try? FileManager.default.contentsOfDirectory(
                 at: agentsDirectory,
                 includingPropertiesForKeys: [.isDirectoryKey],
@@ -257,41 +270,25 @@ public actor LocalTokenMeter {
             ) else { continue }
             for agentDirectory in agentDirectories where isDirectory(agentDirectory) {
                 let wire = agentDirectory.appendingPathComponent("wire.jsonl")
-                result.append(contentsOf: scanKimiWire(
-                    wire,
-                    cwd: normalizedPathFromIndex(directory: directory, index: index),
-                    sessionID: directory.lastPathComponent + ":" + agentDirectory.lastPathComponent
-                ))
+                result.append(contentsOf: cachedEvents(for: wire, extra: session.workDir ?? "") {
+                    scanKimiWire(
+                        wire,
+                        cwd: session.workDir,
+                        sessionID: session.directory.lastPathComponent + ":" + agentDirectory.lastPathComponent
+                    )
+                })
             }
         }
         return result
     }
 
-    private func normalizedPathFromIndex(directory: URL, index: URL) -> String? {
-        // The index record is read again here only for the matching session.
-        // This keeps the wire parser independent of the index's field names.
-        guard let contents = try? String(contentsOf: index, encoding: .utf8) else { return nil }
-        for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard let data = String(line).data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data),
-                  let record = object as? [String: Any],
-                  let path = record["sessionDir"] as? String,
-                  URL(fileURLWithPath: path).path == directory.path else { continue }
-            return normalizedPath(record["workDir"] as? String)
-        }
-        return nil
-    }
-
     private func scanKimiWire(_ file: URL, cwd: String?, sessionID: String) -> [TokenUsageEvent] {
-        guard let contents = try? String(contentsOf: file, encoding: .utf8) else { return [] }
         var currentModel: String?
         var events: [TokenUsageEvent] = []
-        var lineNumber = 0
-        for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
-            defer { lineNumber += 1 }
-            guard let data = String(line).data(using: .utf8),
-                  let record = try? JSONSerialization.jsonObject(with: data),
-                  let object = record as? [String: Any] else { continue }
+        forEachJSONLLine(in: file) { lineNumber, data in
+            guard dataContains(data, "llm.request")
+                    || dataContains(data, "usage.record") else { return }
+            guard let object = jsonObject(from: data) else { return }
             let date = epochDate(object["time"], milliseconds: true) ?? modificationDate(of: file)
             let type = object["type"] as? String
             if type == "llm.request" {
@@ -299,7 +296,7 @@ public actor LocalTokenMeter {
             }
             guard type == "usage.record",
                   object["usageScope"] as? String == "turn",
-                  let usage = object["usage"] as? [String: Any] else { continue }
+                  let usage = object["usage"] as? [String: Any] else { return }
 
             let cacheRead = integer(usage["inputCacheRead"])
             let cacheCreation = integer(usage["inputCacheCreation"])
@@ -311,7 +308,7 @@ public actor LocalTokenMeter {
                 cacheWrite5mTokens: cacheCreation,
                 outputTokens: output
             )
-            guard tokenUsage.totalTokens > 0 else { continue }
+            guard tokenUsage.totalTokens > 0 else { return }
             events.append(TokenUsageEvent(
                 id: "kimi:\(sessionID):\(lineNumber)",
                 sessionID: sessionID,
@@ -338,8 +335,24 @@ public actor LocalTokenMeter {
         var result: [TokenUsageEvent] = []
         for group in groups where isDirectory(group) {
             let cwd = grokCWD(for: group)
-            for file in jsonlFiles(in: group) where file.lastPathComponent == "updates.jsonl" {
-                result.append(contentsOf: scanGrokUpdates(file, cwd: cwd))
+            guard let sessions = try? FileManager.default.contentsOfDirectory(
+                at: group,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for session in sessions where isDirectory(session) {
+                let file = session.appendingPathComponent("updates.jsonl")
+                guard FileManager.default.fileExists(atPath: file.path) else { continue }
+                let extra = [
+                    cwd ?? "",
+                    fileFingerprint(of: session.appendingPathComponent("summary.json"))
+                        .map { "\($0.size):\($0.modification)" } ?? "",
+                    fileFingerprint(of: session.appendingPathComponent("events.jsonl"))
+                        .map { "\($0.size):\($0.modification)" } ?? "",
+                ].joined(separator: "|")
+                result.append(contentsOf: cachedEvents(for: file, extra: extra) {
+                    scanGrokUpdates(file, cwd: cwd)
+                })
             }
         }
         return result
@@ -354,21 +367,19 @@ public actor LocalTokenMeter {
     }
 
     private func scanGrokUpdates(_ file: URL, cwd: String?) -> [TokenUsageEvent] {
-        guard let contents = try? String(contentsOf: file, encoding: .utf8) else { return [] }
         let session = file.deletingLastPathComponent()
         let sessionMeta = grokSessionMeta(at: session)
         let cwd = sessionMeta.cwd ?? cwd
         let fallbackDate = modificationDate(of: file)
         var records: [String: (total: Int64, date: Date, model: String?)] = [:]
         var lastSeenModel: String?
-        var lineNumber = 0
-        for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
-            defer { lineNumber += 1 }
-            guard let data = String(line).data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data),
-                  let record = object as? [String: Any],
+        forEachJSONLLine(in: file) { lineNumber, data in
+            guard dataContains(data, "totalTokens")
+                    || dataContains(data, "\"model\"")
+                    || dataContains(data, "modelId") else { return }
+            guard let record = jsonObject(from: data),
                   let params = record["params"] as? [String: Any] else {
-                continue
+                return
             }
 
             if let lineModel = grokModel(fromParams: params) {
@@ -378,7 +389,7 @@ public actor LocalTokenMeter {
             guard let metadata = params["_meta"] as? [String: Any],
                   let total = integerOptional(metadata["totalTokens"]),
                   total > 0 else {
-                continue
+                return
             }
             let promptID = nonEmptyString(metadata["promptId"]) ?? "line-\(lineNumber)"
             let date = epochDate(metadata["agentTimestampMs"] ?? metadata["turnStartMs"], milliseconds: true)
@@ -389,7 +400,7 @@ public actor LocalTokenMeter {
                     if existing.model == nil, let model {
                         records[promptID] = (total: existing.total, date: existing.date, model: model)
                     }
-                    continue
+                    return
                 }
                 records[promptID] = (total: total, date: date, model: existing.model ?? model)
             } else {
@@ -454,28 +465,42 @@ public actor LocalTokenMeter {
     }
 
     private func grokLastEventModelID(at file: URL) -> String? {
-        guard let contents = try? String(contentsOf: file, encoding: .utf8) else {
-            return nil
-        }
-        var last: String?
-        for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard let data = String(line).data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data),
-                  let record = object as? [String: Any] else {
-                continue
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd(), size > 0 else { return nil }
+        let window = min(size, 65_536)
+        do {
+            try handle.seek(toOffset: size - window)
+            guard let data = try handle.read(upToCount: Int(window)), !data.isEmpty else {
+                return nil
             }
-            if let model = nonEmptyString(record["model_id"]) {
-                last = model
-                continue
+            var slice = data
+            if size > window, let newline = data.firstIndex(of: 0x0A), newline + 1 < data.endIndex {
+                slice = data[(newline + 1)...]
             }
-            for value in record.values {
-                if let nested = value as? [String: Any],
-                   let model = nonEmptyString(nested["model_id"]) {
+            var last: String?
+            var start = slice.startIndex
+            while start < slice.endIndex {
+                let end = slice[start...].firstIndex(of: 0x0A) ?? slice.endIndex
+                let line = slice[start..<end]
+                start = end < slice.endIndex ? slice.index(after: end) : slice.endIndex
+                guard !line.isEmpty,
+                      let record = jsonObject(from: Data(line)) else { continue }
+                if let model = nonEmptyString(record["model_id"]) {
                     last = model
+                    continue
+                }
+                for value in record.values {
+                    if let nested = value as? [String: Any],
+                       let model = nonEmptyString(nested["model_id"]) {
+                        last = model
+                    }
                 }
             }
+            return last
+        } catch {
+            return nil
         }
-        return last
     }
 
     // MARK: - Cursor agent
@@ -502,14 +527,18 @@ public actor LocalTokenMeter {
 
     private func scanCursorUsageLog() -> [TokenUsageEvent] {
         let file = homeDirectory.appendingPathComponent(".cursor/herdr-usage.jsonl")
-        guard let contents = try? String(contentsOf: file, encoding: .utf8) else { return [] }
+        return cachedEvents(for: file) {
+            scanCursorUsageLogUncached(file)
+        }
+    }
+
+    private func scanCursorUsageLogUncached(_ file: URL) -> [TokenUsageEvent] {
         var eventsByID: [String: TokenUsageEvent] = [:]
-        var lineNumber = 0
-        for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
-            defer { lineNumber += 1 }
-            guard let data = String(line).data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data),
-                  let record = object as? [String: Any] else { continue }
+        forEachJSONLLine(in: file) { lineNumber, data in
+            guard dataContains(data, "input_tokens")
+                    || dataContains(data, "inputTokens")
+                    || dataContains(data, "\"usage\"") else { return }
+            guard let record = jsonObject(from: data) else { return }
 
             let usageObject = record["usage"] as? [String: Any]
             let input = cursorLogInteger(["input_tokens", "inputTokens"], record, usageObject)
@@ -533,7 +562,7 @@ public actor LocalTokenMeter {
                 cacheWrite5mTokens: cacheWrite,
                 outputTokens: output
             )
-            guard tokenUsage.totalTokens > 0 else { continue }
+            guard tokenUsage.totalTokens > 0 else { return }
 
             let sessionID = nonEmptyString(record["conversation_id"])
                 ?? nonEmptyString(record["conversationId"])
@@ -558,7 +587,7 @@ public actor LocalTokenMeter {
             )
             if let existing = eventsByID[eventID],
                tokenUsage.totalTokens < existing.usage.totalTokens {
-                continue
+                return
             }
             eventsByID[eventID] = event
         }
@@ -609,7 +638,12 @@ public actor LocalTokenMeter {
                 options: [.skipsHiddenFiles]
             ) else { continue }
             for session in sessions where isDirectory(session) {
-                events.append(contentsOf: scanCursorSession(session))
+                let store = session.appendingPathComponent("store.db")
+                let meta = session.appendingPathComponent("meta.json")
+                let extra = fileFingerprint(of: meta).map { "\($0.size):\($0.modification)" } ?? ""
+                events.append(contentsOf: cachedEvents(for: store, extra: extra) {
+                    scanCursorSession(session)
+                })
             }
         }
         return events
@@ -629,39 +663,45 @@ public actor LocalTokenMeter {
         let openResult = sqlite3_open_v2(store.path, &db, SQLITE_OPEN_READONLY, nil)
         guard openResult == SQLITE_OK, let db else { return [] }
         defer { sqlite3_close(db) }
+        configureReadOnlySQLite(db)
 
         if model == nil, let stored = cursorLastUsedModel(db) {
             model = stored
         }
 
-        let sql = "SELECT id, data FROM blobs"
+        let sql = "SELECT id, data FROM blobs WHERE length(data) <= 2000000"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
             return []
         }
         defer { sqlite3_finalize(stmt) }
 
+        let usageMarker = Data("\"usage\"".utf8)
         while sqlite3_step(stmt) == SQLITE_ROW {
-            guard let blobID = sqliteText(stmt, index: 0),
-                  let bytes = sqliteBlob(stmt, index: 1) else { continue }
-            // File-read blobs of this repo's tests contain the same Anthropic
-            // `usage` shape as a real API response. Skip those so a Cursor
-            // session that grepped TokenMeterTests cannot mint fake cost.
-            if bytes.range(of: Data("TokenMeterTests".utf8)) != nil
-                || bytes.range(of: Data("#expect".utf8)) != nil {
-                continue
-            }
-            let blobModel = cursorModelName(in: bytes) ?? model
-            for (index, usage) in cursorAPIUsageObjects(in: bytes).enumerated() {
-                events.append(TokenUsageEvent(
-                    id: "cursor-chat:\(sessionID):\(blobID):\(index)",
-                    sessionID: sessionID,
-                    provider: .cursor,
-                    model: blobModel ?? model,
-                    cwd: cwd,
-                    date: meta.date,
-                    usage: usage
-                ))
+            autoreleasepool {
+                guard sqlite3_column_bytes(stmt, 1) <= 2_000_000,
+                      let blobID = sqliteText(stmt, index: 0),
+                      let bytes = sqliteBlob(stmt, index: 1) else { return }
+                // File-read blobs of this repo's tests contain the same Anthropic
+                // `usage` shape as a real API response. Skip those so a Cursor
+                // session that grepped TokenMeterTests cannot mint fake cost.
+                if bytes.range(of: Data("TokenMeterTests".utf8)) != nil
+                    || bytes.range(of: Data("#expect".utf8)) != nil {
+                    return
+                }
+                guard bytes.range(of: usageMarker) != nil else { return }
+                let blobModel = cursorModelName(in: bytes) ?? model
+                for (index, usage) in cursorAPIUsageObjects(in: bytes).enumerated() {
+                    events.append(TokenUsageEvent(
+                        id: "cursor-chat:\(sessionID):\(blobID):\(index)",
+                        sessionID: sessionID,
+                        provider: .cursor,
+                        model: blobModel ?? model,
+                        cwd: cwd,
+                        date: meta.date,
+                        usage: usage
+                    ))
+                }
             }
         }
         return events
@@ -834,15 +874,22 @@ public actor LocalTokenMeter {
     // MARK: - OpenCode SQLite log
 
     private func scanOpenCode() -> [TokenUsageEvent] {
-        let dbPath = homeDirectory
+        let dbURL = homeDirectory
             .appendingPathComponent(".local/share/opencode/opencode.db", isDirectory: false)
-            .path
+        return cachedEvents(for: dbURL) {
+            scanOpenCodeUncached(dbURL)
+        }
+    }
+
+    private func scanOpenCodeUncached(_ dbURL: URL) -> [TokenUsageEvent] {
+        let dbPath = dbURL.path
         guard FileManager.default.fileExists(atPath: dbPath) else { return [] }
 
         var db: OpaquePointer?
         let openResult = sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, nil)
         guard openResult == SQLITE_OK, let db else { return [] }
         defer { sqlite3_close(db) }
+        configureReadOnlySQLite(db)
 
         let sql = """
         SELECT rowid, id, model, agent, directory, tokens_input, tokens_output, \
@@ -1002,6 +1049,110 @@ public actor LocalTokenMeter {
     private func claudeProjectKey(for cwd: String) -> String {
         cwd.replacingOccurrences(of: "[^A-Za-z0-9-]", with: "-", options: .regularExpression)
     }
+
+    // MARK: - Streaming / cache
+
+    private func fileFingerprint(of url: URL) -> FileFingerprint? {
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+              let size = values.fileSize else {
+            return nil
+        }
+        return FileFingerprint(
+            size: Int64(size),
+            modification: values.contentModificationDate?.timeIntervalSinceReferenceDate ?? 0
+        )
+    }
+
+    private func cachedEvents(
+        for url: URL,
+        extra: String = "",
+        scan: () -> [TokenUsageEvent]
+    ) -> [TokenUsageEvent] {
+        let key = url.path
+        seenCacheKeysThisScan.insert(key)
+        guard let fingerprint = fileFingerprint(of: url) else {
+            fileEventCache.removeValue(forKey: key)
+            return []
+        }
+        if let cached = fileEventCache[key],
+           cached.fingerprint == fingerprint,
+           cached.extra == extra {
+            return cached.events
+        }
+        let events = autoreleasepool { scan() }
+        fileEventCache[key] = CachedFileEvents(
+            fingerprint: fingerprint,
+            extra: extra,
+            events: events
+        )
+        return events
+    }
+
+    private func configureReadOnlySQLite(_ db: OpaquePointer) {
+        sqlite3_exec(db, "PRAGMA query_only = 1;", nil, nil, nil)
+        sqlite3_exec(db, "PRAGMA cache_size = -2000;", nil, nil, nil)
+        sqlite3_exec(db, "PRAGMA mmap_size = 0;", nil, nil, nil)
+    }
+
+    private func dataContains(_ data: Data, _ ascii: String) -> Bool {
+        data.range(of: Data(ascii.utf8)) != nil
+    }
+
+    private func jsonObject(from data: Data) -> [String: Any]? {
+        guard !data.isEmpty else { return nil }
+        return autoreleasepool {
+            (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        }
+    }
+
+    /// Streams JSONL without loading the whole file into a String.
+    private func forEachJSONLLine(in url: URL, body: (Int, Data) -> Void) {
+        guard let stream = InputStream(url: url) else { return }
+        stream.open()
+        defer { stream.close() }
+
+        let chunkSize = 64 * 1024
+        var chunk = [UInt8](repeating: 0, count: chunkSize)
+        var pending = Data()
+        pending.reserveCapacity(chunkSize)
+        var lineNumber = 0
+
+        func emit(_ raw: Data) {
+            var line = raw
+            if line.last == 0x0D {
+                line.removeLast()
+            }
+            if !line.isEmpty {
+                body(lineNumber, line)
+            }
+            lineNumber += 1
+        }
+
+        while true {
+            let n = stream.read(&chunk, maxLength: chunkSize)
+            if n < 0 { return }
+            if n == 0 { break }
+            pending.append(contentsOf: chunk[0..<n])
+            while let newline = pending.firstIndex(of: 0x0A) {
+                emit(pending.subdata(in: pending.startIndex..<newline))
+                pending.removeSubrange(pending.startIndex...newline)
+            }
+        }
+        if !pending.isEmpty {
+            emit(pending)
+        }
+    }
+}
+
+private struct FileFingerprint: Equatable {
+    var size: Int64
+    var modification: TimeInterval
+}
+
+private struct CachedFileEvents {
+    var fingerprint: FileFingerprint
+    var extra: String
+    var events: [TokenUsageEvent]
 }
 
 // MARK: - Aggregation
