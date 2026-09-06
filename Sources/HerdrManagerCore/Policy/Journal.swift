@@ -117,47 +117,51 @@ public actor Journal {
     }
 
     /// Read, filter, and atomically rewrite the journal. Caller must hold the lock.
+    /// Kept lines are streamed to a temp file so cleanup never concatenates the
+    /// surviving journal into a second in-memory blob.
     private func cleanupUnlocked(maxAgeDays: Int) throws {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
-        guard let data = FileManager.default.contents(atPath: fileURL.path) else { return }
 
-        let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
 
         let cutoff = Date().addingTimeInterval(-Double(maxAgeDays) * 86400)
-        var kept: [Data] = []
-
-        for line in lines {
-            guard let entry = try? decoder.decode(JournalEntry.self, from: Data(line)) else {
-                continue // skip malformed lines
-            }
-            if entry.keepForever || entry.timestamp > cutoff {
-                if let encoded = try? encoder.encode(entry) {
-                    kept.append(encoded)
-                }
-            }
-        }
-
-        var newData = Data()
-        for (i, line) in kept.enumerated() {
-            newData.append(line)
-            if i < kept.count - 1 {
-                newData.append(0x0A)
-            }
-        }
-        if !kept.isEmpty {
-            newData.append(0x0A) // trailing newline
-        }
-
         let dir = fileURL.deletingLastPathComponent()
         let tempURL = dir.appendingPathComponent(".journal-\(UUID().uuidString).tmp")
-        try newData.write(to: tempURL)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600], ofItemAtPath: tempURL.path
+        FileManager.default.createFile(
+            atPath: tempURL.path,
+            contents: Data(),
+            attributes: [.posixPermissions: 0o600]
         )
+        guard let handle = FileHandle(forWritingTo: tempURL) else {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw CocoaError(.fileWriteUnknown)
+        }
+        var writeError: Error?
+        defer { try? handle.close() }
+
+        JSONLLineReader.forEachLine(in: fileURL) { _, line in
+            guard writeError == nil else { return }
+            guard let entry = try? decoder.decode(JournalEntry.self, from: line) else {
+                return
+            }
+            guard entry.keepForever || entry.timestamp > cutoff else { return }
+            guard let encoded = try? encoder.encode(entry) else { return }
+            var out = encoded
+            out.append(0x0A)
+            do {
+                try handle.write(contentsOf: out)
+            } catch {
+                writeError = error
+            }
+        }
+        if let writeError {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw writeError
+        }
+
         // Atomic replace via POSIX rename — no absent-file window
         let renamed = tempURL.withUnsafeFileSystemRepresentation { tempPath in
             fileURL.withUnsafeFileSystemRepresentation { finalPath in
