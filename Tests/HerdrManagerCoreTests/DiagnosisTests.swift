@@ -4,6 +4,23 @@ import Testing
 
 // MARK: - Mock HerdrAdapter for Diagnosis Tests
 
+private final class ReadLinesLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Int?] = []
+
+    func append(_ value: Int?) {
+        lock.lock()
+        values.append(value)
+        lock.unlock()
+    }
+
+    var snapshot: [Int?] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
+    }
+}
+
 private struct MockHerdrAdapter: HerdrAdapter {
     var snapshotResult: HerdrSnapshot?
     var readResult: PaneReadResult?
@@ -18,6 +35,7 @@ private struct MockHerdrAdapter: HerdrAdapter {
     var waitStatusResult: Bool = true
     var reportMetadataError: Error?
     var connectionState: HerdrConnectionState = .connected
+    var readLinesLog: ReadLinesLog?
     
     func snapshot() async throws -> HerdrSnapshot {
         guard let result = snapshotResult else { throw NSError(domain: "Mock", code: 1) }
@@ -25,6 +43,7 @@ private struct MockHerdrAdapter: HerdrAdapter {
     }
     
     func read(paneId: String, source: PaneReadSource, lines: Int?) async throws -> PaneReadResult {
+        readLinesLog?.append(lines)
         guard let result = readResult else { throw NSError(domain: "Mock", code: 1) }
         return result
     }
@@ -292,10 +311,35 @@ struct HeartbeatPollerHashTests {
     @Test("Hash changes when content changes (simulating output change detection)")
     func hashChangeDetection() {
         let content1 = "$ echo hello\nhello\n$"
-        let content2 = "$ echo hello\nhello\n$ echo world\nworld\n$"
-        let hash1 = HeartbeatPoller.sha256(content1)
         let hash2 = HeartbeatPoller.sha256(content2)
+        let hash1 = HeartbeatPoller.sha256(content1)
+        let content2 = "$ echo hello\nhello\n$ echo world\nworld\n$"
         #expect(hash1 != hash2, "Hash should change when pane output changes")
+    }
+
+    @Test("Detection hash only considers a bounded suffix so a huge pane.read cannot pin RSS")
+    func detectionHashUsesBoundedSuffix() {
+        let cap = HeartbeatPoller.detectionHashMaxBytes
+        #expect(cap == 64 * 1024)
+        let window = String(repeating: "n", count: cap)
+        let ignoredPrefix = String(repeating: "p", count: 8_192)
+        #expect(HeartbeatPoller.sha256(ignoredPrefix + window) == HeartbeatPoller.sha256(window))
+        #expect(HeartbeatPoller.sha256(window + "changed") != HeartbeatPoller.sha256(window))
+    }
+
+    @Test("Detection heartbeat asks herdr for at most 80 lines")
+    func detectionReadIsBounded() async {
+        var adapter = MockHerdrAdapter()
+        let log = ReadLinesLog()
+        adapter.readLinesLog = log
+        adapter.readResult = PaneReadResult(text: "screen", source: "detection")
+        let poller = HeartbeatPoller()
+        _ = await poller.poll(
+            agents: [Agent(id: AgentID("w1:p1"), status: .working)],
+            adapter: adapter
+        )
+        #expect(log.snapshot == [HeartbeatPoller.detectionReadLines])
+        #expect(HeartbeatPoller.detectionReadLines == 80)
     }
 
     @Test("Prune drops last-output dates for agents that left the herd")
@@ -359,6 +403,53 @@ struct DiagnoserDiagnoseThresholdTests {
         // With a 5-second threshold, 10 seconds of silence should trigger .silent
         let verdict = await diagnoser.diagnose(agent: agent, adapter: adapter, silentThreshold: 5)
         #expect(verdict.isSilent)
+    }
+
+    @Test("Nil lastOutputAt uses enteredAt as the silent clock")
+    func silentClockFallsBackToEnteredAt() async {
+        let diagnoser = Diagnoser()
+        let agent = Agent(
+            id: AgentID("w1:p1"),
+            kind: .claude,
+            status: .working,
+            enteredAt: Date().addingTimeInterval(-10),
+            lastOutputAt: nil
+        )
+        let adapter = MockHerdrAdapter(
+            processInfoResult: ProcessInfoResult(
+                shellPid: 123,
+                foregroundProcesses: [ForegroundProcess(pid: 456, name: "node", argv0: nil, cmdline: nil, cwd: nil)]
+            )
+        )
+        let verdict = await diagnoser.diagnose(agent: agent, adapter: adapter, silentThreshold: 5)
+        #expect(verdict.isSilent)
+    }
+
+    @Test("Blocked is awaiting input, not silent, even with a stale lastOutputAt")
+    func blockedIsNotSilent() async {
+        let diagnoser = Diagnoser()
+        let agent = Agent(
+            id: AgentID("w1:p1"),
+            kind: .claude,
+            status: .blocked,
+            lastOutputAt: Date().addingTimeInterval(-400)
+        )
+        let adapter = MockHerdrAdapter(
+            explainResult: AgentExplainResult(
+                agent: "claude",
+                state: "permission",
+                matchedRuleId: "bash_permission_prompt",
+                matchedRulePriority: 1,
+                screenDetectionSkipped: false
+            ),
+            processInfoResult: ProcessInfoResult(
+                shellPid: 123,
+                foregroundProcesses: [ForegroundProcess(pid: 456, name: "node", argv0: nil, cmdline: nil, cwd: nil)]
+            )
+        )
+        let verdict = await diagnoser.diagnose(agent: agent, adapter: adapter, silentThreshold: 5)
+        #expect(verdict.isAwaitingInput)
+        #expect(!verdict.isSilent)
     }
 
     @Test("Large threshold does not classify working agent as silent")
@@ -443,5 +534,65 @@ struct DiagnoserCpuStateTests {
         if case .silent(_, let cpu) = verdict {
             #expect(cpu == .unknown)
         }
+    }
+}
+
+@Suite("Diagnoser finished vs process-gone")
+struct DiagnoserFinishedClassificationTests {
+    private let bareShell = ProcessInfoResult(
+        shellPid: 10,
+        foregroundProcesses: [ForegroundProcess(pid: 10, name: "zsh", argv0: "-zsh", cmdline: nil, cwd: nil)]
+    )
+
+    @Test("Done with a bare shell stays healthy, not process-gone or unclassifiable")
+    func doneIsHealthy() async {
+        let agent = Agent(id: AgentID("w1:p1"), kind: .claude, status: .done)
+        let verdict = await Diagnoser().diagnose(
+            agent: agent,
+            adapter: MockHerdrAdapter(processInfoResult: bareShell)
+        )
+        #expect(verdict.isHealthy)
+        #expect(!verdict.isProcessGone)
+        #expect(!verdict.isUnclassifiable)
+        #expect(!verdict.isSilent)
+    }
+
+    @Test("Idle with a bare shell stays healthy")
+    func idleIsHealthy() async {
+        let agent = Agent(id: AgentID("w1:p1"), kind: .claude, status: .idle)
+        let verdict = await Diagnoser().diagnose(
+            agent: agent,
+            adapter: MockHerdrAdapter(processInfoResult: bareShell)
+        )
+        #expect(verdict.isHealthy)
+        #expect(!verdict.isProcessGone)
+    }
+
+    @Test("Working with a bare shell is process-gone")
+    func workingBareShellIsGone() async {
+        let agent = Agent(id: AgentID("w1:p1"), kind: .claude, status: .working)
+        let verdict = await Diagnoser().diagnose(
+            agent: agent,
+            adapter: MockHerdrAdapter(processInfoResult: bareShell)
+        )
+        #expect(verdict.isProcessGone)
+    }
+
+    @Test("Blocked with a bare shell is process-gone, not awaiting input")
+    func blockedBareShellIsGone() async {
+        let agent = Agent(id: AgentID("w1:p1"), kind: .claude, status: .blocked)
+        let adapter = MockHerdrAdapter(
+            explainResult: AgentExplainResult(
+                agent: "claude",
+                state: "permission",
+                matchedRuleId: "bash_permission_prompt",
+                matchedRulePriority: 1,
+                screenDetectionSkipped: false
+            ),
+            processInfoResult: bareShell
+        )
+        let verdict = await Diagnoser().diagnose(agent: agent, adapter: adapter)
+        #expect(verdict.isProcessGone)
+        #expect(!verdict.isAwaitingInput)
     }
 }
