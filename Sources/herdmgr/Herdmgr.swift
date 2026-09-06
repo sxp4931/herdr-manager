@@ -47,8 +47,10 @@ struct HerdmgrCommand: AsyncParsableCommand {
         // Check socket exists
         let fm = FileManager.default
         guard fm.fileExists(atPath: socketPath) else {
-            FileHandle.standardError.write("Error: herdr socket not found at \(socketPath)\n".data(using: .utf8)!)
-            FileHandle.standardError.write("Is herdr running? Install it from https://herdr.dev\n".data(using: .utf8)!)
+            FileHandle.standardError.write(
+                Data(LiveHerdrAdapter.missingSocketMessage(resolvedPath: socketPath).utf8)
+            )
+            FileHandle.standardError.write(Data("\n".utf8))
             throw ExitCode.failure
         }
 
@@ -58,20 +60,29 @@ struct HerdmgrCommand: AsyncParsableCommand {
             try await adapter.connect()
         } catch {
             FileHandle.standardError.write("Error connecting to herdr: \(error)\n".data(using: .utf8)!)
+            FileHandle.standardError.write(Data(LiveHerdrAdapter.socketHint(resolvedPath: socketPath).utf8))
+            FileHandle.standardError.write(Data("\n".utf8))
             throw ExitCode.failure
         }
 
-        // Take initial snapshot
-        let snapshot: HerdrSnapshot
+        // Take initial snapshot from agent.list (authoritative agents + seq)
+        // merged with session.snapshot labels — not session.snapshot panes,
+        // which omit seq and can include plain shells.
+        let herd: HerdSnapshot
         do {
-            snapshot = try await adapter.snapshot()
+            herd = try await adapter.herdSnapshot()
         } catch {
             FileHandle.standardError.write("Error taking snapshot: \(error)\n".data(using: .utf8)!)
+            FileHandle.standardError.write(Data(LiveHerdrAdapter.socketHint(resolvedPath: socketPath).utf8))
+            FileHandle.standardError.write(Data("\n".utf8))
             throw ExitCode.failure
         }
 
-        // Build agent list from snapshot
-        var agents = buildAgentList(from: snapshot)
+        if let protocolLine = LiveHerdrAdapter.protocolStatusLine(for: adapter.health()) {
+            FileHandle.standardError.write(Data("\(protocolLine)\n".utf8))
+        }
+
+        var agents = herd.displayAgents()
 
         if json {
             let output = agents.map { agent in
@@ -82,6 +93,9 @@ struct HerdmgrCommand: AsyncParsableCommand {
                     "name": agent.name,
                     "workspace": agent.workspaceName,
                     "tab": agent.tabName,
+                    "needs_you": AttentionTriage.needsYou(agent) ? "true" : "false",
+                    "priority": String(AttentionTriage.priority(agent)),
+                    "state_change_seq": String(agent.stateChangeSeq),
                 ] as [String: String]
             }
             let data = try JSONSerialization.data(withJSONObject: output, options: [.prettyPrinted, .sortedKeys])
@@ -106,55 +120,25 @@ struct HerdmgrCommand: AsyncParsableCommand {
         // Subscribe to events
         let eventStream = adapter.events()
         for await event in eventStream {
-            applyEvent(event, to: &agents)
+            if case .workspacesChanged = event {
+                if let refreshed = try? await adapter.herdSnapshot() {
+                    agents = refreshed.displayAgents()
+                }
+            } else {
+                applyEvent(event, to: &agents)
+            }
             // Clear screen and redraw
             print("\u{001B}[2J\u{001B}[H")
             printTable(agents, showAll: showAll)
         }
+        FileHandle.standardError.write(
+            Data("Event stream ended. \(LiveHerdrAdapter.socketHint(resolvedPath: socketPath))\n".utf8)
+        )
     }
 
     private func resolveSocketPath() -> String {
         if let socket { return socket }
         return LiveHerdrAdapter.resolveSocketPath()
-    }
-
-    // MARK: - Agent list building (non-@MainActor version for CLI)
-
-    private func buildAgentList(from snapshot: HerdrSnapshot) -> [Agent] {
-        let wsMap = Dictionary(uniqueKeysWithValues: snapshot.workspaces.map { ($0.workspaceId, $0.name) })
-        let tabMap = Dictionary(uniqueKeysWithValues: snapshot.tabs.map { ($0.tabId, $0.name) })
-
-        var agents: [Agent] = []
-        for pane in snapshot.panes {
-            guard pane.agent != nil || pane.agentStatus != "unknown" else { continue }
-            let agentId = AgentID(pane.paneId)
-            let status = AgentStatus(rawValue: pane.agentStatus) ?? .unknown
-            let wsName = wsMap[pane.workspaceId] ?? ""
-            let tabName = tabMap[pane.tabId] ?? ""
-            let kind: AgentKind = {
-                if let session = pane.agentSession {
-                    return AgentKind.custom(session.agent)
-                } else if let agentName = pane.agent {
-                    return AgentKind.custom(agentName)
-                }
-                return .custom("unknown")
-            }()
-            let name = pane.agent ?? pane.terminalTitleStripped ?? ""
-
-            agents.append(Agent(
-                id: agentId,
-                kind: kind,
-                name: name,
-                displayName: name,
-                status: status,
-                stateChangeSeq: pane.stateChangeSeq ?? 0,
-                enteredAt: Date(),
-                verdict: verdict(for: status),
-                workspaceName: wsName,
-                tabName: tabName
-            ))
-        }
-        return agents
     }
 
     private func applyEvent(_ event: HerdrEvent, to agents: inout [Agent]) {
@@ -204,9 +188,7 @@ struct HerdmgrCommand: AsyncParsableCommand {
         case .paneExited(let paneId):
             agents.removeAll { $0.id.raw == paneId }
         case .workspacesChanged:
-            // Labels changed; herdmgr's live loop doesn't re-fetch a full
-            // snapshot mid-stream, so just note it happened.
-            print("(workspace/tab labels changed)")
+            break
         case .connected, .disconnected, .ignored:
             break
         }
@@ -231,9 +213,13 @@ struct HerdmgrCommand: AsyncParsableCommand {
         if showAll {
             list = agents.sorted { $0.id.raw < $1.id.raw }
         } else {
-            list = agents.filter {
-                $0.status == .blocked || $0.verdict.isSilent || $0.status == .done
-            }.sorted { $0.enteredAt < $1.enteredAt }
+            list = agents.filter { AttentionTriage.attentionWorthy($0) }
+                .sorted { a, b in
+                    let pa = AttentionTriage.priority(a)
+                    let pb = AttentionTriage.priority(b)
+                    if pa != pb { return pa < pb }
+                    return a.enteredAt < b.enteredAt
+                }
         }
 
         if list.isEmpty {
@@ -246,7 +232,7 @@ struct HerdmgrCommand: AsyncParsableCommand {
         print(String(repeating: "-", count: 72))
 
         for agent in list {
-            let glyph = statusGlyph(agent.status, verdict: agent.verdict)
+            let glyph = statusGlyph(agent)
             let dwell = formatDwell(Date().timeIntervalSince(agent.enteredAt))
             let kind = agentKindString(agent.kind)
             let name = truncate(agent.displayName.isEmpty ? agent.name : agent.displayName, 20)
@@ -256,20 +242,18 @@ struct HerdmgrCommand: AsyncParsableCommand {
         }
 
         print()
-        let total = agents.count
-        let blocked = agents.filter { $0.status == .blocked }.count
-        let done = agents.filter { $0.status == .done }.count
-        print("\(total) agents | \(blocked) blocked | \(done) done")
+        let counts = AttentionTriage.counts(agents)
+        print("\(agents.count) agents | \(counts.blocked) blocked | \(counts.silent) silent | \(counts.done) done")
     }
 
-    private func statusGlyph(_ status: AgentStatus, verdict: Verdict) -> String {
-        switch status {
+    private func statusGlyph(_ agent: Agent) -> String {
+        if agent.verdict.isProcessGone { return "🔴" }
+        if agent.status == .blocked { return "🔴" }
+        if AttentionTriage.isActionablySilent(agent) { return "🟠" }
+        switch agent.status {
         case .blocked: return "🔴"
         case .done: return "🔵"
-        case .idle: return "🟢"
-        case .working:
-            if verdict.isSilent { return "🟠" }
-            return "🟢"
+        case .idle, .working: return "🟢"
         case .unknown: return "⚪"
         }
     }
