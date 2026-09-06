@@ -6,7 +6,10 @@ import Observation
 @MainActor
 @Observable
 public final class AgentStore {
-    public private(set) var agents: [AgentID: Agent] = [:]
+    /// Writable from this module and `@testable` tests so diagnosis and
+    /// dwell restoration can update in place. Other targets still go through
+    /// `applyHerdSnapshot` / `applyEvent`.
+    public internal(set) var agents: [AgentID: Agent] = [:]
 
     /// Cached workspace/tab label maps from the last `applyHerdSnapshot`, used
     /// to resolve names for single-pane `paneUpdated` events between periodic
@@ -20,13 +23,14 @@ public final class AgentStore {
 
     public func applySnapshot(_ snapshot: HerdrSnapshot) {
         // Build lookup maps
-        let wsMap = Dictionary(uniqueKeysWithValues: snapshot.workspaces.map { ($0.workspaceId, $0.name) })
-        let tabMap = Dictionary(uniqueKeysWithValues: snapshot.tabs.map { ($0.tabId, $0.name) })
+        let wsMap = snapshot.workspaceNameMap
+        let tabMap = snapshot.tabNameMap
 
         var newAgents: [AgentID: Agent] = [:]
 
         for pane in snapshot.panes {
             // Only track panes that have an agent
+            guard !pane.paneId.isEmpty else { continue }
             guard pane.agent != nil || pane.agentStatus != "unknown" else { continue }
 
             let agentId = AgentID(pane.paneId)
@@ -107,6 +111,7 @@ public final class AgentStore {
             // insert it. (agentList()/parseAgentList already filters these
             // out, but a defensive check here keeps this function correct
             // even if called with a hand-built HerdSnapshot.)
+            guard !info.paneId.isEmpty else { continue }
             guard let agentKind = info.agent, !agentKind.isEmpty else { continue }
 
             let agentId = AgentID(info.paneId)
@@ -116,12 +121,14 @@ public final class AgentStore {
 
             let existing = agents[agentId]
             // stateChangeSeq is the authoritative "did this agent's state
-            // genuinely change" signal (unlike agent_status, which panes[]
-            // used to require string-comparing without ever having a real
-            // sequence to fall back on). Preserve enteredAt/verdict whenever
-            // it hasn't moved.
+            // genuinely change" signal. Also reset when the status string
+            // moved but seq did not (seq of 0 on a pane_updated-shaped
+            // snapshot, or a lagging seq): otherwise dwell and verdict
+            // stick to the previous episode.
             let seqUnchanged = existing?.stateChangeSeq == info.stateChangeSeq
-            let enteredAt = (existing != nil && seqUnchanged) ? existing!.enteredAt : Date()
+            let statusUnchanged = existing?.status == status
+            let sameEpisode = existing != nil && seqUnchanged && statusUnchanged
+            let enteredAt = sameEpisode ? existing!.enteredAt : Date()
 
             let kind: AgentKind
             if let session = info.agentSession {
@@ -133,8 +140,8 @@ public final class AgentStore {
             let name = info.title ?? info.terminalTitleStripped ?? agentKind
 
             let verdict: Verdict
-            if let ex = existing, seqUnchanged {
-                verdict = ex.verdict
+            if sameEpisode {
+                verdict = existing!.verdict
             } else {
                 verdict = Self.verdict(for: status)
             }
@@ -212,6 +219,7 @@ public final class AgentStore {
             }
 
         case .paneUpdated(let info):
+            guard !info.paneId.isEmpty else { return }
             let agentId = AgentID(info.paneId)
 
             guard let agentKind = info.agent, !agentKind.isEmpty else {
@@ -309,29 +317,21 @@ public final class AgentStore {
 
     public var attentionAgents: [Agent] {
         agents.values
-            .filter { $0.status == .blocked || $0.verdict.isSilent || $0.status == .done }
+            .filter { AttentionTriage.attentionWorthy($0) }
             .sorted { a, b in
-                // blocked first, then done, then silent
-                let priority: (Agent) -> Int = { agent in
-                    switch agent.status {
-                    case .blocked: return 0
-                    case .done: return 1
-                    default: return 2
-                    }
-                }
-                let pa = priority(a)
-                let pb = priority(b)
+                let pa = AttentionTriage.priority(a)
+                let pb = AttentionTriage.priority(b)
                 if pa != pb { return pa < pb }
                 return a.enteredAt < b.enteredAt
             }
     }
 
     public var blockedCount: Int {
-        agents.values.filter { $0.status == .blocked }.count
+        agents.values.filter { AttentionTriage.isActionablyBlocked($0) }.count
     }
 
     public var silentCount: Int {
-        agents.values.filter { $0.verdict.isSilent }.count
+        agents.values.filter { AttentionTriage.isActionablySilent($0) }.count
     }
 
     public var doneCount: Int {
@@ -384,7 +384,12 @@ public final class AgentStore {
                 silentThreshold: override
             )
             // Update on MainActor (we're already @MainActor)
-            if var current = agents[agent.id] {
+            // Drop the verdict if the pane changed while diagnose was in
+            // flight. Stamping silent onto a pane that finished or blocked
+            // is how a stale "quiet" reason survived on done/blocked rows.
+            if var current = agents[agent.id],
+               current.status == agent.status,
+               current.stateChangeSeq == agent.stateChangeSeq {
                 current.verdict = verdict
                 agents[agent.id] = current
             }
