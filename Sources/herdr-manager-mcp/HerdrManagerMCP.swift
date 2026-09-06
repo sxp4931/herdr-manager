@@ -224,3 +224,34 @@ actor MCPServer {
             }
         }
     }
+
+    // MARK: - Tool Dispatch
+
+    private func handleToolCall(name: String, arguments: [String: Any]) async -> [String: Any] {
+        switch name {
+        case "herd.overview":
+            return await handleHerdOverview()
+        case "agent.list":
+            return await handleAgentList(arguments: arguments)
+        case "agent.inspect":
+            return await handleAgentInspect(arguments: arguments)
+        case "agent.tail":
+            return await handleAgentTail(arguments: arguments)
+        case "agent.diagnose":
+            return await handleAgentDiagnose(arguments: arguments)
+        case "agent.answer":
+            return await handleAgentAnswer(arguments: arguments)
+        case "agent.say":
+            return await handleAgentSay(arguments: arguments)
+        case "agent.interrupt":
+            return await handleAgentInterrupt(arguments: arguments)
+        case "agent.stop":
+            return await handleAgentStop(arguments: arguments)
+        case "session.spawn":
+            return await handleSessionSpawn(arguments: arguments)
+        case "action.status":
+            return await handleActionStatus(arguments: arguments)
+        default:
+            return makeToolError("Unknown tool: \(name)")
+        }
+    }
