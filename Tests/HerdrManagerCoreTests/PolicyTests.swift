@@ -815,7 +815,7 @@ struct SharedActionStorePermissionsTests {
 
         let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
         let perm = attrs[.posixPermissions] as? Int
-        #expect(perm == 0o600, "Expected file permissions 0600, got \(String(format: \"%o\", perm ?? 0))")
+        #expect(perm == 0o600, "Expected file permissions 0600, got \(String(format: "%o", perm ?? 0))")
     }
 
     @Test("Directory permissions are 0700 when using default init")
@@ -840,7 +840,7 @@ struct SharedActionStorePermissionsTests {
 
         let attrs = try FileManager.default.attributesOfItem(atPath: testDir.path)
         let perm = attrs[.posixPermissions] as? Int
-        #expect(perm == 0o700, "Expected dir permissions 0700, got \(String(format: \"%o\", perm ?? 0))")
+        #expect(perm == 0o700, "Expected dir permissions 0700, got \(String(format: "%o", perm ?? 0))")
 
         try? FileManager.default.removeItem(at: testDir)
     }
