@@ -304,3 +304,64 @@ actor MCPServer {
 
         return agents
     }
+
+    /// Resolve a stable pane ID or a human description such as an agent title,
+    /// workspace, tab, or repository directory. Query resolution is read-only;
+    /// write tools continue to require an exact agent ID.
+    private func resolveAgent(
+        arguments: [String: Any],
+        herd: HerdSnapshot
+    ) -> Result<HerdrAgentInfo, AgentResolutionError> {
+        if let agentId = arguments["agent_id"] as? String, !agentId.isEmpty {
+            guard let info = herd.agents.first(where: { $0.paneId == agentId }) else {
+                return .failure(AgentResolutionError(description: "Agent not found: \(agentId)"))
+            }
+            return .success(info)
+        }
+
+        guard let query = arguments["query"] as? String,
+              !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failure(AgentResolutionError(
+                description: "Missing required parameter: provide agent_id or query"
+            ))
+        }
+
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let matches = herd.agents.filter { info in
+            let fields = [
+                info.paneId,
+                info.agent ?? "",
+                info.displayAgent ?? "",
+                info.name ?? "",
+                info.title ?? "",
+                info.terminalTitleStripped ?? "",
+                herd.workspaceNames[info.workspaceId] ?? info.workspaceId,
+                herd.tabNames[info.tabId] ?? info.tabId,
+                info.foregroundCwd ?? info.cwd ?? ""
+            ]
+            return fields.contains { $0.lowercased().contains(needle) }
+        }
+
+        if matches.count == 1, let match = matches.first {
+            return .success(match)
+        }
+        if matches.isEmpty {
+            return .failure(AgentResolutionError(
+                description: "No agent matches query '\(query)'"
+            ))
+        }
+
+        let candidates = matches.prefix(8).map { info in
+            let title = info.title
+                ?? info.name
+                ?? info.terminalTitleStripped
+                ?? info.agent
+                ?? "unknown"
+            let workspace = herd.workspaceNames[info.workspaceId] ?? info.workspaceId
+            let tab = herd.tabNames[info.tabId] ?? info.tabId
+            return "\(info.paneId) (\(title), \(workspace) / \(tab))"
+        }.joined(separator: "; ")
+        return .failure(AgentResolutionError(
+            description: "Query '\(query)' is ambiguous. Matches: \(candidates)"
+        ))
+    }
