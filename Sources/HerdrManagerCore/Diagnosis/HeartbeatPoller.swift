@@ -10,6 +10,15 @@ import CommonCrypto
 /// (herdr has no output-change signal).
 public actor HeartbeatPoller {
 
+    /// Detection is a screen-sized buffer. Cap the read so a misbehaving
+    /// herdr cannot ship full scrollback into RSS.
+    nonisolated public static let detectionReadLines = 80
+
+    /// Hash only this many trailing UTF-8 bytes of a detection read. herdr
+    /// may ignore `lines` and return a multi-megabyte pane; the newest
+    /// output is at the end, so a suffix is enough for change detection.
+    nonisolated public static let detectionHashMaxBytes = 64 * 1024
+
     /// SHA256 hash of last detection read per agent.
     private var hashes: [AgentID: String] = [:]
 
@@ -30,9 +39,11 @@ public actor HeartbeatPoller {
         for agent in agents {
             let paneId = agent.id.raw  // herdr uses full session-qualified IDs
             do {
-                // Detection is a screen-sized buffer. Cap the read so a
-                // misbehaving herdr cannot ship full scrollback into RSS.
-                let result = try await adapter.read(paneId: paneId, source: .detection, lines: 80)
+                let result = try await adapter.read(
+                    paneId: paneId,
+                    source: .detection,
+                    lines: Self.detectionReadLines
+                )
                 let hash = Self.sha256(result.text)
                 let now = Date()
 
@@ -83,8 +94,11 @@ public actor HeartbeatPoller {
 
     /// Compute SHA256 hash of a string, returning a hex string.
     nonisolated static func sha256(_ string: String) -> String {
+        var data = Data(string.utf8)
+        if data.count > detectionHashMaxBytes {
+            data = Data(data.suffix(detectionHashMaxBytes))
+        }
         #if canImport(CommonCrypto)
-        let data = Data(string.utf8)
         var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
         data.withUnsafeBytes { ptr in
             _ = CC_SHA256(ptr.baseAddress, CC_LONG(data.count), &digest)
@@ -93,7 +107,7 @@ public actor HeartbeatPoller {
         #else
         // Fallback: use a simple hash (not cryptographic, but sufficient for change detection)
         var hash: UInt64 = 5381
-        for byte in string.utf8 {
+        for byte in data {
             hash = ((hash << 5) &+ hash) &+ UInt64(byte)
         }
         return String(hash, radix: 16)
