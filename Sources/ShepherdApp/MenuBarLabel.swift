@@ -61,38 +61,17 @@ struct MenuBarLabel: View {
             : "\(signal.working) working, nothing needs you"
     }
 
-    /// The badge's attention counts, gathered in one pass over the herd.
-    /// The previous version read the store's three O(n) count properties twice
-    /// per body evaluation (once for the count, once inside `herdState`) — six
-    /// scans per herdr event on the always-visible menu-bar item. This derives
-    /// both the count and the worst-colour decision from a single loop.
-    ///
-    /// Panes whose process is gone are counted. They were not, which left the
-    /// one surface the product asks you to trust at a glance staying calm over
-    /// a herd that had entirely died — a state the panel's own Needs-you tab
-    /// ranks at the top. The counts are also mutually exclusive now, so the
-    /// digits beside the mark are a count of agents rather than of conditions.
+    /// The badge's attention counts, from `AttentionTriage.counts` so a stale
+    /// silent verdict on done/idle cannot inflate the badge the way a raw
+    /// `verdict.isSilent` check did. One pass, mutually exclusive, worst-first.
     private var signal: AttentionSignal {
-        var blocked = 0
-        var gone = 0
-        var silent = 0
-        var done = 0
-        var working = 0
-        for agent in appModel.store.agents.values {
-            if agent.verdict.isProcessGone {
-                gone += 1
-            } else if agent.status == .blocked {
-                blocked += 1
-            } else if agent.verdict.isSilent {
-                silent += 1
-            } else if agent.status == .done {
-                done += 1
-            } else if agent.status == .working {
-                working += 1
-            }
-        }
+        let counts = AttentionTriage.counts(appModel.store.agents.values)
         return AttentionSignal(
-            blocked: blocked, gone: gone, silent: silent, done: done, working: working
+            blocked: counts.blocked,
+            gone: counts.gone,
+            silent: counts.silent,
+            done: counts.done,
+            working: counts.working
         )
     }
 
