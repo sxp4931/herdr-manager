@@ -365,3 +365,16 @@ actor MCPServer {
             description: "Query '\(query)' is ambiguous. Matches: \(candidates)"
         ))
     }
+
+    private static func initialVerdict(for status: AgentStatus) -> Verdict {
+        switch status {
+        case .blocked:
+            return .awaitingInput(BlockClassification(
+                kind: .unknownBlock, since: Date(), summary: "blocked"
+            ))
+        case .idle, .working, .done:
+            return .healthy
+        case .unknown:
+            return .unclassifiable(reason: "unknown status")
+        }
+    }
