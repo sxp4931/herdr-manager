@@ -311,9 +311,9 @@ struct HeartbeatPollerHashTests {
     @Test("Hash changes when content changes (simulating output change detection)")
     func hashChangeDetection() {
         let content1 = "$ echo hello\nhello\n$"
-        let hash2 = HeartbeatPoller.sha256(content2)
-        let hash1 = HeartbeatPoller.sha256(content1)
         let content2 = "$ echo hello\nhello\n$ echo world\nworld\n$"
+        let hash1 = HeartbeatPoller.sha256(content1)
+        let hash2 = HeartbeatPoller.sha256(content2)
         #expect(hash1 != hash2, "Hash should change when pane output changes")
     }
 
