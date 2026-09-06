@@ -102,3 +102,53 @@ actor RateLimiter {
         return (true, 0)
     }
 }
+
+// MARK: - MCP Server
+
+actor MCPServer {
+    private let adapter: LiveHerdrAdapter
+    private let redactor = SecretRedactor()
+    private let rateLimiter = RateLimiter()
+    private let diagnoser = Diagnoser()
+    private let policy = PolicyEngine()
+    private let journal = Journal()
+    private let actionStore = ActionStore()
+    private let sharedActionStore = SharedActionStore()
+
+    // nonisolated(unsafe): only accessed from nonisolated writeResponse/writeRaw
+    // which serialize via the lock.
+    nonisolated(unsafe) private var stdoutLock = NSLock()
+
+    init(adapter: LiveHerdrAdapter) {
+        self.adapter = adapter
+    }
+
+    // MARK: - Run Loop
+
+    func run() async {
+        let (stream, continuation) = AsyncStream<String>.makeStream()
+
+        // Read stdin on a detached task to avoid blocking the cooperative pool
+        let stdinTask = Task.detached(priority: .userInitiated) {
+            while let line = readLine() {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    continuation.yield(trimmed)
+                }
+            }
+            continuation.finish()
+        }
+
+        // Process each JSON-RPC line CONCURRENTLY. A long-running tools/call
+        // (e.g. a 120s confirmation wait) must not block ping, reads, or
+        // action.status. Each request runs in its own child task; responses are
+        // id-correlated and stdout writes are serialized by stdoutLock, so
+        // out-of-order responses are valid for JSON-RPC over stdio. The actor
+        // serializes shared state and interleaves tasks at suspension points
+        // (the confirmation poll sleeps, releasing the actor to serve others).
+        for await line in stream {
+            Task { await self.handleLine(line) }
+        }
+
+        stdinTask.cancel()
+    }
