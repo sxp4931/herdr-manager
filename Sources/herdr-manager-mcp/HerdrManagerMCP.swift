@@ -48,3 +48,57 @@ private enum MCPRevalidationError: Error, CustomStringConvertible {
         }
     }
 }
+
+private struct AgentResolutionError: Error, CustomStringConvertible {
+    let description: String
+}
+
+// MARK: - Rate Limiter
+
+actor RateLimiter {
+    private var perAgent: [String: [Date]] = [:]
+    private var globalTimestamps: [Date] = []
+
+    private let perAgentLimit = 20
+    private let globalLimit = 100
+    private let window: TimeInterval = 60
+
+    init() {}
+
+    /// Check if a call is allowed. Returns (allowed, retrySeconds).
+    func check(agentId: String? = nil) async -> (allowed: Bool, retrySeconds: Int) {
+        let now = Date()
+        let cutoff = now.addingTimeInterval(-window)
+
+        // Prune old entries
+        globalTimestamps.removeAll { $0 < cutoff }
+        if let agentId {
+            perAgent[agentId]?.removeAll { $0 < cutoff }
+        }
+
+        // Check global limit
+        if globalTimestamps.count >= globalLimit {
+            let oldest = globalTimestamps.first ?? now
+            let retry = Int(oldest.addingTimeInterval(window).timeIntervalSince(now)) + 1
+            return (false, max(retry, 1))
+        }
+
+        // Check per-agent limit
+        if let agentId {
+            let agentTimes = perAgent[agentId] ?? []
+            if agentTimes.count >= perAgentLimit {
+                let oldest = agentTimes.first ?? now
+                let retry = Int(oldest.addingTimeInterval(window).timeIntervalSince(now)) + 1
+                return (false, max(retry, 1))
+            }
+        }
+
+        // Record
+        globalTimestamps.append(now)
+        if let agentId {
+            perAgent[agentId, default: []].append(now)
+        }
+
+        return (true, 0)
+    }
+}
