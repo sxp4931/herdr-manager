@@ -512,6 +512,40 @@ struct LocalTokenMeterTests {
         #expect(snapshot.agentSummary(for: agent.id, window: .day).usage.totalTokens == 64)
     }
 
+    @Test("Extracts Cursor usage from a large blob without dropping the event")
+    func readsCursorUsageFromLargeBlob() async throws {
+        let home = try makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let session = home
+            .appendingPathComponent(".cursor/chats/project/sess-large", isDirectory: true)
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        let meta = #"{"schemaVersion":1,"createdAtMs":1768474800000,"updatedAtMs":1768474800000,"cwd":"/repo","title":"Large"}"#
+        try meta.write(
+            to: session.appendingPathComponent("meta.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let padding = String(repeating: "x", count: 120_000)
+        let blob = #"{"note":"\#(padding)","stop_reason":"tool_use","service_tier":"standard","usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":20,"ephemeral_1h_input_tokens":0},"output_tokens":4}}"#
+        try writeCursorStore(
+            to: session.appendingPathComponent("store.db"),
+            model: "grok-4.6",
+            blob: blob
+        )
+
+        let meter = LocalTokenMeter(homeDirectory: home)
+        let snapshot = await meter.snapshot(
+            agents: [],
+            priceBook: TokenMeterPriceBook.defaults,
+            now: date("2026-01-15T13:00:00Z"),
+            calendar: utcCalendar()
+        )
+        let provider = snapshot.providerSummary(for: .cursor, window: .day)
+        #expect(provider.usage.inputTokens == 60)
+        #expect(provider.usage.cacheReadTokens == 30)
+        #expect(provider.usage.outputTokens == 4)
+    }
+
     @Test("Reads Grok nested session model from summary.json and prices grok-4.6")
     func readsGrokNestedSessionModelAndTokens() async throws {
         let home = try makeTemporaryHome()
@@ -712,7 +746,7 @@ struct LocalTokenMeterTests {
         #expect(third.providerSummary(for: .codex, window: .day).usage.outputTokens == 40)
     }
 
-    private func writeCursorStore(to url: URL, model: String, blob: String) throws {
+    private func writeCursorStore(to url: URL, model: String, blob: String, metaHex: String? = nil) throws {
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -726,7 +760,7 @@ struct LocalTokenMeterTests {
         sqlite3_exec(db, "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);", nil, nil, nil)
 
         let metaJSON = #"{"agentId":"sess-1","lastUsedModel":"\#(model)"}"#
-        let hex = metaJSON.utf8.map { String(format: "%02x", $0) }.joined()
+        let hex = metaHex ?? metaJSON.utf8.map { String(format: "%02x", $0) }.joined()
         let insertMeta = "INSERT INTO meta (key, value) VALUES ('0', ?);"
         var metaStmt: OpaquePointer?
         if sqlite3_prepare_v2(db, insertMeta, -1, &metaStmt, nil) == SQLITE_OK, let metaStmt {
@@ -855,6 +889,241 @@ struct LocalTokenMeterTests {
             withIntermediateDirectories: true
         )
         try (lines.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+    }
+
+    private func utcCalendar() -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar
+    }
+
+    private func date(_ string: String) -> Date {
+        let formatter = ISO8601DateFormatter()
+        return formatter.date(from: string)!
+    }
+}
+
+@Suite("Bounded usage-log I/O")
+struct BoundedUsageLogIOTests {
+    @Test("JSONL reader never delivers a line above the byte cap and keeps later events")
+    func jsonlReaderDropsOversizedLines() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerJSONL-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: file) }
+
+        let first = #"{"id":"keep-1"}"#
+        let last = #"{"id":"keep-2"}"#
+        let junk = String(repeating: "x", count: JSONLLineReader.maxLineBytes + 4096)
+        try "\(first)\n{\"type\":\"user\",\"content\":\"\(junk)\"}\n\(last)\n"
+            .write(to: file, atomically: true, encoding: .utf8)
+
+        var delivered: [Data] = []
+        JSONLLineReader.forEachLine(in: file) { _, data in
+            delivered.append(data)
+        }
+
+        #expect(delivered.allSatisfy { $0.count <= JSONLLineReader.maxLineBytes })
+        #expect(delivered.count == 2)
+        #expect(String(data: delivered[0], encoding: .utf8) == first)
+        #expect(String(data: delivered[1], encoding: .utf8) == last)
+    }
+
+    @Test("JSONL reader drains an oversized line that spans several chunks")
+    func jsonlReaderDrainsChunkSpanningOversize() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerJSONL-span-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: file) }
+
+        let junkSize = JSONLLineReader.maxLineBytes + JSONLLineReader.chunkSize * 2
+        let junk = String(repeating: "y", count: junkSize)
+        try "{\"keep\":1}\n\(junk)\n{\"keep\":2}\n"
+            .write(to: file, atomically: true, encoding: .utf8)
+
+        var sizes: [Int] = []
+        JSONLLineReader.forEachLine(in: file) { _, data in
+            sizes.append(data.count)
+        }
+        #expect(sizes == [#"{"keep":1}"#.utf8.count, #"{"keep":2}"#.utf8.count])
+    }
+
+    @Test("Bounded sidecar read returns nil when the file exceeds the cap")
+    func sidecarCapRejectsOversize() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerSidecar-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: file) }
+
+        try Data(repeating: 0x61, count: BoundedFileRead.maxSidecarBytes + 1)
+            .write(to: file)
+        #expect(BoundedFileRead.data(from: file, maxBytes: BoundedFileRead.maxSidecarBytes) == nil)
+
+        try Data("{\"cwd\":\"/repo\"}".utf8).write(to: file)
+        #expect(BoundedFileRead.text(from: file, maxBytes: BoundedFileRead.maxSidecarBytes) == "{\"cwd\":\"/repo\"}")
+    }
+
+    @Test("Meter still counts Grok tokens when summary.json is an oversized stand-in")
+    func ignoresOversizedGrokSummary() async throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTokenMeter-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let session = home
+            .appendingPathComponent(".grok/sessions/%2Frepo", isDirectory: true)
+            .appendingPathComponent("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", isDirectory: true)
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        let updates = session.appendingPathComponent("updates.jsonl")
+        try #"{"timestamp":"2026-01-15T11:00:00Z","method":"session/update","params":{"update":{"_meta":{"modelId":"grok-4.6"}},"_meta":{"totalTokens":8000,"promptId":"prompt-2","agentTimestampMs":1768474800000}}}"#
+            .write(to: updates, atomically: true, encoding: .utf8)
+        let huge = "{" + String(repeating: "x", count: BoundedFileRead.maxSidecarBytes + 32) + "}"
+        try huge.write(
+            to: session.appendingPathComponent("summary.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let meter = LocalTokenMeter(homeDirectory: home)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let snapshot = await meter.snapshot(
+            agents: [],
+            priceBook: TokenMeterPriceBook.defaults,
+            now: ISO8601DateFormatter().date(from: "2026-01-15T13:00:00Z")!,
+            calendar: calendar
+        )
+        #expect(snapshot.providerSummary(for: .grok, window: .day).usage.totalTokens == 8_000)
+        #expect(snapshot.providerSummary(for: .grok, window: .day).models == ["grok-4.6"])
+    }
+
+    @Test("Hex sidecar decode refuses payloads above the byte cap")
+    func hexDecodeRejectsOversize() {
+        let small = "7b2261223a317d" // {"a":1}
+        #expect(BoundedFileRead.dataFromHex(small) == Data(#"{"a":1}"#.utf8))
+
+        let oversize = String(
+            repeating: "61",
+            count: BoundedFileRead.maxHexDecodedBytes + 1
+        )
+        #expect(BoundedFileRead.dataFromHex(oversize) == nil)
+        #expect(BoundedFileRead.dataFromHex("gg") == nil)
+        #expect(BoundedFileRead.dataFromHex("") == nil)
+        #expect(BoundedFileRead.maxHexEncodedBytes == BoundedFileRead.maxHexDecodedBytes * 2)
+        #expect(BoundedFileRead.sqliteColumnFits(1, maxBytes: 8))
+        #expect(!BoundedFileRead.sqliteColumnFits(0, maxBytes: 8))
+        #expect(!BoundedFileRead.sqliteColumnFits(9, maxBytes: 8))
+        #expect(BoundedFileRead.maxCursorBlobBytes == 2_000_000)
+    }
+
+    @Test("Cursor blob above the byte cap is not counted even when it contains usage")
+    func ignoresOversizedCursorBlob() async throws {
+        let home = try makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let session = home
+            .appendingPathComponent(".cursor/chats/project/sess-huge-blob", isDirectory: true)
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        let meta = #"{"schemaVersion":1,"createdAtMs":1768474800000,"updatedAtMs":1768474800000,"cwd":"/repo","title":"Huge blob"}"#
+        try meta.write(
+            to: session.appendingPathComponent("meta.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let padding = String(repeating: "x", count: BoundedFileRead.maxCursorBlobBytes + 1)
+        let blob = padding + #"{"stop_reason":"tool_use","service_tier":"standard","usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":20,"ephemeral_1h_input_tokens":0},"output_tokens":4}}"#
+        try writeCursorStore(
+            to: session.appendingPathComponent("store.db"),
+            model: "grok-4.6",
+            blob: blob
+        )
+
+        let meter = LocalTokenMeter(homeDirectory: home)
+        let snapshot = await meter.snapshot(
+            agents: [],
+            priceBook: TokenMeterPriceBook.defaults,
+            now: date("2026-01-15T13:00:00Z"),
+            calendar: utcCalendar()
+        )
+        #expect(snapshot.providerSummary(for: .cursor, window: .day).usage.totalTokens == 0)
+    }
+
+    @Test("Cursor meta hex larger than the encoded cap still yields blob usage")
+    func ignoresOversizedCursorMetaHex() async throws {
+        let home = try makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let session = home
+            .appendingPathComponent(".cursor/chats/project/sess-huge-meta", isDirectory: true)
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        let meta = #"{"schemaVersion":1,"createdAtMs":1768474800000,"updatedAtMs":1768474800000,"cwd":"/repo","title":"Huge"}"#
+        try meta.write(
+            to: session.appendingPathComponent("meta.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let hugeHex = String(
+            repeating: "61",
+            count: BoundedFileRead.maxHexDecodedBytes + 1
+        )
+        try writeCursorStore(
+            to: session.appendingPathComponent("store.db"),
+            model: "grok-4.6",
+            blob: #"prefix{"stop_reason":"tool_use","service_tier":"standard","usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":20,"ephemeral_1h_input_tokens":0},"output_tokens":4}}suffix"#,
+            metaHex: hugeHex
+        )
+
+        let meter = LocalTokenMeter(homeDirectory: home)
+        let snapshot = await meter.snapshot(
+            agents: [],
+            priceBook: TokenMeterPriceBook.defaults,
+            now: date("2026-01-15T13:00:00Z"),
+            calendar: utcCalendar()
+        )
+        let provider = snapshot.providerSummary(for: .cursor, window: .day)
+        #expect(provider.usage.inputTokens == 60)
+        #expect(provider.usage.outputTokens == 4)
+    }
+
+    private func writeCursorStore(to url: URL, model: String, blob: String, metaHex: String? = nil) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        var db: OpaquePointer?
+        guard sqlite3_open(url.path, &db) == SQLITE_OK, let db else {
+            throw TestingError.dbOpenFailed
+        }
+        defer { sqlite3_close(db) }
+        sqlite3_exec(db, "CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);", nil, nil, nil)
+        sqlite3_exec(db, "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);", nil, nil, nil)
+
+        let metaJSON = #"{"agentId":"sess-1","lastUsedModel":"\#(model)"}"#
+        let hex = metaHex ?? metaJSON.utf8.map { String(format: "%02x", $0) }.joined()
+        let insertMeta = "INSERT INTO meta (key, value) VALUES ('0', ?);"
+        var metaStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, insertMeta, -1, &metaStmt, nil) == SQLITE_OK, let metaStmt {
+            defer { sqlite3_finalize(metaStmt) }
+            sqlite3_bind_text(metaStmt, 1, (hex as NSString).utf8String, -1, nil)
+            _ = sqlite3_step(metaStmt)
+        }
+
+        let insertBlob = "INSERT INTO blobs (id, data) VALUES ('blob-1', ?);"
+        var blobStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, insertBlob, -1, &blobStmt, nil) == SQLITE_OK, let blobStmt {
+            defer { sqlite3_finalize(blobStmt) }
+            let data = Data(blob.utf8)
+            data.withUnsafeBytes { bytes in
+                sqlite3_bind_blob(blobStmt, 1, bytes.baseAddress, Int32(data.count), nil)
+                _ = sqlite3_step(blobStmt)
+            }
+        }
+    }
+
+    private enum TestingError: Error {
+        case dbOpenFailed
+    }
+
+    private func makeTemporaryHome() throws -> URL {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTokenMeter-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        return home
     }
 
     private func utcCalendar() -> Calendar {
