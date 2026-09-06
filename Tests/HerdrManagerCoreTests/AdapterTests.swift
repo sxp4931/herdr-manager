@@ -89,6 +89,98 @@ struct ParseSnapshotTests {
         let snap = try LiveHerdrAdapter.parseSnapshot(json)
         #expect(snap.protocol == 0)
     }
+
+    @Test("JSON number protocol and seq survive NSNumber bridging")
+    func jsonNumbersDecode() throws {
+        let data = Data("""
+        {
+            "version": "0.1.0",
+            "protocol": 17,
+            "workspaces": [],
+            "tabs": [],
+            "panes": [{
+                "pane_id": "w1:p1",
+                "workspace_id": "w1",
+                "tab_id": "t1",
+                "agent": "claude",
+                "agent_status": "working",
+                "state_change_seq": 42,
+                "revision": 7
+            }]
+        }
+        """.utf8)
+        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let snap = try LiveHerdrAdapter.parseSnapshot(json)
+        #expect(snap.protocol == 17)
+        #expect(snap.panes.first?.stateChangeSeq == 42)
+        #expect(snap.panes.first?.revision == 7)
+    }
+
+    @Test("Malformed collection fields do not throw")
+    func malformedCollectionsAreEmpty() throws {
+        let json: [String: Any] = [
+            "version": "0.1.0",
+            "protocol": 17,
+            "workspaces": "not-an-array",
+            "tabs": 3,
+            "panes": ["nope"]
+        ]
+        let snap = try LiveHerdrAdapter.parseSnapshot(json)
+        #expect(snap.protocol == 17)
+        #expect(snap.workspaces.isEmpty)
+        #expect(snap.tabs.isEmpty)
+        #expect(snap.panes.isEmpty)
+    }
+
+    @Test("Empty workspace, tab, and pane ids are dropped")
+    func emptyIdsAreDropped() throws {
+        let json: [String: Any] = [
+            "version": "0.1.0",
+            "protocol": 17,
+            "workspaces": [
+                ["workspace_id": "", "label": "ghost"] as [String: Any],
+                ["workspace_id": "w1", "label": "real"] as [String: Any]
+            ],
+            "tabs": [
+                ["tab_id": "", "workspace_id": "w1", "label": "ghost"] as [String: Any],
+                ["tab_id": "t1", "workspace_id": "w1", "label": "real"] as [String: Any]
+            ],
+            "panes": [
+                [
+                    "pane_id": "",
+                    "workspace_id": "w1",
+                    "tab_id": "t1",
+                    "agent": "claude",
+                    "agent_status": "working"
+                ] as [String: Any],
+                [
+                    "pane_id": "w1:p1",
+                    "workspace_id": "w1",
+                    "tab_id": "t1",
+                    "agent": "claude",
+                    "agent_status": "working"
+                ] as [String: Any]
+            ]
+        ]
+        let snap = try LiveHerdrAdapter.parseSnapshot(json)
+        #expect(snap.workspaces.map(\.workspaceId) == ["w1"])
+        #expect(snap.tabs.map(\.tabId) == ["t1"])
+        #expect(snap.panes.map(\.paneId) == ["w1:p1"])
+    }
+
+    @Test("Name maps skip empty ids and keep the last duplicate")
+    func uniqueNameMapDropsEmptyAndDedupes() {
+        let map = HerdrSnapshot.uniqueNameMap([
+            ("", "ghost"),
+            ("w1", "first"),
+            ("w1", "second"),
+            ("w2", "other")
+        ])
+        #expect(map["w1"] == "second")
+        #expect(map["w2"] == "other")
+        #expect(map[""] == nil)
+        #expect(map.count == 2)
+    }
 }
 
 // MARK: - parseEvent
@@ -182,7 +274,7 @@ struct ParseEventTests {
         }
     }
 
-    @Test("Missing data key maps to .ignored")
+    @Test("Missing data key maps to .ignored when there is no pane_id")
     func missingDataKeyIsIgnored() {
         let dict: [String: Any] = [
             "event": "pane.agent_status_changed"
@@ -192,6 +284,62 @@ struct ParseEventTests {
             // pass
         } else {
             Issue.record("Expected .ignored when data key missing, got \(event)")
+        }
+    }
+
+    @Test("Top-level pane_id without a data envelope still drives pane.closed")
+    func flatEventWithoutDataEnvelope() {
+        let closed = LiveHerdrAdapter.parseEvent([
+            "event": "pane.closed",
+            "pane_id": "w1:p1"
+        ])
+        if case .paneClosed(let paneId) = closed {
+            #expect(paneId == "w1:p1")
+        } else {
+            Issue.record("Expected .paneClosed for flat pane.closed, got \(closed)")
+        }
+
+        let status = LiveHerdrAdapter.parseEvent([
+            "event": "pane.agent_status_changed",
+            "pane_id": "w5:p2",
+            "agent_status": "blocked",
+            "state_change_seq": 7
+        ] as [String: Any])
+        if case .agentStatusChanged(let paneId, let agentStatus, let seq) = status {
+            #expect(paneId == "w5:p2")
+            #expect(agentStatus == "blocked")
+            #expect(seq == 7)
+        } else {
+            Issue.record("Expected .agentStatusChanged for flat status event, got \(status)")
+        }
+    }
+
+    @Test("Empty pane_id on a pane lifecycle event is ignored")
+    func emptyPaneIdIsIgnored() {
+        let closed = LiveHerdrAdapter.parseEvent([
+            "event": "pane.closed",
+            "data": ["pane_id": ""] as [String: Any]
+        ])
+        if case .ignored = closed {
+            // pass
+        } else {
+            Issue.record("Expected .ignored for empty pane_id, got \(closed)")
+        }
+
+        let updated = LiveHerdrAdapter.parseEvent([
+            "event": "pane_updated",
+            "data": [
+                "pane": [
+                    "pane_id": "",
+                    "agent": "claude",
+                    "agent_status": "working"
+                ] as [String: Any]
+            ] as [String: Any]
+        ])
+        if case .ignored = updated {
+            // pass
+        } else {
+            Issue.record("Expected .ignored for empty pane_updated pane_id, got \(updated)")
         }
     }
 
@@ -296,6 +444,92 @@ struct ParseEventTests {
         }
     }
 
+    @Test("Dotted pane.updated (subscribe-type spelling) yields .paneUpdated")
+    func dottedPaneUpdated() throws {
+        let jsonString = """
+        {
+            "event": "pane.updated",
+            "data": {
+                "pane": {
+                    "pane_id": "wE:p5",
+                    "workspace_id": "wE",
+                    "tab_id": "wE:t3",
+                    "agent": "codex",
+                    "agent_status": "working",
+                    "state_change_seq": 12
+                }
+            }
+        }
+        """
+        let data = jsonString.data(using: .utf8)!
+        let dict = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let event = LiveHerdrAdapter.parseEvent(dict)
+        if case .paneUpdated(let info) = event {
+            #expect(info.paneId == "wE:p5")
+            #expect(info.agentStatus == "working")
+            #expect(info.stateChangeSeq == 12)
+        } else {
+            Issue.record("Expected .paneUpdated for dotted pane.updated, got \(event)")
+        }
+    }
+
+    @Test("Dotted pane.updated with a flat data payload still parses")
+    func dottedPaneUpdatedFlat() {
+        let dict: [String: Any] = [
+            "event": "pane.updated",
+            "data": [
+                "pane_id": "w1:p1",
+                "workspace_id": "w1",
+                "tab_id": "t1",
+                "agent": "claude",
+                "agent_status": "blocked",
+                "state_change_seq": 3
+            ] as [String: Any]
+        ]
+        let event = LiveHerdrAdapter.parseEvent(dict)
+        if case .paneUpdated(let info) = event {
+            #expect(info.paneId == "w1:p1")
+            #expect(info.agentStatus == "blocked")
+            #expect(info.stateChangeSeq == 3)
+        } else {
+            Issue.record("Expected .paneUpdated for flat dotted pane.updated, got \(event)")
+        }
+    }
+
+    @Test("Dotted pane.focused / pane.exited / workspace.focused match subscribe types")
+    func dottedLifecycleEvents() {
+        let focused = LiveHerdrAdapter.parseEvent([
+            "event": "pane.focused",
+            "data": ["pane_id": "w1:p1", "workspace_id": "w1"] as [String: Any]
+        ])
+        if case .paneFocused(let paneId, let wsId) = focused {
+            #expect(paneId == "w1:p1")
+            #expect(wsId == "w1")
+        } else {
+            Issue.record("Expected .paneFocused, got \(focused)")
+        }
+
+        let exited = LiveHerdrAdapter.parseEvent([
+            "event": "pane.exited",
+            "data": ["pane_id": "w1:p2"] as [String: Any]
+        ])
+        if case .paneExited(let paneId) = exited {
+            #expect(paneId == "w1:p2")
+        } else {
+            Issue.record("Expected .paneExited, got \(exited)")
+        }
+
+        let ws = LiveHerdrAdapter.parseEvent([
+            "event": "workspace.focused",
+            "data": ["workspace_id": "w1"] as [String: Any]
+        ])
+        if case .workspacesChanged = ws {
+            // pass
+        } else {
+            Issue.record("Expected .workspacesChanged, got \(ws)")
+        }
+    }
+
     @Test("Genuinely unknown underscored event name still maps to .ignored")
     func unknownUnderscoredEventIsIgnored() {
         let dict: [String: Any] = [
@@ -356,6 +590,32 @@ struct ParseAgentListTests {
                     "pane_id": "wA:p2", "workspace_id": "wA", "tab_id": "wA:t1",
                     "terminal_id": "term_2", "agent": null,
                     "agent_status": "unknown", "focused": false, "state_change_seq": 0, "revision": 1
+                }
+            ]
+        }
+        """
+        let data = jsonString.data(using: .utf8)!
+        let dict = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let agents = LiveHerdrAdapter.parseAgentList(dict)
+        #expect(agents.count == 1)
+        #expect(agents.first?.paneId == "wA:p1")
+    }
+
+    @Test("Drops entries with an empty pane_id")
+    func dropsEmptyPaneId() throws {
+        let jsonString = """
+        {
+            "type": "agent_list",
+            "agents": [
+                {
+                    "pane_id": "", "workspace_id": "wA", "tab_id": "wA:t1",
+                    "agent": "claude", "agent_status": "working",
+                    "state_change_seq": 5, "revision": 1
+                },
+                {
+                    "pane_id": "wA:p1", "workspace_id": "wA", "tab_id": "wA:t1",
+                    "agent": "claude", "agent_status": "working",
+                    "state_change_seq": 5, "revision": 1
                 }
             ]
         }
@@ -595,5 +855,283 @@ struct PaneReadAndSplitTests {
         ]
         let paneId = try LiveHerdrAdapter.parsePaneInfoID(response)
         #expect(paneId == "wE:p9")
+    }
+}
+
+@Suite("herdr socket resolution guidance")
+struct HerdrSocketGuidanceTests {
+    @Test("Missing-socket copy names the resolved path and HERDR_SOCKET_PATH")
+    func missingSocketMentionsOverride() {
+        let path = "/tmp/custom/herdr.sock"
+        let message = LiveHerdrAdapter.missingSocketMessage(resolvedPath: path)
+        #expect(message.contains(path))
+        #expect(message.contains("HERDR_SOCKET_PATH"))
+        #expect(message.contains("HERDR_SESSION"))
+        #expect(message.contains("--socket"))
+        #expect(message.contains("herdr.dev"))
+    }
+
+    @Test("Socket hint names the resolved path and HERDR_SOCKET_PATH")
+    func socketHintMentionsOverride() {
+        let path = "/tmp/custom/herdr.sock"
+        let hint = LiveHerdrAdapter.socketHint(resolvedPath: path)
+        #expect(hint.contains(path))
+        #expect(hint.contains("HERDR_SOCKET_PATH"))
+        #expect(hint.contains("HERDR_SESSION"))
+        #expect(hint.contains("--socket"))
+        #expect(LiveHerdrAdapter.missingSocketMessage(resolvedPath: path).contains(hint))
+    }
+
+    @Test("Protocol status line is quiet on the verified protocol and names others")
+    func protocolStatusLine() {
+        let verified = LiveHerdrAdapter.health(
+            forProtocol: LiveHerdrAdapter.minSupportedProtocolVersion
+        )
+        #expect(LiveHerdrAdapter.protocolStatusLine(for: verified) == nil)
+
+        let older = LiveHerdrAdapter.health(forProtocol: 16)
+        let olderLine = LiveHerdrAdapter.protocolStatusLine(for: older)
+        #expect(olderLine?.contains("16") == true)
+        #expect(olderLine?.contains("older") == true)
+
+        let unknown = LiveHerdrAdapter.health(forProtocol: 0)
+        #expect(LiveHerdrAdapter.protocolStatusLine(for: unknown)?.contains("unknown") == true)
+    }
+}
+
+@Suite("AdapterHealth capability gate")
+struct AdapterHealthTests {
+    @Test("Unknown protocol disables writes with a stable reason")
+    func unknownProtocol() {
+        let health = LiveHerdrAdapter.health(forProtocol: 0)
+        #expect(health.protocolVersion == 0)
+        #expect(health.compatible == false)
+        #expect(health.writesEnabled == false)
+        #expect(health.reason == "protocol unknown")
+    }
+
+    @Test("Verified protocol enables writes")
+    func verifiedProtocol() {
+        let health = LiveHerdrAdapter.health(
+            forProtocol: LiveHerdrAdapter.minSupportedProtocolVersion
+        )
+        #expect(health.compatible)
+        #expect(health.writesEnabled)
+        #expect(health.reason == nil)
+    }
+
+    @Test("Older protocol keeps reads conceptually but disables writes")
+    func olderProtocol() {
+        let health = LiveHerdrAdapter.health(forProtocol: 16)
+        #expect(health.protocolVersion == 16)
+        #expect(health.compatible == false)
+        #expect(health.writesEnabled == false)
+        #expect(health.reason?.contains("older") == true)
+        #expect(health.reason?.contains("writes disabled") == true)
+        #expect(health.reason?.contains("16") == true)
+    }
+
+    @Test("Newer protocol stays writable so a herdr bump does not lock the herd")
+    func newerProtocol() {
+        let health = LiveHerdrAdapter.health(forProtocol: 18)
+        #expect(health.compatible)
+        #expect(health.writesEnabled)
+        #expect(health.reason?.contains("newer") == true)
+        #expect(health.reason?.contains("18") == true)
+    }
+
+    @Test("Negative protocol is unknown, not an 'older' version")
+    func negativeProtocolIsUnknown() {
+        let health = LiveHerdrAdapter.health(forProtocol: -1)
+        #expect(health.protocolVersion == -1)
+        #expect(health.compatible == false)
+        #expect(health.writesEnabled == false)
+        #expect(health.reason == "protocol unknown")
+    }
+
+    @Test("supportedProtocolRange starts at the verified baseline")
+    func supportedRange() {
+        #expect(LiveHerdrAdapter.supportedProtocolRange.lowerBound == 17)
+        #expect(LiveHerdrAdapter.supportedProtocolRange.contains(17))
+        #expect(LiveHerdrAdapter.supportedProtocolRange.contains(99))
+        #expect(!LiveHerdrAdapter.supportedProtocolRange.contains(16))
+    }
+}
+
+@Suite("Subscription line decode failures")
+struct SubscriptionLineDecodeTests {
+    @Test("Valid pane_updated line yields an event")
+    func validLine() throws {
+        let data = Data(#"""
+        {"event":"pane_updated","data":{"type":"pane_updated","pane":{"pane_id":"wE:p5","workspace_id":"wE","tab_id":"wE:t3","agent":"codex","agent_status":"blocked","state_change_seq":9}}}
+        """#.utf8)
+        let event = LiveHerdrAdapter.event(fromSubscriptionLine: data)
+        guard case .paneUpdated(let info)? = event else {
+            Issue.record("Expected paneUpdated, got \(String(describing: event))")
+            return
+        }
+        #expect(info.paneId == "wE:p5")
+        #expect(info.agentStatus == "blocked")
+        #expect(info.stateChangeSeq == 9)
+    }
+
+    @Test("Invalid JSON is dropped instead of thrown")
+    func invalidJSONIsDropped() {
+        #expect(LiveHerdrAdapter.event(fromSubscriptionLine: Data("not-json".utf8)) == nil)
+        #expect(LiveHerdrAdapter.event(fromSubscriptionLine: Data()) == nil)
+        #expect(LiveHerdrAdapter.event(fromSubscriptionLine: Data("[1,2,3]".utf8)) == nil)
+    }
+
+    @Test("Unknown event kind is ignored, not treated as a disconnect")
+    func unknownEventIsIgnored() {
+        let data = Data(#"""
+        {"event":"totally.new","data":{"foo":"bar"}}
+        """#.utf8)
+        let event = LiveHerdrAdapter.event(fromSubscriptionLine: data)
+        guard case .ignored? = event else {
+            Issue.record("Expected ignored, got \(String(describing: event))")
+            return
+        }
+    }
+
+    @Test("type/data envelope parses the same as event/data")
+    func typeDataEnvelope() {
+        let data = Data(#"""
+        {"type":"pane_updated","data":{"pane":{"pane_id":"w1:p1","workspace_id":"w1","tab_id":"t1","agent":"claude","agent_status":"working","state_change_seq":4}}}
+        """#.utf8)
+        let event = LiveHerdrAdapter.event(fromSubscriptionLine: data)
+        guard case .paneUpdated(let info)? = event else {
+            Issue.record("Expected paneUpdated, got \(String(describing: event))")
+            return
+        }
+        #expect(info.paneId == "w1:p1")
+        #expect(info.agentStatus == "working")
+        #expect(info.stateChangeSeq == 4)
+    }
+}
+
+@Suite("JSONNumber")
+struct JSONNumberTests {
+    @Test("Accepts Int, NSNumber, whole Double, and decimal strings")
+    func intShapes() throws {
+        #expect(JSONNumber.int(17) == 17)
+        #expect(JSONNumber.int(Int64(17)) == 17)
+        #expect(JSONNumber.int(NSNumber(value: 17)) == 17)
+        #expect(JSONNumber.int(17.0) == 17)
+        #expect(JSONNumber.int("17") == 17)
+        #expect(JSONNumber.int(" 17 ") == 17)
+        #expect(JSONNumber.int(17.5) == nil)
+        #expect(JSONNumber.int("nope") == nil)
+        #expect(JSONNumber.int(nil) == nil)
+        #expect(JSONNumber.int(true) == nil)
+        #expect(JSONNumber.int(false) == nil)
+        let jsonTrue = try JSONSerialization.jsonObject(with: Data("true".utf8))
+        let jsonFalse = try JSONSerialization.jsonObject(with: Data("false".utf8))
+        #expect(JSONNumber.int(jsonTrue) == nil)
+        #expect(JSONNumber.int(jsonFalse) == nil)
+        #expect(JSONNumber.uint64(true) == nil)
+        #expect(JSONNumber.uint64(jsonTrue) == nil)
+
+        let jsonHalf = try JSONSerialization.jsonObject(with: Data("17.5".utf8))
+        #expect(JSONNumber.int(jsonHalf) == nil)
+        #expect(JSONNumber.uint64(jsonHalf) == nil)
+        #expect(!JSONNumber.matchesStringId(jsonHalf, expected: "17"))
+        let jsonWhole = try JSONSerialization.jsonObject(with: Data("17".utf8))
+        #expect(JSONNumber.int(jsonWhole) == 17)
+        #expect(JSONNumber.uint64(jsonWhole) == 17)
+        #expect(JSONNumber.int(NSNumber(value: 17.5)) == nil)
+        #expect(JSONNumber.uint64(NSNumber(value: 17.5)) == nil)
+    }
+
+    @Test("uint64 rejects negatives and non-integers")
+    func uint64Shapes() {
+        #expect(JSONNumber.uint64(42) == 42)
+        #expect(JSONNumber.uint64(NSNumber(value: 42)) == 42)
+        #expect(JSONNumber.uint64(42.0) == 42)
+        #expect(JSONNumber.uint64(-1) == nil)
+        #expect(JSONNumber.uint64(NSNumber(value: -3)) == nil)
+        #expect(JSONNumber.uint64("9") == 9)
+    }
+
+    @Test("JSON-RPC response ids match as string or number")
+    func responseIdMatch() {
+        #expect(JSONNumber.matchesStringId("1", expected: "1"))
+        #expect(JSONNumber.matchesStringId(1, expected: "1"))
+        #expect(JSONNumber.matchesStringId(NSNumber(value: 1), expected: "1"))
+        #expect(JSONNumber.matchesStringId(1.0, expected: "1"))
+        #expect(!JSONNumber.matchesStringId(2, expected: "1"))
+        #expect(!JSONNumber.matchesStringId("2", expected: "1"))
+        #expect(!JSONNumber.matchesStringId(nil, expected: "1"))
+        #expect(!JSONNumber.matchesStringId(["id": 1], expected: "1"))
+        #expect(!JSONNumber.matchesStringId(true, expected: "1"))
+    }
+}
+
+@Suite("NDJSONFraming")
+struct NDJSONFramingTests {
+    @Test("Returns a complete line and leaves the remainder")
+    func completeLine() {
+        var buffer = Data("{\"a\":1}\n{\"b\":2}\n".utf8)
+        var skipping = false
+        let first = NDJSONFraming.consume(buffer: &buffer, skipping: &skipping, maxBytes: 64)
+        guard case .line(let line) = first else {
+            Issue.record("Expected line, got \(first)")
+            return
+        }
+        #expect(String(data: line, encoding: .utf8) == "{\"a\":1}\n")
+        #expect(skipping == false)
+        let second = NDJSONFraming.consume(buffer: &buffer, skipping: &skipping, maxBytes: 64)
+        guard case .line(let line2) = second else {
+            Issue.record("Expected second line, got \(second)")
+            return
+        }
+        #expect(String(data: line2, encoding: .utf8) == "{\"b\":2}\n")
+        #expect(buffer.isEmpty)
+    }
+
+    @Test("Asks for more data when the line is incomplete")
+    func needMore() {
+        var buffer = Data("{\"partial\"".utf8)
+        var skipping = false
+        let outcome = NDJSONFraming.consume(buffer: &buffer, skipping: &skipping, maxBytes: 64)
+        #expect(outcome == .needMore)
+        #expect(buffer.count == 10)
+        #expect(skipping == false)
+    }
+
+    @Test("Drops a complete oversized line and keeps the next frame aligned")
+    func skipsCompleteOversizedLine() {
+        var buffer = Data("abcdefghij\nkeep\n".utf8)
+        var skipping = false
+        let skipped = NDJSONFraming.consume(buffer: &buffer, skipping: &skipping, maxBytes: 8)
+        #expect(skipped == .skippedOversized)
+        #expect(skipping == false)
+        let kept = NDJSONFraming.consume(buffer: &buffer, skipping: &skipping, maxBytes: 8)
+        guard case .line(let line) = kept else {
+            Issue.record("Expected kept line, got \(kept)")
+            return
+        }
+        #expect(String(data: line, encoding: .utf8) == "keep\n")
+    }
+
+    @Test("Drains an oversized line that spans chunks without retaining it")
+    func drainsPartialOversizedLine() {
+        var buffer = Data("xxxxxxxxxxxxxxxx".utf8)
+        var skipping = false
+        let first = NDJSONFraming.consume(buffer: &buffer, skipping: &skipping, maxBytes: 8)
+        #expect(first == .stillSkipping)
+        #expect(skipping)
+        #expect(buffer.isEmpty)
+
+        buffer.append(contentsOf: Data("yyyy\nnext\n".utf8))
+        let drained = NDJSONFraming.consume(buffer: &buffer, skipping: &skipping, maxBytes: 8)
+        #expect(drained == .skippedOversized)
+        #expect(skipping == false)
+        let next = NDJSONFraming.consume(buffer: &buffer, skipping: &skipping, maxBytes: 8)
+        guard case .line(let line) = next else {
+            Issue.record("Expected next line, got \(next)")
+            return
+        }
+        #expect(String(data: line, encoding: .utf8) == "next\n")
     }
 }
