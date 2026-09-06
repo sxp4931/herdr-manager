@@ -49,6 +49,13 @@ public actor Diagnoser {
             return s2
         }
 
+        // Finished / idle are legitimate end states. They must not fall
+        // through to S4, which used to stamp `.unclassifiable("status: done")`
+        // over the healthy verdict from the snapshot.
+        if agent.status == .done || agent.status == .idle {
+            return .healthy
+        }
+
         // S4: Unclassifiable
         return await checkUnclassifiable(agent: agent, paneId: paneId, adapter: adapter)
     }
