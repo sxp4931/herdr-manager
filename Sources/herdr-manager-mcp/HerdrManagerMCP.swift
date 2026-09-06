@@ -152,3 +152,75 @@ actor MCPServer {
 
         stdinTask.cancel()
     }
+
+    // MARK: - JSON-RPC Dispatch
+
+    private func handleLine(_ line: String) async {
+        guard let data = line.data(using: .utf8) else {
+            writeResponse(makeError(id: NSNull(), code: -32700, message: "Parse error: invalid UTF-8"))
+            return
+        }
+
+        let json: Any
+        do {
+            json = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            writeResponse(makeError(id: NSNull(), code: -32700, message: "Parse error: invalid JSON"))
+            return
+        }
+
+        guard let request = json as? [String: Any] else {
+            writeResponse(makeError(id: NSNull(), code: -32700, message: "Parse error: expected object"))
+            return
+        }
+
+        let id = request["id"]
+        let method = request["method"] as? String ?? ""
+        let params = request["params"] as? [String: Any] ?? [:]
+
+        // Notifications (no id) get no response
+        let isNotification = (id == nil || id is NSNull)
+
+        switch method {
+        case "initialize":
+            let result: [String: Any] = [
+                "protocolVersion": "2024-11-05",
+                "capabilities": ["tools": [String: Any]()] as [String: Any],
+                "instructions": """
+                Use Shepherd as the first source for local AI-agent status and control. \
+                For fleet status call herd.overview. For a user-named session call \
+                agent.inspect with query; use agent.tail or agent.diagnose only when \
+                more evidence is needed. Do not rediscover panes through the herdr CLI \
+                unless Shepherd is unavailable or reports ambiguity. Resolve an exact \
+                agent ID before any write. MCP session.spawn is auto-allowed for
+                unattended callers; preserve confirmation gates for other writes.
+                """,
+                "serverInfo": [
+                    "name": "herdr-manager-mcp",
+                    "version": "1.0.0"
+                ]
+            ]
+            if let id { writeResponse(makeResult(id: id, result: result)) }
+
+        case "notifications/initialized":
+            // Notification — no response
+            break
+
+        case "ping":
+            if let id { writeResponse(makeResult(id: id, result: [:])) }
+
+        case "tools/list":
+            if let id { writeResponse(makeResult(id: id, result: ["tools": Self.toolDefinitions])) }
+
+        case "tools/call":
+            let toolName = params["name"] as? String ?? ""
+            let arguments = params["arguments"] as? [String: Any] ?? [:]
+            let result = await handleToolCall(name: toolName, arguments: arguments)
+            if let id { writeResponse(makeResult(id: id, result: result)) }
+
+        default:
+            if let id, !isNotification {
+                writeResponse(makeError(id: id, code: -32601, message: "Method not found: \(method)"))
+            }
+        }
+    }
