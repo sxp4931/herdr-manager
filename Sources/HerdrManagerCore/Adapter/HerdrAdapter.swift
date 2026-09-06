@@ -52,7 +52,11 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     private var eventLoopTask: Task<Void, Never>?
 
     public init(socketPath: String) {
+        // Request client: bounded I/O timeout so a stalled herdr errors out
+        // (.timeout) instead of blocking forever.
         self.reqClient = NDJSONClient(socketPath: socketPath, ioTimeoutSeconds: 30)
+        // Subscription client: no timeout — the event stream is push-based and
+        // legitimately blocks between events.
         self.subClient = NDJSONClient(socketPath: socketPath, ioTimeoutSeconds: 0)
         var continuation: AsyncStream<HerdrEvent>.Continuation?
         self.eventStream = AsyncStream { cont in
@@ -61,6 +65,11 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         self.eventContinuation = continuation
     }
 
+    /// Run blocking socket I/O on the dedicated `ioQueue`, off the cooperative
+    /// pool and off the main actor. The body must do its own parsing and return
+    /// a `Sendable` result so no non-Sendable value (e.g. `[String: Any]`)
+    /// crosses the thread boundary. Combined with the socket-level timeouts, a
+    /// hung herdr surfaces as `.timeout` rather than blocking indefinitely.
     private func onIO<T: Sendable>(
         _ body: @escaping @Sendable () throws -> T
     ) async throws -> T {
@@ -118,6 +127,9 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         try await read(paneId: paneId, source: source, lines: nil)
     }
 
+    /// Bounded pane read for compact UI previews. The protocol requirement
+    /// keeps the unbounded form above for diagnosis/MCP callers, while
+    /// Shepherd's Peek can ask herdr to do the truncation at the source.
     public func read(paneId: String, source: PaneReadSource, lines: Int?) async throws -> PaneReadResult {
         try await onIO { [reqClient] in
             let params = LiveHerdrAdapter.readParams(paneId: paneId, source: source, lines: lines)
@@ -139,6 +151,10 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         return params
     }
 
+    /// `pane.read` -> `{"type":"pane_read","read":{...PaneReadResult...}}`.
+    /// The fields live one level down; reading `text` off the envelope returned
+    /// an empty string on every call, which is what made Peek render a blank
+    /// box. The flat shape is still accepted so older fixtures keep parsing.
     internal static func parsePaneRead(_ dict: [String: Any], requested: PaneReadSource) -> PaneReadResult {
         let payload = (dict["read"] as? [String: Any]) ?? dict
         return PaneReadResult(
@@ -151,18 +167,21 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         try await onIO { [reqClient] in
             let params: [String: Any] = ["target": paneId]
             let result = try reqClient.sendRead(method: "agent.explain", params: params)
+
             let explain: [String: Any]
             if let nested = result["explain"] as? [String: Any] {
                 explain = nested
             } else {
                 explain = result
             }
+
             var matchedRuleId: String?
             var matchedRulePriority: Int?
             if let rule = explain["matched_rule"] as? [String: Any] {
                 matchedRuleId = rule["id"] as? String
                 matchedRulePriority = JSONNumber.int(rule["priority"])
             }
+
             return AgentExplainResult(
                 agent: explain["agent"] as? String,
                 state: explain["state"] as? String,
@@ -181,6 +200,10 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         }
     }
 
+    /// `pane.process_info` -> `{"type":"pane_process_info","process_info":{...}}`
+    /// — the same envelope trap as `pane.read`. Reading the fields off the
+    /// envelope produced a nil `shell_pid` and an empty process list, which
+    /// silently disabled the process-gone diagnosis.
     internal static func parseProcessInfo(_ dict: [String: Any]) -> ProcessInfoResult {
         let payload = (dict["process_info"] as? [String: Any]) ?? dict
         let shellPid = JSONNumber.int(payload["shell_pid"]).map(Int32.init(truncatingIfNeeded:))
@@ -205,9 +228,13 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         }
     }
 
+    /// Extracted so the param shape (`{"target": …}`, per schema `AgentTarget`)
+    /// is independently testable without a socket.
     internal static func focusParams(paneId: String) -> [String: Any] {
         ["target": paneId]
     }
+
+    // MARK: - Write Methods
 
     public func sendKeys(paneId: String, keys: [String]) async throws {
         try await onIO { [reqClient] in
@@ -221,6 +248,11 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     public func prompt(paneId: String, text: String) async throws {
         try await onIO { [reqClient] in
+            // Keep Nudge as one user action, but send text and Enter as two
+            // ordered herdr writes. `agent.prompt` is documented as an atomic
+            // submission, yet some live agent TUIs only accepted its paste
+            // portion. Separate channel messages preserve bracketed-paste
+            // handling while making the Enter key unambiguous.
             _ = try reqClient.sendWrite(
                 method: "pane.send_input",
                 params: Self.promptTextParams(paneId: paneId, text: text)
@@ -280,6 +312,10 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         try await startAgent(paneId: paneId, kind: kind, name: name, timeoutMs: nil)
     }
 
+    /// Start an agent with an explicit Herdr startup-readiness timeout.
+    /// The overload keeps the existing adapter protocol and UI call sites
+    /// source-compatible while allowing MCP session creation to wait for a
+    /// freshly-created shell instead of failing on the default short probe.
     public func startAgent(paneId: String, kind: String, name: String, timeoutMs: Int?) async throws {
         try await onIO { [reqClient] in
             var params: [String: Any] = [
@@ -292,6 +328,10 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         }
     }
 
+    /// Wait until a newly-created pane is registered as an interactive shell.
+    /// `pane.split`/`tab.create` can return before the terminal host has
+    /// finished publishing the pane; launching an agent in that small window
+    /// otherwise fails with "not an available shell".
     public func waitForShell(paneId: String, timeoutMs: Int = 10_000) async throws -> Bool {
         let deadline = Date().addingTimeInterval(Double(max(timeoutMs, 0)) / 1000.0)
         while true {
@@ -305,6 +345,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                     return true
                 }
             } catch {
+                // The pane can exist before its terminal process is ready.
             }
             guard Date() < deadline else { return false }
             try await Task.sleep(nanoseconds: 100_000_000)
@@ -345,6 +386,11 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         }
     }
 
+    // MARK: - Agent-centric methods (Bug 4: agent.list is the source of truth)
+
+    /// `agent.list` — the authoritative list of real agents (never plain
+    /// shells) with a genuine `state_change_seq`, which `session.snapshot`
+    /// panes do not carry.
     public func agentList() async throws -> [HerdrAgentInfo] {
         try await onIO { [reqClient] in
             let result = try reqClient.sendRead(method: "agent.list", params: [:])
@@ -352,14 +398,19 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         }
     }
 
+    /// `agent.list` merged with `session.snapshot`'s workspace/tab labels and
+    /// focus pointers — the one-stop call sites should use going forward.
     public func herdSnapshot() async throws -> HerdSnapshot {
         let result: HerdSnapshot = try await onIO { [reqClient] in
             let agentsResult = try reqClient.sendRead(method: "agent.list", params: [:])
             let agents = LiveHerdrAdapter.parseAgentList(agentsResult)
+
             let snapResult = try reqClient.sendRead(method: "session.snapshot", params: [:])
             let snap = try LiveHerdrAdapter.parseSnapshot(snapResult)
+
             let workspaceNames = snap.workspaceNameMap
             let tabNames = snap.tabNameMap
+
             return HerdSnapshot(
                 version: snap.version,
                 protocol: snap.protocol,
@@ -375,6 +426,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         return result
     }
 
+    /// `tab.create` -> `{"type":"tab_created","tab":{...},"root_pane":{...}}`.
     public func createTab(
         workspaceId: String?,
         cwd: String?,
@@ -399,6 +451,8 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         }
     }
 
+    /// Split beside an existing pane in the same tab and return the new shell
+    /// pane. `agent.start` can then launch into that interactive shell.
     public func splitPane(targetPaneId: String, cwd: String?) async throws -> String {
         try await onIO { [reqClient] in
             let params = LiveHerdrAdapter.splitPaneParams(targetPaneId: targetPaneId, cwd: cwd)
@@ -425,24 +479,30 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         return paneId
     }
 
+    /// `workspace.focus` -> `{workspace_id}` (schema `WorkspaceTarget`).
     public func focusWorkspace(_ workspaceId: String) async throws {
         try await onIO { [reqClient] in
             _ = try reqClient.sendWrite(method: "workspace.focus", params: ["workspace_id": workspaceId])
         }
     }
 
+    /// `tab.focus` -> `{tab_id}` (schema `TabTarget`).
     public func focusTab(_ tabId: String) async throws {
         try await onIO { [reqClient] in
             _ = try reqClient.sendWrite(method: "tab.focus", params: ["tab_id": tabId])
         }
     }
 
+    /// `pane.focus` -> `{pane_id}` (schema `PaneTarget`). Distinct from
+    /// `agent.focus`, which takes `{target}` and additionally routes agent
+    /// attention; this is a plain pane focus.
     public func focusPane(_ paneId: String) async throws {
         try await onIO { [reqClient] in
             _ = try reqClient.sendWrite(method: "pane.focus", params: ["pane_id": paneId])
         }
     }
 
+    /// `server.agent_manifests` -> `{"type":"agent_manifest_status","manifests":[{"agent":...},...]}`.
     public func availableAgentKinds() async throws -> [String] {
         try await onIO { [reqClient] in
             let result = try reqClient.sendRead(method: "server.agent_manifests", params: [:])
@@ -452,6 +512,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     }
 
     public func events() -> AsyncStream<HerdrEvent> {
+        // Start the self-healing subscription loop in the background.
         eventLoopTask?.cancel()
         eventLoopTask = Task { [weak self] in
             await self?.runSubscriptionLoop()
@@ -459,6 +520,12 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         return eventStream
     }
 
+    /// Global (no-argument) subscription types. `pane.updated` carries the
+    /// entire pane object including `agent_status`, which is what the old
+    /// (and never-working — it required a `pane_id` we never sent)
+    /// `pane.agent_status_changed` per-pane subscription was for. Deliberately
+    /// excludes `pane.agent_status_changed`, `pane.scroll_changed`, and
+    /// `pane.output_matched`, which the schema requires a `pane_id` for.
     internal static let globalSubscriptionTypes: [String] = [
         "pane.updated", "pane.created", "pane.closed",
         "pane.exited", "pane.focused", "pane.agent_detected",
@@ -466,28 +533,46 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         "tab.created", "tab.closed", "tab.renamed"
     ]
 
+    /// Subscribe on the dedicated `subClient`, forever. On any error or clean
+    /// close, back off and re-subscribe — so a transient socket hiccup no
+    /// longer kills live updates permanently. `.disconnected` is only ever
+    /// yielded on a genuine transition away from a previously-connected state
+    /// (tracked via `wasConnected`) — a retry loop that never got connected in
+    /// the first place must not flap `.connected`/`.disconnected` on every
+    /// backoff cycle.
     private func runSubscriptionLoop() async {
         var attempt = 0
-        var backoff: UInt64 = 1_000_000_000
+        var backoff: UInt64 = 1_000_000_000 // 1s
         var wasConnected = false
         while !Task.isCancelled {
             do {
                 if !subClient.connected {
                     try subClient.connect()
                 }
+                // `subscribe` blocks until herdr confirms `subscription_started`
+                // (or throws) before returning the stream — so reaching this
+                // line means the subscription is genuinely live, not merely
+                // that a stream object was constructed.
                 let stream = try subClient.subscribe(subscriptions: Self.globalSubscriptionTypes)
                 setConnectionState(.connected)
                 eventContinuation?.yield(.connected)
                 wasConnected = true
                 attempt = 0
                 backoff = 1_000_000_000
+
                 for try await lineData in stream {
+                    // A single malformed line must not tear down the
+                    // subscription: that used to throw out of JSONSerialization
+                    // and look like a disconnect.
                     if let event = Self.event(fromSubscriptionLine: lineData) {
                         eventContinuation?.yield(event)
                     }
                 }
+                // Stream ended without throwing: server closed the subscription.
             } catch {
+                // fall through to backoff/reconnect below
             }
+
             guard !Task.isCancelled else { return }
             if wasConnected {
                 setConnectionState(.disconnected)
@@ -495,22 +580,28 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                 wasConnected = false
             }
             subClient.closeSocket()
+
             setConnectionState(.reconnecting(attempt: attempt))
             try? await Task.sleep(nanoseconds: backoff)
             attempt += 1
-            backoff = min(backoff * 2, 30_000_000_000)
+            backoff = min(backoff * 2, 30_000_000_000) // cap at 30s
         }
     }
 
+    // MARK: - Parsing
+
     internal static func parseSnapshot(_ dict: [String: Any]) throws -> HerdrSnapshot {
+        // The result has {type: "session_snapshot", snapshot: {...}}
         let snap: [String: Any]
         if let inner = dict["snapshot"] as? [String: Any] {
             snap = inner
         } else {
             snap = dict
         }
+
         let version = snap["version"] as? String ?? ""
         let proto = JSONNumber.int(snap["protocol"]) ?? 0
+
         var workspaces: [HerdrSnapshot.Workspace] = []
         if let wsList = snap["workspaces"] as? [[String: Any]] {
             for ws in wsList {
@@ -522,6 +613,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                 ))
             }
         }
+
         var tabs: [HerdrSnapshot.Tab] = []
         if let tabList = snap["tabs"] as? [[String: Any]] {
             for t in tabList {
@@ -534,6 +626,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                 ))
             }
         }
+
         var panes: [HerdrSnapshot.PaneInfo] = []
         if let paneList = snap["panes"] as? [[String: Any]] {
             for p in paneList {
@@ -563,6 +656,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                 ))
             }
         }
+
         return HerdrSnapshot(
             version: version,
             protocol: proto,
@@ -576,18 +670,32 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     }
 
     internal static func parseEvent(_ dict: [String: Any]) -> HerdrEvent {
+        // Real herdr subscription envelope, protocol 17:
+        //   {"event":"pane_updated","data":{"type":"pane_updated","pane":{...}}}
+        // Event names are UNDERSCORED on the wire (pane_updated, pane_closed,
+        // pane_focused, workspace_focused, ...). Subscription *types* are
+        // dotted (`pane.updated`). Accept both spellings so a herdr that
+        // echoes the subscribe type as `event` still drives live updates.
+        // Some envelopes use `type` instead of `event` for the same kind.
         guard let eventKind = (dict["event"] as? String) ?? (dict["type"] as? String) else {
             return .ignored
         }
+        // Nested `data` is the protocol-17 envelope. A flat record that
+        // already carries `pane_id` at the top level is accepted so a
+        // herdr that omits the wrapper still drives live updates.
         let data = (dict["data"] as? [String: Any]) ?? dict
         let kind = eventKind.replacingOccurrences(of: ".", with: "_")
         let pane = (data["pane"] as? [String: Any]) ?? data
         let paneId = pane["pane_id"] as? String ?? data["pane_id"] as? String ?? ""
+
         switch kind {
         case "pane_agent_status_changed":
             guard !paneId.isEmpty else { return .ignored }
-            let status = pane["agent_status"] as? String ?? data["agent_status"] as? String ?? "unknown"
-            let seq = JSONNumber.uint64(pane["state_change_seq"]) ?? JSONNumber.uint64(data["state_change_seq"])
+            let status = pane["agent_status"] as? String
+                ?? data["agent_status"] as? String
+                ?? "unknown"
+            let seq = JSONNumber.uint64(pane["state_change_seq"])
+                ?? JSONNumber.uint64(data["state_change_seq"])
             return .agentStatusChanged(paneId: paneId, agentStatus: status, stateChangeSeq: seq)
         case "pane_updated":
             guard !paneId.isEmpty else { return .ignored }
@@ -619,10 +727,17 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
              "layout_updated":
             return .workspacesChanged
         default:
+            // Includes pane_agent_detected/pane_output_changed (not modeled
+            // yet — harmless to drop) and any genuinely unknown event.
             return .ignored
         }
     }
 
+    /// Shared parser for both `agent.list`'s `AgentInfo` entries and the
+    /// `pane_updated` event's nested `PaneInfo` — the two shapes overlap on
+    /// every field this type needs; fields present only on one side (e.g.
+    /// `state_change_seq`, `name`, `interactive_ready` are `agent.list`-only)
+    /// simply default when absent.
     internal static func parseAgentInfo(_ dict: [String: Any]) -> HerdrAgentInfo {
         var agentSession: HerdrSnapshot.AgentSession?
         if let asDict = dict["agent_session"] as? [String: Any] {
@@ -656,6 +771,8 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         )
     }
 
+    /// Parses `agent.list`'s `{"agents":[AgentInfo, ...]}` result, dropping
+    /// any entry with no `agent` (a plain shell pane is not an agent).
     internal static func parseAgentList(_ dict: [String: Any]) -> [HerdrAgentInfo] {
         let list = dict["agents"] as? [[String: Any]] ?? []
         return list.compactMap { entry -> HerdrAgentInfo? in
@@ -666,7 +783,15 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         }
     }
 
+    // MARK: - Health
+
+    /// Lowest herdr wire protocol this adapter was built and verified against.
     public static let minSupportedProtocolVersion = 17
+
+    /// Protocols this build treats as fully supported. herdr's protocol has
+    /// been append-only, so anything newer than the verified version is
+    /// included; anything older is out of range (reads continue, writes
+    /// disable). There is no published upper bound.
     public static let supportedProtocolRange: ClosedRange<Int> =
         minSupportedProtocolVersion...Int.max
 
@@ -674,6 +799,10 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         Self.health(forProtocol: latestProtocol())
     }
 
+    /// Capability gate used by the menu bar, CLI, and MCP. Protocol 0 means
+    /// no handshake yet. Older than the verified baseline keeps reads and
+    /// disables writes. Newer is treated as additive so a routine herdr bump
+    /// does not silently disable every write.
     public static func health(forProtocol proto: Int) -> AdapterHealth {
         let minSupportedVersion = minSupportedProtocolVersion
         if proto <= 0 {
@@ -708,6 +837,8 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         )
     }
 
+    /// Parse one subscription line. Invalid JSON is dropped so a corrupt
+    /// event cannot look like a socket disconnect.
     internal static func event(fromSubscriptionLine lineData: Data) -> HerdrEvent? {
         guard let object = try? JSONSerialization.jsonObject(with: lineData),
               let dict = object as? [String: Any] else {
@@ -716,6 +847,10 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         return parseEvent(dict)
     }
 
+    // MARK: - Socket Resolution
+
+    /// Copy shown when the resolved socket is missing, so the CLI points at
+    /// the override instead of only the computed path.
     public static func missingSocketMessage(resolvedPath: String) -> String {
         """
         Error: herdr socket not found at \(resolvedPath)
@@ -724,11 +859,15 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         """
     }
 
+    /// One-line protocol summary for herdmgr. Nil when the handshake is the
+    /// verified baseline so a healthy socket stays quiet.
     public static func protocolStatusLine(for health: AdapterHealth) -> String? {
         guard let reason = health.reason else { return nil }
         return "herdr protocol \(health.protocolVersion): \(reason)"
     }
 
+    /// Shown after a connect or snapshot failure so the operator can point
+    /// herdmgr at a different socket without guessing the override name.
     public static func socketHint(resolvedPath: String) -> String {
         """
         Socket: \(resolvedPath)
@@ -736,6 +875,11 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         """
     }
 
+    /// Resolve herdr socket path in priority order:
+    /// 1. HERDR_SOCKET_PATH (explicit override)
+    /// 2. HERDR_SESSION (session-based lookup)
+    /// 3. XDG_CONFIG_HOME/herdr/herdr.sock
+    /// 4. ~/.config/herdr/herdr.sock (default)
     public static func resolveSocketPath() -> String {
         let env = ProcessInfo.processInfo.environment
         if let explicit = env["HERDR_SOCKET_PATH"], !explicit.isEmpty {
@@ -752,6 +896,11 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         return (home as NSString).appendingPathComponent(".config/herdr/herdr.sock")
     }
 
+    /// Resolve the socket path for a named herdr session (`HERDR_SESSION`).
+    /// Prefers herdr's own registry (`herdr session list`) so we never guess
+    /// the on-disk layout; falls back to the conventional
+    /// `<config>/herdr/sessions/<name>/herdr.sock`. Returns nil if the named
+    /// session cannot be resolved (caller falls through to the default socket).
     private static func resolveSessionSocket(name: String, env: [String: String]) -> String? {
         if let fromRegistry = sessionSocketFromHerdrCLI(name: name) {
             return fromRegistry
@@ -767,6 +916,8 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         return FileManager.default.fileExists(atPath: candidate) ? candidate : nil
     }
 
+    /// Ask the herdr CLI for a session's authoritative socket path by parsing
+    /// `herdr session list` (columns: name, status, directory, socket).
     private static func sessionSocketFromHerdrCLI(name: String) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -788,11 +939,15 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     }
 }
 
+// MARK: - AdapterHealth
+
+/// Bounded capability/health surface for the herdr adapter.
 public struct AdapterHealth: Sendable, Equatable {
     public let protocolVersion: Int
     public let compatible: Bool
     public let writesEnabled: Bool
     public let reason: String?
+
     public init(protocolVersion: Int, compatible: Bool, writesEnabled: Bool, reason: String?) {
         self.protocolVersion = protocolVersion
         self.compatible = compatible
@@ -801,6 +956,9 @@ public struct AdapterHealth: Sendable, Equatable {
     }
 }
 
+/// JSONSerialization turns numbers into `NSNumber`; hand-written fixtures use
+/// native `Int`. `as? Int` / `as? UInt64` each miss one of those shapes, which
+/// is how `state_change_seq` and `protocol` used to decode as missing.
 public enum JSONNumber {
     public static func int(_ value: Any?) -> Int? {
         guard let value, !isJSONBoolean(value) else { return nil }
@@ -837,6 +995,8 @@ public enum JSONNumber {
         return nil
     }
 
+    /// herdr may echo a JSON-RPC `id` as a number even when the request sent
+    /// a string. Treat those as the same response.
     public static func matchesStringId(_ value: Any?, expected: String) -> Bool {
         if let string = value as? String {
             return string == expected
@@ -847,6 +1007,9 @@ public enum JSONNumber {
         return false
     }
 
+    /// JSONSerialization boxes `true`/`false` as CFBoolean. Those NSNumbers
+    /// bridge to Int 1/0, which used to make `protocol: true` look like
+    /// protocol 1. Detect the boolean type id before any numeric coerce.
     private static func isJSONBoolean(_ value: Any) -> Bool {
         if let number = value as? NSNumber {
             return CFGetTypeID(number) == CFBooleanGetTypeID()
@@ -864,6 +1027,9 @@ public enum JSONNumber {
         return Int(value)
     }
 
+    /// JSONSerialization boxes every number as NSNumber. Integers often
+    /// arrive as doubles (`objCType` "d"); `intValue` would truncate 17.5
+    /// to 17 and make `protocol: 17.5` look like protocol 17.
     private static func intFromNSNumber(_ number: NSNumber) -> Int? {
         let type = String(cString: number.objCType)
         if type == "d" || type == "f" {
