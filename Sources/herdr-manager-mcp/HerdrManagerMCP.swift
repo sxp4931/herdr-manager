@@ -255,3 +255,52 @@ actor MCPServer {
             return makeToolError("Unknown tool: \(name)")
         }
     }
+
+    // MARK: - Herd → Agent Builder
+
+    /// Build the MCP inventory from the same authoritative merged view
+    /// Shepherd uses: `agent.list` supplies real agents and state sequences,
+    /// while `session.snapshot` supplies workspace/tab labels.
+    private func buildAgents(from herd: HerdSnapshot) -> [AgentID: Agent] {
+        var agents: [AgentID: Agent] = [:]
+
+        for info in herd.agents {
+            guard let agentKind = info.agent, !agentKind.isEmpty else { continue }
+
+            let agentId = AgentID(info.paneId)
+            let status = AgentStatus(rawValue: info.agentStatus) ?? .unknown
+            let wsName = herd.workspaceNames[info.workspaceId] ?? info.workspaceId
+            let tabName = herd.tabNames[info.tabId] ?? info.tabId
+
+            let kind: AgentKind
+            if let session = info.agentSession {
+                kind = AgentKind.custom(session.agent)
+            } else {
+                kind = AgentKind.custom(agentKind)
+            }
+
+            let name = info.title
+                ?? info.name
+                ?? info.terminalTitleStripped
+                ?? info.displayAgent
+                ?? agentKind
+
+            let agent = Agent(
+                id: agentId,
+                kind: kind,
+                name: name,
+                displayName: name,
+                status: status,
+                stateChangeSeq: info.stateChangeSeq,
+                enteredAt: Date(),
+                lastOutputAt: nil,
+                verdict: Self.initialVerdict(for: status),
+                workspaceName: wsName,
+                tabName: tabName,
+                cwd: info.foregroundCwd ?? info.cwd ?? ""
+            )
+            agents[agentId] = agent
+        }
+
+        return agents
+    }
