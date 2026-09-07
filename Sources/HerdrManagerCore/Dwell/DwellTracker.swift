@@ -43,8 +43,15 @@ public struct DwellEntry: Sendable {
 // MARK: - DwellTracker
 
 public final class DwellTracker: @unchecked Sendable {
+    /// Persisted dwell JSON is a compact map. A multi-megabyte stand-in is
+    /// ignored rather than loaded at launch.
+    public static let maxFileBytes = 256 * 1024
+
     private let lock = NSLock()
     private var entries: [AgentID: DwellEntry] = [:]
+    /// Set when the on-disk file is larger than `maxFileBytes`. save() must
+    /// not replace that file with a tiny snapshot of whatever is in RAM.
+    private var persistDisabled = false
 
     /// On-disk location for the persisted dwell state. Lazily resolved so
     /// tests can override it via `init(fileURL:)`.
@@ -123,6 +130,10 @@ public final class DwellTracker: @unchecked Sendable {
     /// best-effort and must never break the live tracking path.
     public func save() {
         lock.lock()
+        if persistDisabled {
+            lock.unlock()
+            return
+        }
         let snapshot = entries
         lock.unlock()
 
@@ -164,10 +175,21 @@ public final class DwellTracker: @unchecked Sendable {
     ///   the persisted dwell timestamps back onto the live agents.
     @discardableResult
     public func load(currentAgents: [AgentID: Agent]) -> [AgentID: DwellEntry] {
-        guard FileManager.default.fileExists(atPath: fileURL.path),
-              let data = FileManager.default.contents(atPath: fileURL.path),
+        if fileIsOversized() {
+            lock.lock()
+            persistDisabled = true
+            entries = [:]
+            lock.unlock()
+            return [:]
+        }
+        guard let data = BoundedFileRead.data(from: fileURL, maxBytes: Self.maxFileBytes),
               let persisted = try? JSONDecoder().decode(PersistedDwellState.self, from: data)
-        else { return [:] }
+        else {
+            lock.lock()
+            persistDisabled = false
+            lock.unlock()
+            return [:]
+        }
 
         var restored: [AgentID: DwellEntry] = [:]
         for item in persisted.entries {
@@ -190,9 +212,19 @@ public final class DwellTracker: @unchecked Sendable {
         }
 
         lock.lock()
-        defer { lock.unlock() }
+        persistDisabled = false
         entries = restored
+        lock.unlock()
         return restored
+    }
+
+    private func fileIsOversized() -> Bool {
+        guard let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+              values.isRegularFile == true,
+              let size = values.fileSize else {
+            return false
+        }
+        return size > Self.maxFileBytes
     }
 
     /// Derive a stable occupant fingerprint from an Agent. Uses the kind's

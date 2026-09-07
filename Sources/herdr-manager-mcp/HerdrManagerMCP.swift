@@ -514,7 +514,13 @@ actor MCPServer {
 
             let readResult: PaneReadResult?
             do {
-                readResult = try await adapter.read(paneId: paneId, source: .detection)
+                // Inspect only prints the last 10 lines. Cap the herdr read
+                // so a detection buffer cannot land whole in RSS.
+                readResult = try await adapter.read(
+                    paneId: paneId,
+                    source: .detection,
+                    lines: HeartbeatPoller.detectionReadLines
+                )
             } catch {
                 readResult = nil
             }
@@ -538,7 +544,7 @@ actor MCPServer {
     // MARK: - agent.tail
 
     private func handleAgentTail(arguments: [String: Any]) async -> [String: Any] {
-        let lineCount = min(max(arguments["lines"] as? Int ?? 50, 1), 200)
+        let lineCount = min(max(JSONNumber.int(arguments["lines"]) ?? 50, 1), 200)
 
         let sourceStr = arguments["source"] as? String ?? "detection"
         let source: PaneReadSource
@@ -661,12 +667,12 @@ actor MCPServer {
         }
 
         // state_change_seq is MANDATORY for agent.answer
-        guard let providedSeq = arguments["state_change_seq"] as? Int else {
+        guard let providedSeq = JSONNumber.uint64(arguments["state_change_seq"]) else {
             return makeToolError("Missing required parameter: state_change_seq (mandatory for agent.answer)")
         }
 
         if choice == "select" {
-            guard let index = arguments["index"] as? Int else {
+            guard let index = JSONNumber.int(arguments["index"]) else {
                 return makeToolError("choice 'select' requires an 'index' parameter (integer)")
             }
             // Index bounds: 0...20
@@ -690,7 +696,7 @@ actor MCPServer {
 
             // Verify state_change_seq matches current
             let currentSeq = paneInfo.stateChangeSeq
-            if UInt64(providedSeq) != currentSeq {
+            if providedSeq != currentSeq {
                 return makeToolError("Stale state_change_seq: provided \(providedSeq), current \(currentSeq). Re-diagnose and retry.")
             }
 
@@ -712,10 +718,11 @@ actor MCPServer {
             let explain = try await adapter.explain(paneId: paneId)
             let blockKind = explain.matchedRuleId.map { BlockKind.from(ruleId: $0) } ?? .unknownBlock
 
-            guard let resolvedKeys = Self.keys(forChoice: choice, index: arguments["index"] as? Int, blockKind: blockKind) else {
+            guard let resolvedKeys = Self.keys(forChoice: choice, index: JSONNumber.int(arguments["index"]), blockKind: blockKind) else {
                 return makeToolError("Cannot answer: detected block kind '\(blockKind.rawValue)' does not permit choice '\(choice)'. Recognized prompts only; unknown/weak blocks stay read-only.")
             }
 
+            if let error = await checkWritesEnabled() { return error }
             try await adapter.sendKeys(paneId: paneId, keys: resolvedKeys)
 
             await policy.recordWrite(agentId: agentIdStr)
@@ -788,7 +795,8 @@ actor MCPServer {
             // Confirm tier: create pending action and wait for UI approval
             if case .confirm = tier {
                 var params: [String: String] = [
-                    "agent_id": agentIdStr, "text": String(text.prefix(100))
+                    "agent_id": agentIdStr,
+                    "text": redactor.redact(String(text.prefix(100))).redactedText
                 ]
                 params["_fp_occupant"] = fpOccupant
                 params["_fp_status"] = fpStatus
@@ -812,6 +820,12 @@ actor MCPServer {
                         try? await sharedActionStore.markFailed(actionId, detail: "action no longer claimable")
                         return makeToolError("Action no longer claimable (actionId: \(actionId))")
                     }
+                    if let error = await rejectIfWritesDisabled(
+                        actionId: actionId,
+                        detail: "writes disabled after confirmation"
+                    ) {
+                        return error
+                    }
 
                     // Revalidate pane occupant + status episode after the wait
                     do {
@@ -833,7 +847,7 @@ actor MCPServer {
                     ))
 
                     if let waitFor = arguments["wait_for"] as? String {
-                        let timeoutMs = arguments["timeout_ms"] as? Int ?? 30000
+                        let timeoutMs = JSONNumber.int(arguments["timeout_ms"]) ?? 30000
                         let settled = try await adapter.waitStatus(paneId: paneId, until: [waitFor], timeoutMs: timeoutMs)
                         return makeToolResult("{\"sent\":true,\"actionId\":\"\(actionId)\",\"outcome\":\"\(settled ? "settled" : "timeout")\"}")
                     }
@@ -858,11 +872,13 @@ actor MCPServer {
             }
 
             // Gated tier: auto-allowed
+            if let error = await checkWritesEnabled() { return error }
             try await adapter.prompt(paneId: paneId, text: text)
             await policy.recordWrite(agentId: agentIdStr)
 
             var params: [String: String] = [
-                "agent_id": agentIdStr, "text": String(text.prefix(100))
+                "agent_id": agentIdStr,
+                "text": redactor.redact(String(text.prefix(100))).redactedText
             ]
             params["_fp_occupant"] = fpOccupant
             params["_fp_status"] = fpStatus
@@ -879,7 +895,7 @@ actor MCPServer {
             ))
 
             if let waitFor = arguments["wait_for"] as? String {
-                let timeoutMs = arguments["timeout_ms"] as? Int ?? 30000
+                let timeoutMs = JSONNumber.int(arguments["timeout_ms"]) ?? 30000
                 let settled = try await adapter.waitStatus(paneId: paneId, until: [waitFor], timeoutMs: timeoutMs)
                 return makeToolResult("{\"sent\":true,\"actionId\":\"\(actionId)\",\"outcome\":\"\(settled ? "settled" : "timeout")\"}")
             }
@@ -935,6 +951,12 @@ actor MCPServer {
                 guard let claimed = try await sharedActionStore.claimExecuting(actionId: actionId) else {
                     try? await sharedActionStore.markFailed(actionId, detail: "action no longer claimable")
                     return makeToolError("Action no longer claimable (actionId: \(actionId))")
+                }
+                if let error = await rejectIfWritesDisabled(
+                    actionId: actionId,
+                    detail: "writes disabled after confirmation"
+                ) {
+                    return error
                 }
 
                 // Revalidate pane occupant + status episode after the wait
@@ -1023,6 +1045,12 @@ actor MCPServer {
                 guard let claimed = try await sharedActionStore.claimExecuting(actionId: actionId) else {
                     try? await sharedActionStore.markFailed(actionId, detail: "action no longer claimable")
                     return makeToolError("Action no longer claimable (actionId: \(actionId))")
+                }
+                if let error = await rejectIfWritesDisabled(
+                    actionId: actionId,
+                    detail: "writes disabled after confirmation"
+                ) {
+                    return error
                 }
 
                 // Revalidate pane occupant + status episode after the wait
@@ -1198,6 +1226,12 @@ actor MCPServer {
             try? await sharedActionStore.markFailed(actionId, detail: "auto-allowed action no longer claimable")
             return makeToolError("Auto-allowed spawn action no longer claimable (actionId: \(actionId))")
         }
+        if let error = await rejectIfWritesDisabled(
+            actionId: actionId,
+            detail: "writes disabled after claim"
+        ) {
+            return error
+        }
 
         await journal.record(JournalEntry(
             actionId: actionId, tool: "session.spawn",
@@ -1318,11 +1352,14 @@ actor MCPServer {
         try? await sharedActionStore.expireStale()
 
         if let state = await sharedActionStore.status(actionId) {
-            var json = "{\"state\":\"\(state.rawValue)\""
+            var payload: [String: String] = ["state": state.rawValue]
             if let action = await sharedActionStore.get(actionId), let detail = action.failDetail {
-                json += ",\"detail\":\"\(detail)\""
+                payload["detail"] = detail
             }
-            json += "}"
+            guard let data = try? JSONSerialization.data(withJSONObject: payload),
+                  let json = String(data: data, encoding: .utf8) else {
+                return makeToolError("Action status encoding failed")
+            }
             return makeToolResult(json)
         }
         return makeToolError("Action not found: \(actionId)")
@@ -1383,6 +1420,14 @@ actor MCPServer {
             return makeToolError("Writes not enabled: \(health.reason ?? "herdr protocol not verified for writes")")
         }
         return nil
+    }
+
+    /// After UI confirmation, refuse to send input if the protocol gate
+    /// flipped to read-only during the wait.
+    private func rejectIfWritesDisabled(actionId: String, detail: String) async -> [String: Any]? {
+        guard let error = await checkWritesEnabled() else { return nil }
+        try? await sharedActionStore.markFailed(actionId, detail: detail)
+        return error
     }
 
     // MARK: - Answer Key Mapping
@@ -1493,12 +1538,15 @@ actor MCPServer {
             return "Herd Overview — 0 agents\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nNo agents found."
         }
 
-        // Count statuses
-        let blocked = agents.filter { $0.status == .blocked }.count
-        let silent = agents.filter { $0.verdict.isSilent && $0.status != .blocked }.count
-        let done = agents.filter { $0.status == .done }.count
-        let working = agents.filter { $0.status == .working }.count
-        let idle = agents.filter { $0.status == .idle }.count
+        // Count statuses. Mutually exclusive, worst-first — a gone pane
+        // with a leftover working/silent label is gone, not working.
+        let counts = AttentionTriage.counts(agents)
+        let gone = counts.gone
+        let blocked = counts.blocked
+        let silent = counts.silent
+        let done = counts.done
+        let working = counts.working
+        let idle = agents.filter { $0.status == .idle && !$0.verdict.isProcessGone }.count
 
         // Group by workspace
         var byWorkspace: [String: [Agent]] = [:]
@@ -1512,6 +1560,7 @@ actor MCPServer {
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         var statusParts: [String] = []
+        if gone > 0 { statusParts.append("🔴 \(gone) gone") }
         if blocked > 0 { statusParts.append("🔴 \(blocked) blocked") }
         if silent > 0 { statusParts.append("🟠 \(silent) silent") }
         if done > 0 { statusParts.append("🔵 \(done) done") }
@@ -1804,27 +1853,20 @@ actor MCPServer {
     // MARK: - Formatting Helpers
 
     nonisolated private static func statusGlyph(_ agent: Agent) -> String {
+        if agent.verdict.isProcessGone { return "🔴" }
+        if agent.status == .blocked { return "🔴" }
+        if AttentionTriage.isActionablySilent(agent) { return "🟠" }
         switch agent.status {
         case .blocked: return "🔴"
         case .done: return "🔵"
-        case .working:
-            if agent.verdict.isSilent { return "🟠" }
-            return "🟡"
+        case .working: return "🟡"
         case .idle: return "🟢"
         case .unknown: return "⚪"
         }
     }
 
     nonisolated private static func statusPriority(_ agent: Agent) -> Int {
-        switch agent.status {
-        case .blocked: return 0
-        case .done: return 1
-        case .working:
-            if agent.verdict.isSilent { return 2 }
-            return 4
-        case .idle: return 5
-        case .unknown: return 6
-        }
+        AttentionTriage.priority(agent)
     }
 
     nonisolated private static func verdictName(_ verdict: Verdict) -> String {
@@ -2157,17 +2199,19 @@ private func makeError(id: Any, code: Int, message: String) -> [String: Any] {
         "id": id,
         "error": [
             "code": code,
-            "message": message
+            "message": outboundRedactor.redact(message).redactedText
         ]
     ]
 }
+
+private let outboundRedactor = SecretRedactor()
 
 private func makeToolResult(_ text: String) -> [String: Any] {
     [
         "content": [
             [
                 "type": "text",
-                "text": text
+                "text": outboundRedactor.redact(text).redactedText
             ]
         ]
     ]
@@ -2178,7 +2222,7 @@ private func makeToolError(_ message: String) -> [String: Any] {
         "content": [
             [
                 "type": "text",
-                "text": message
+                "text": outboundRedactor.redact(message).redactedText
             ]
         ],
         "isError": true

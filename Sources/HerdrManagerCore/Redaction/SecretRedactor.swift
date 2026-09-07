@@ -17,10 +17,35 @@ public final class SecretRedactor: Sendable {
     // Patterns to detect and redact
     private static let patterns: [(regex: NSRegularExpression, replacement: String)] = {
         let defs: [(pattern: String, replacement: String)] = [
+            // Anthropic keys (hyphens; generic sk- does not match these)
+            ("sk-ant-[A-Za-z0-9_-]{20,}", "sk-ant-[REDACTED]"),
+            // OpenAI project keys
+            ("sk-proj-[A-Za-z0-9_-]{20,}", "sk-proj-[REDACTED]"),
+            // OpenAI service-account keys (hyphens; generic sk- misses these)
+            ("sk-svcacct-[A-Za-z0-9_-]{20,}", "sk-svcacct-[REDACTED]"),
+            // OpenRouter keys (hyphens; generic sk- misses these)
+            ("sk-or-[A-Za-z0-9_-]{20,}", "sk-or-[REDACTED]"),
+            // Stripe secret keys (underscores; generic sk- misses these)
+            ("sk_live_[A-Za-z0-9]{20,}", "sk_live_[REDACTED]"),
+            ("sk_test_[A-Za-z0-9]{20,}", "sk_test_[REDACTED]"),
             // OpenAI / generic sk- keys
             ("sk-[A-Za-z0-9]{20,}", "sk-[REDACTED]"),
             // GitHub personal access tokens
             ("ghp_[A-Za-z0-9]{36}", "ghp_[REDACTED]"),
+            // GitHub OAuth access tokens
+            ("gho_[A-Za-z0-9]{36}", "gho_[REDACTED]"),
+            // GitHub App installation / server tokens
+            ("ghs_[A-Za-z0-9]{36}", "ghs_[REDACTED]"),
+            // GitHub App user-to-server tokens
+            ("ghu_[A-Za-z0-9]{36}", "ghu_[REDACTED]"),
+            // GitHub App refresh tokens
+            ("ghr_[A-Za-z0-9]{36}", "ghr_[REDACTED]"),
+            // GitHub fine-grained PATs
+            ("github_pat_[A-Za-z0-9_]{20,}", "github_pat_[REDACTED]"),
+            // xAI API keys
+            ("xai-[A-Za-z0-9]{20,}", "xai-[REDACTED]"),
+            // Slack bot / user / app tokens
+            ("xox[baprs]-[A-Za-z0-9-]{10,}", "xox[REDACTED]"),
             // AWS access key IDs
             ("AKIA[0-9A-Z]{16}", "AKIA[REDACTED]"),
             // Bearer tokens in headers

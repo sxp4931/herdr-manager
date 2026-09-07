@@ -59,6 +59,42 @@ struct SharedActionStoreTests {
         #expect(await store.status(id) == .approved)
     }
 
+    @Test("Expired pending action is not approved")
+    func expiredPendingIsNotApproved() async throws {
+        let store = tempStore()
+        let id = try await store.create(
+            tool: "agent.interrupt",
+            params: ["agent_id": "w1:p1"],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        try await store.approve(id, now: Date().addingTimeInterval(60))
+        #expect(await store.status(id) == .expired)
+        #expect(try await store.claimExecuting(actionId: id) == nil)
+    }
+
+    @Test("Expired pending spawn cannot auto-claim")
+    func expiredPendingCannotAutoClaim() async throws {
+        let store = tempStore()
+        let id = try await store.create(
+            tool: "session.spawn",
+            params: ["kind": "claude"],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        let claimed = try await store.claimAutoExecuting(
+            actionId: id, now: Date().addingTimeInterval(60)
+        )
+        #expect(claimed == nil)
+        #expect(await store.status(id) == .expired)
+    }
+
+    @Test("Pending confirmation cannot skip the approve step")
+    func pendingCannotSkipApprove() async throws {
+        let store = tempStore()
+        let id = try await store.create(tool: "agent.interrupt", params: [:])
+        #expect(try await store.claimExecuting(actionId: id) == nil)
+        #expect(await store.status(id) == .pending)
+    }
+
     @Test("Deny a pending action")
     func deny() async throws {
         let store = tempStore()
@@ -91,6 +127,68 @@ struct SharedActionStoreTests {
         #expect(pending.first?.tool == "write")
     }
 
+    @Test("loadActions ignores an oversized store file")
+    func loadActionsRejectsOversize() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fileURL = dir.appendingPathComponent("pending-actions.json")
+        try Data(repeating: 0x61, count: SharedActionStore.maxFileBytes + 1)
+            .write(to: fileURL)
+        let store = SharedActionStore(fileURL: fileURL)
+        #expect(await store.loadActions().isEmpty)
+    }
+
+    @Test("Create refuses to overwrite an oversized store file")
+    func createRefusesOversizedFile() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("pending-actions.json")
+        let marker = Data(repeating: 0x61, count: SharedActionStore.maxFileBytes + 1)
+        try marker.write(to: fileURL)
+        let store = SharedActionStore(fileURL: fileURL)
+        do {
+            _ = try await store.create(tool: "agent.interrupt", params: [:])
+            Issue.record("create should throw on an oversized store")
+        } catch let error as SharedActionStoreError {
+            guard case .fileTooLarge = error else {
+                Issue.record("Expected fileTooLarge, got \(error)")
+                return
+            }
+        }
+        let leftover = try Data(contentsOf: fileURL)
+        #expect(leftover.count == marker.count)
+    }
+
+    @Test("status and get expire a pending action past its deadline")
+    func statusExpiresStalePending() async throws {
+        let store = tempStore()
+        let id = try await store.create(
+            tool: "agent.interrupt",
+            params: ["agent_id": "w1:p1"],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        #expect(await store.status(id, now: Date().addingTimeInterval(60)) == .expired)
+        #expect(await store.get(id, now: Date().addingTimeInterval(60))?.state == .expired)
+        #expect(try await store.claimExecuting(actionId: id) == nil)
+    }
+
+    @Test("pendingActions hides a pending action past its deadline")
+    func pendingActionsHidesExpired() async throws {
+        let store = tempStore()
+        let id = try await store.create(
+            tool: "agent.interrupt",
+            params: ["agent_id": "w1:p1"],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        let shown = await store.pendingActions(now: Date().addingTimeInterval(60))
+        #expect(shown.isEmpty)
+        #expect(await store.status(id) == .expired)
+        #expect(try await store.claimExecuting(actionId: id) == nil)
+    }
+
     @Test("expireStale marks past-due actions as expired")
     func expireStale() async throws {
         let store = tempStore()
@@ -100,6 +198,36 @@ struct SharedActionStoreTests {
         try await store.expireStale()
         let status = await store.status(id)
         #expect(status == .pending) // not yet expired
+    }
+
+    @Test("expireStale expires an approved action past its deadline")
+    func expireStaleExpiresApproved() async throws {
+        let store = tempStore()
+        let id = try await store.create(
+            tool: "agent.stop",
+            params: [:],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        try await store.approve(id)
+        try await store.expireStale(now: Date().addingTimeInterval(60))
+        #expect(await store.status(id) == .expired)
+        #expect(try await store.claimExecuting(actionId: id) == nil)
+    }
+
+    @Test("expireStale fails a stuck executing action past its deadline")
+    func expireStaleFailsStuckExecuting() async throws {
+        let store = tempStore()
+        let id = try await store.create(
+            tool: "agent.interrupt",
+            params: [:],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        try await store.approve(id)
+        #expect(try await store.claimExecuting(actionId: id) != nil)
+        try await store.expireStale(now: Date().addingTimeInterval(60))
+        #expect(await store.status(id) == .failed)
+        let action = await store.get(id)
+        #expect(action?.failDetail == "expired while executing")
     }
 
     @Test("markExecuted changes state")
@@ -230,6 +358,37 @@ struct JournalCleanupTests {
         #expect(ids.contains("a_recent"))
         #expect(ids.contains("a_forever"))
         #expect(!ids.contains("a_old"))
+    }
+
+    @Test("Cleanup of many keepForever lines rewrites them without dropping any")
+    func cleanupStreamsManyKeptLines() async {
+        let (journal, url) = tempJournal()
+        for i in 0..<40 {
+            await journal.record(JournalEntry(
+                timestamp: Date().addingTimeInterval(-60 * 86400),
+                actionId: "keep-\(i)",
+                tool: "bash",
+                params: ["i": "\(i)"],
+                caller: "test",
+                preState: "pending",
+                outcome: "ok",
+                keepForever: true
+            ))
+        }
+        await journal.record(JournalEntry(
+            timestamp: Date().addingTimeInterval(-60 * 86400),
+            actionId: "drop-me",
+            tool: "bash",
+            params: [:],
+            caller: "test",
+            preState: "pending",
+            outcome: "ok"
+        ))
+        await journal.cleanup(maxAgeDays: 30)
+        let entries = readEntries(from: url)
+        #expect(entries.count == 40)
+        #expect(!entries.contains(where: { $0.actionId == "drop-me" }))
+        #expect(Set(entries.map(\.actionId)).count == 40)
     }
 }
 
@@ -366,6 +525,47 @@ struct SettingsStoreTests {
         let snap = await store.settingsSnapshot()
         #expect(snap.defaultThresholdMinutes == 5)
     }
+
+    @Test("Load ignores an oversized settings file")
+    func loadRejectsOversize() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("settings.json")
+        try Data(repeating: 0x61, count: SettingsStore.maxFileBytes + 1).write(to: fileURL)
+
+        let store = SettingsStore(fileURL: fileURL)
+        try await store.load()
+        let snap = await store.settingsSnapshot()
+        #expect(snap.defaultThresholdMinutes == 5)
+        #expect(snap.agentOverrides.isEmpty)
+    }
+
+    @Test("Save does not overwrite an oversized settings file")
+    func saveDoesNotWipeOversizedFile() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("settings.json")
+        let marker = Data(repeating: 0x61, count: SettingsStore.maxFileBytes + 1)
+        try marker.write(to: fileURL)
+
+        let store = SettingsStore(fileURL: fileURL)
+        try await store.load()
+        do {
+            try await store.setOverride(paneId: "w1:p1", minutes: 20)
+            Issue.record("setOverride should throw on an oversized settings file")
+        } catch let error as SettingsStoreError {
+            guard case .fileTooLarge = error else {
+                Issue.record("Expected fileTooLarge, got \(error)")
+                return
+            }
+        }
+        let leftover = try Data(contentsOf: fileURL)
+        #expect(leftover.count == marker.count)
+    }
 }
 
 // MARK: - ActionStore claimExecuting Tests
@@ -407,6 +607,75 @@ struct ActionStoreClaimTests {
         #expect(claimed == nil)
     }
 
+    @Test("Expired pending action cannot be approved")
+    func expiredPendingCannotBeApproved() async {
+        let store = ActionStore()
+        let id = await store.create(
+            tool: "agent.interrupt",
+            params: [:],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        let approved = await store.approve(id, now: Date().addingTimeInterval(60))
+        #expect(approved == nil)
+        let status = await store.status(id)
+        #expect(status?.state == .expired)
+    }
+
+    @Test("expireStale expires approved and fails stuck executing")
+    func expireStaleApprovedAndExecuting() async {
+        let store = ActionStore()
+        let approvedId = await store.create(
+            tool: "agent.stop",
+            params: [:],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        #expect(await store.approve(approvedId) != nil)
+
+        let executingId = await store.create(
+            tool: "agent.interrupt",
+            params: [:],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        #expect(await store.approve(executingId) != nil)
+        #expect(await store.claimExecuting(actionId: executingId) != nil)
+
+        await store.expireStale(now: Date().addingTimeInterval(60))
+        #expect(await store.status(approvedId)?.state == .expired)
+        #expect(await store.status(executingId)?.state == .failed)
+        #expect(await store.get(executingId)?.failDetail == "expired while executing")
+    }
+
+    @Test("status and get expire a pending action past its deadline")
+    func statusExpiresStalePending() async {
+        let store = ActionStore()
+        let id = await store.create(
+            tool: "agent.interrupt",
+            params: [:],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        let later = Date().addingTimeInterval(60)
+        #expect(await store.status(id, now: later)?.state == .expired)
+        #expect(await store.get(id, now: later)?.state == .expired)
+        #expect(await store.claimExecuting(actionId: id, now: later) == nil)
+    }
+
+    @Test("Expired approved action cannot be claimed")
+    func expiredApprovedCannotBeClaimed() async {
+        let store = ActionStore()
+        let id = await store.create(
+            tool: "agent.stop",
+            params: [:],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        #expect(await store.approve(id) != nil)
+        let claimed = await store.claimExecuting(
+            actionId: id, now: Date().addingTimeInterval(60)
+        )
+        #expect(claimed == nil)
+        let status = await store.status(id)
+        #expect(status?.state == .expired)
+    }
+
     @Test("Denied action cannot be claimed")
     func deniedCannotBeClaimed() async {
         let store = ActionStore()
@@ -434,6 +703,35 @@ struct SharedActionStoreReapStaleTests {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let fileURL = dir.appendingPathComponent("pending-actions.json")
         return SharedActionStore(fileURL: fileURL)
+    }
+
+    @Test("Approved action past expiresAt becomes expired")
+    func approvedBecomesExpired() async throws {
+        let store = tempStore()
+        let id = try await store.create(
+            tool: "agent.stop",
+            params: [:],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        try await store.approve(id)
+        try await store.reapStale(now: Date().addingTimeInterval(3600))
+        #expect(await store.status(id) == .expired)
+    }
+
+    @Test("Stuck executing action past expiresAt becomes failed and can be pruned")
+    func stuckExecutingBecomesFailedThenPruned() async throws {
+        let store = tempStore()
+        let id = try await store.create(
+            tool: "agent.interrupt",
+            params: [:],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        try await store.approve(id)
+        #expect(try await store.claimExecuting(actionId: id) != nil)
+        try await store.reapStale(now: Date().addingTimeInterval(3600))
+        #expect(await store.status(id) == .failed)
+        try await store.reapStale(now: Date().addingTimeInterval(25 * 3600))
+        #expect(await store.get(id) == nil)
     }
 
     @Test("Pending action past expiresAt becomes expired")
@@ -545,6 +843,60 @@ struct SharedActionStorePermissionsTests {
         #expect(perm == 0o700, "Expected dir permissions 0700, got \(String(format: "%o", perm ?? 0))")
 
         try? FileManager.default.removeItem(at: testDir)
+    }
+}
+
+@Suite("PolicyEngine write gates")
+struct PolicyEngineTests {
+    @Test("Free-tier reads are never rate-limited")
+    func freeTierAlwaysAllowed() async {
+        let engine = PolicyEngine()
+        for _ in 0..<20 {
+            await engine.recordWrite(agentId: "w1:p1")
+        }
+        let result = await engine.checkWriteAllowed(agentId: "w1:p1", tier: .free)
+        #expect(result.allowed)
+    }
+
+    @Test("Per-agent cooldown blocks a second confirm-tier write")
+    func perAgentCooldown() async {
+        let engine = PolicyEngine()
+        await engine.recordWrite(agentId: "w1:p1")
+        let result = await engine.checkWriteAllowed(agentId: "w1:p1", tier: .confirm)
+        #expect(!result.allowed)
+        #expect(result.retryAfterSeconds != nil)
+        let other = await engine.checkWriteAllowed(agentId: "w1:p2", tier: .confirm)
+        #expect(other.allowed)
+    }
+
+    @Test("Three consecutive answers without a seq bump are refused")
+    func consecutiveAnswerCap() async {
+        let engine = PolicyEngine()
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordAnswer(agentId: "w1:p1")
+        let blocked = await engine.checkWriteAllowed(agentId: "w1:p1", tier: .gated)
+        #expect(!blocked.allowed)
+        #expect(blocked.reason?.contains("Consecutive") == true)
+
+        await engine.recordStatusChange(agentId: "w1:p1", newSeq: 2)
+        let afterChange = await engine.checkWriteAllowed(agentId: "w1:p1", tier: .gated)
+        #expect(afterChange.allowed)
+    }
+
+    @Test("A stale seq does not reset the consecutive-answer cap")
+    func staleSeqDoesNotResetCap() async {
+        let engine = PolicyEngine()
+        await engine.recordStatusChange(agentId: "w1:p1", newSeq: 5)
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordStatusChange(agentId: "w1:p1", newSeq: 4)
+        let stillBlocked = await engine.checkWriteAllowed(agentId: "w1:p1", tier: .gated)
+        #expect(!stillBlocked.allowed)
+        await engine.recordStatusChange(agentId: "w1:p1", newSeq: 6)
+        let reset = await engine.checkWriteAllowed(agentId: "w1:p1", tier: .gated)
+        #expect(reset.allowed)
     }
 }
 

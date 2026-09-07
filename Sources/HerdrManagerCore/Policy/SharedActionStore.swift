@@ -8,10 +8,15 @@ import Darwin
 /// read-modify-write is exactly the corruption risk the lock exists to prevent.
 public enum SharedActionStoreError: Error, CustomStringConvertible {
     case lockUnavailable(String)
+    /// The on-disk store is larger than `maxFileBytes`. Reads treat it as
+    /// empty; writes must throw rather than replace it with a one-row file.
+    case fileTooLarge
     public var description: String {
         switch self {
         case .lockUnavailable(let detail):
             return "Cross-process lock unavailable: \(detail)"
+        case .fileTooLarge:
+            return "Pending-action store exceeds \(SharedActionStore.maxFileBytes) bytes; refusing to overwrite"
         }
     }
 }
@@ -21,6 +26,10 @@ public enum SharedActionStoreError: Error, CustomStringConvertible {
 /// File-based IPC for sharing pending actions between the MCP server and the menu-bar app.
 /// Both processes read/write the same JSON file atomically with cross-process advisory locking.
 public actor SharedActionStore {
+    /// Pending-action JSON is a handful of records. A multi-megabyte stand-in
+    /// is refused rather than loaded into the menu-bar process.
+    public static let maxFileBytes = 256 * 1024
+
     private let fileURL: URL
     private let lockURL: URL
     private let encoder: JSONEncoder
@@ -55,34 +64,67 @@ public actor SharedActionStore {
 
     /// Load all actions from the file.
     public func loadActions() -> [PendingAction] {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
-        guard let data = FileManager.default.contents(atPath: fileURL.path) else { return [] }
+        guard let data = BoundedFileRead.data(from: fileURL, maxBytes: Self.maxFileBytes) else {
+            return []
+        }
         return (try? decoder.decode([PendingAction].self, from: data)) ?? []
     }
 
-    /// Get only pending actions (for UI).
-    public func pendingActions() -> [PendingAction] {
-        loadActions().filter { $0.state == .pending }
+    /// True when the on-disk file exists and is larger than the read cap.
+    private func fileIsOversized() -> Bool {
+        guard let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+              values.isRegularFile == true,
+              let size = values.fileSize else {
+            return false
+        }
+        return size > Self.maxFileBytes
     }
 
-    /// Get the current state of an action.
-    public func status(_ actionId: String) -> ActionState? {
-        loadActions().first { $0.actionId == actionId }?.state
+    /// Write paths must not treat an oversized file as empty — that would
+    /// encode a fresh array and POSIX-rename over live pending actions.
+    private func loadActionsForWrite() throws -> [PendingAction] {
+        if fileIsOversized() {
+            throw SharedActionStoreError.fileTooLarge
+        }
+        return loadActions()
     }
 
-    /// Get the full action by ID.
-    public func get(_ actionId: String) -> PendingAction? {
-        loadActions().first { $0.actionId == actionId }
+    /// Get only pending actions (for UI). Past-deadline pending records are
+    /// expired first so a confirmation banner cannot present an un-approvable
+    /// write as live.
+    public func pendingActions(now: Date = Date()) -> [PendingAction] {
+        try? expireStale(now: now)
+        return loadActions().filter { $0.state == .pending && now <= $0.expiresAt }
+    }
+
+    /// Get the current state of an action. Past-deadline pending/approved
+    /// rows are expired first so a status poll cannot present an un-approvable
+    /// write as live.
+    public func status(_ actionId: String, now: Date = Date()) -> ActionState? {
+        try? expireStale(now: now)
+        return loadActions().first { $0.actionId == actionId }?.state
+    }
+
+    /// Get the full action by ID. Applies the same deadline as `status`.
+    public func get(_ actionId: String, now: Date = Date()) -> PendingAction? {
+        try? expireStale(now: now)
+        return loadActions().first { $0.actionId == actionId }
     }
 
     // MARK: - Create
 
     /// Create a new pending action, write to file, return actionId.
-    public func create(tool: String, params: [String: String]) throws -> String {
+    public func create(
+        tool: String,
+        params: [String: String],
+        expiresAt: Date? = nil
+    ) throws -> String {
         return try withLock {
-            var actions = loadActions()
+            var actions = try loadActionsForWrite()
             let actionId = Self.generateActionId()
-            let action = PendingAction(actionId: actionId, tool: tool, params: params)
+            let action = PendingAction(
+                actionId: actionId, tool: tool, params: params, expiresAt: expiresAt
+            )
             actions.append(action)
             writeActions(actions)
             return actionId
@@ -92,9 +134,15 @@ public actor SharedActionStore {
     // MARK: - Mutate
 
     /// Approve a pending action by actionId.
-    public func approve(_ actionId: String) throws {
+    /// Expired pending actions are marked expired instead of approved so a
+    /// late click cannot arm a write.
+    public func approve(_ actionId: String, now: Date = Date()) throws {
         try mutate(actionId) { action in
             guard action.state == .pending else { return false }
+            guard now <= action.expiresAt else {
+                action.state = .expired
+                return true
+            }
             action.state = .approved
             return true
         }
@@ -126,15 +174,13 @@ public actor SharedActionStore {
         }
     }
 
-    /// Expire stale pending actions (past their expiresAt).
-    public func expireStale() throws {
+    /// Expire stale pending/approved actions and fail stuck executing claims.
+    public func expireStale(now: Date = Date()) throws {
         try withLock {
-            let now = Date()
-            var actions = loadActions()
+            var actions = try loadActionsForWrite()
             var changed = false
             for i in actions.indices {
-                if actions[i].state == .pending && now > actions[i].expiresAt {
-                    actions[i].state = .expired
+                if actions[i].applyDeadline(now: now) {
                     changed = true
                 }
             }
@@ -149,14 +195,18 @@ public actor SharedActionStore {
     /// `.executing` only if it is currently `.approved` and not past its `expiresAt`.
     /// Returns the claimed action, or nil if it was not claimable
     /// (already executing/executed/denied/expired/missing).
-    public func claimExecuting(actionId: String) throws -> PendingAction? {
+    public func claimExecuting(actionId: String, now: Date = Date()) throws -> PendingAction? {
         return try withLock {
-            var actions = loadActions()
+            var actions = try loadActionsForWrite()
             guard let idx = actions.firstIndex(where: { $0.actionId == actionId }) else {
                 return nil
             }
             guard actions[idx].state == .approved else { return nil }
-            guard Date() <= actions[idx].expiresAt else { return nil }
+            guard now <= actions[idx].expiresAt else {
+                actions[idx].state = .expired
+                writeActions(actions)
+                return nil
+            }
             actions[idx].state = .executing
             writeActions(actions)
             return actions[idx]
@@ -170,14 +220,18 @@ public actor SharedActionStore {
     ///
     /// This is intentionally separate from `claimExecuting`: confirmation-
     /// gated actions must still transition through `.approved` first.
-    public func claimAutoExecuting(actionId: String) throws -> PendingAction? {
+    public func claimAutoExecuting(actionId: String, now: Date = Date()) throws -> PendingAction? {
         return try withLock {
-            var actions = loadActions()
+            var actions = try loadActionsForWrite()
             guard let idx = actions.firstIndex(where: { $0.actionId == actionId }) else {
                 return nil
             }
             guard actions[idx].state == .pending else { return nil }
-            guard Date() <= actions[idx].expiresAt else { return nil }
+            guard now <= actions[idx].expiresAt else {
+                actions[idx].state = .expired
+                writeActions(actions)
+                return nil
+            }
             actions[idx].state = .executing
             writeActions(actions)
             return actions[idx]
@@ -189,12 +243,11 @@ public actor SharedActionStore {
     /// than 24 hours. Additive — callers may invoke this periodically.
     public func reapStale(now: Date = Date()) throws {
         try withLock {
-            var actions = loadActions()
+            var actions = try loadActionsForWrite()
             var dirty = false
 
             for i in actions.indices {
-                if actions[i].state == .pending && now > actions[i].expiresAt {
-                    actions[i].state = .expired
+                if actions[i].applyDeadline(now: now) {
                     dirty = true
                 }
             }
@@ -221,7 +274,7 @@ public actor SharedActionStore {
 
     private func mutate(_ actionId: String, _ transform: (inout PendingAction) -> Bool) throws {
         try withLock {
-            var actions = loadActions()
+            var actions = try loadActionsForWrite()
             guard let idx = actions.firstIndex(where: { $0.actionId == actionId }) else {
                 return
             }

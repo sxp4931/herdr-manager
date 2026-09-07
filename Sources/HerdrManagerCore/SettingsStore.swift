@@ -1,5 +1,20 @@
 import Foundation
 
+// MARK: - SettingsStoreError
+
+/// Thrown when a write would replace an oversized settings file with a
+/// freshly encoded default document.
+public enum SettingsStoreError: Error, CustomStringConvertible {
+    /// The on-disk file is larger than `maxFileBytes`.
+    case fileTooLarge
+    public var description: String {
+        switch self {
+        case .fileTooLarge:
+            return "Settings file exceeds \(SettingsStore.maxFileBytes) bytes; refusing to overwrite"
+        }
+    }
+}
+
 // MARK: - Settings
 
 public struct Settings: Codable, Sendable {
@@ -62,8 +77,15 @@ public struct Settings: Codable, Sendable {
 // MARK: - SettingsStore
 
 public actor SettingsStore {
+    /// Settings JSON is a compact document. A multi-megabyte stand-in is
+    /// refused rather than loaded into the menu-bar process.
+    public static let maxFileBytes = 256 * 1024
+
     private let fileURL: URL
     private var settings: Settings = Settings()
+    /// Set when load sees an oversized file so a later save cannot replace
+    /// it with a default document.
+    private var persistDisabled = false
 
     public init(fileURL: URL? = nil) {
         if let fileURL {
@@ -81,8 +103,13 @@ public actor SettingsStore {
     }
 
     public func load() throws {
+        if fileIsOversized() {
+            persistDisabled = true
+            return
+        }
+        persistDisabled = false
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
-        guard let data = FileManager.default.contents(atPath: fileURL.path) else { return }
+        guard let data = BoundedFileRead.data(from: fileURL, maxBytes: Self.maxFileBytes) else { return }
         let decoder = JSONDecoder()
         settings = try decoder.decode(Settings.self, from: data)
         let merged = TokenMeterPriceBook(entries: settings.tokenMeterPrices)
@@ -94,10 +121,23 @@ public actor SettingsStore {
     }
 
     public func save() throws {
+        if persistDisabled || fileIsOversized() {
+            persistDisabled = true
+            throw SettingsStoreError.fileTooLarge
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(settings)
         try data.write(to: fileURL, options: .atomic)
+    }
+
+    private func fileIsOversized() -> Bool {
+        guard let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+              values.isRegularFile == true,
+              let size = values.fileSize else {
+            return false
+        }
+        return size > Self.maxFileBytes
     }
 
     /// Get the effective threshold for an agent, considering overrides.

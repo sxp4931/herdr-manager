@@ -758,7 +758,7 @@ struct PanelView: View {
     // MARK: - Data
 
     private static func needsYou(_ agent: Agent) -> Bool {
-        agent.status == .blocked || agent.verdict.isSilent || agent.verdict.isProcessGone
+        AttentionTriage.needsYou(agent)
     }
 
     /// Worst-first priority for the "Needs you" ranking. Process-gone is
@@ -766,9 +766,7 @@ struct PanelView: View {
     /// — the same "this needs you NOW" urgency), then silent. `done` agents are
     /// excluded from "Needs you" entirely (a finished agent does not need you).
     private static func needsYouPriority(_ agent: Agent) -> Int {
-        if agent.status == .blocked || agent.verdict.isProcessGone { return 0 }
-        if agent.verdict.isSilent { return 1 }
-        return 3
+        AttentionTriage.priority(agent)
     }
 
     /// The filter text, trimmed and case-folded. Callers hoist this out of

@@ -113,6 +113,83 @@ struct SecretRedactorTests {
         #expect(result.redactionCount == 0)
         #expect(result.redactedText == text)
     }
+
+    @Test("Redacts xAI API keys")
+    func redactsXAIKey() {
+        let redactor = SecretRedactor()
+        let text = "export XAI_API_KEY=xai-abcdefghijklmnopqrstuvwxyz0123456789"
+        let result = redactor.redact(text)
+        #expect(result.redactionCount >= 1)
+        #expect(!result.redactedText.contains("abcdefghijklmnopqrstuvwxyz0123456789"))
+        #expect(result.redactedText.contains("xai-[REDACTED]"))
+    }
+
+    @Test("Redacts GitHub fine-grained PATs")
+    func redactsGithubPat() {
+        let redactor = SecretRedactor()
+        let text = "token=github_pat_11AAAAAAA0123456789abcdefghijklmnopqrstuv"
+        let result = redactor.redact(text)
+        #expect(result.redactionCount >= 1)
+        #expect(!result.redactedText.contains("11AAAAAAA0123456789"))
+        #expect(result.redactedText.contains("github_pat_[REDACTED]") || result.redactedText.contains("token=[REDACTED]"))
+    }
+
+    @Test("Redacts Anthropic and OpenAI project keys that the generic sk- pattern misses")
+    func redactsHyphenatedSkKeys() {
+        let redactor = SecretRedactor()
+        let ant = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCD"
+        let proj = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCD"
+        let result = redactor.redact("ant=\(ant) proj=\(proj)")
+        #expect(result.redactionCount >= 2)
+        #expect(!result.redactedText.contains("abcdefghijklmnopqrstuvwxyz0123456789ABCD"))
+        #expect(result.redactedText.contains("sk-ant-[REDACTED]"))
+        #expect(result.redactedText.contains("sk-proj-[REDACTED]"))
+    }
+
+    @Test("Redacts GitHub OAuth and App server tokens")
+    func redactsGithubOAuthAndAppTokens() {
+        let redactor = SecretRedactor()
+        let gho = "gho_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+        let ghs = "ghs_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+        let result = redactor.redact("oauth=\(gho) app=\(ghs)")
+        #expect(result.redactionCount >= 2)
+        #expect(!result.redactedText.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"))
+        #expect(result.redactedText.contains("gho_[REDACTED]"))
+        #expect(result.redactedText.contains("ghs_[REDACTED]"))
+    }
+
+    @Test("Redacts OpenAI service-account keys and GitHub user-to-server tokens")
+    func redactsServiceAccountAndGithubUserTokens() {
+        let redactor = SecretRedactor()
+        let svc = "sk-svcacct-abcdefghijklmnopqrstuvwxyz0123456789ABCD"
+        let ghu = "ghu_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+        let ghr = "ghr_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+        let result = redactor.redact("svc=\(svc) user=\(ghu) refresh=\(ghr)")
+        #expect(result.redactionCount >= 3)
+        #expect(!result.redactedText.contains("abcdefghijklmnopqrstuvwxyz0123456789ABCD"))
+        #expect(!result.redactedText.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"))
+        #expect(result.redactedText.contains("sk-svcacct-[REDACTED]"))
+        #expect(result.redactedText.contains("ghu_[REDACTED]"))
+        #expect(result.redactedText.contains("ghr_[REDACTED]"))
+    }
+
+    @Test("Redacts OpenRouter, Stripe, and Slack tokens the generic sk- pattern misses")
+    func redactsOpenRouterStripeAndSlackTokens() {
+        let redactor = SecretRedactor()
+        // Build fixtures via concatenation so the file has no contiguous secret-shaped literals
+        // (MCP/GitHub secret scanners block sk_live_ / xoxb- string literals).
+        let openRouter = "sk" + "-or-v1-" + "abcdefghijklmnopqrstuvwxyz0123456789ABCD"
+        let stripeLive = "sk" + "_live_" + "abcdefghijklmnopqrstuvwxyz0123"
+        let slack = "xox" + "b-" + "123456789012-" + "abcdefghijklmnopqrstuvwx"
+        let result = redactor.redact("or=\(openRouter) stripe=\(stripeLive) slack=\(slack)")
+        #expect(result.redactionCount >= 3)
+        #expect(!result.redactedText.contains("abcdefghijklmnopqrstuvwxyz0123456789ABCD"))
+        #expect(!result.redactedText.contains("abcdefghijklmnopqrstuvwxyz0123"))
+        #expect(!result.redactedText.contains("abcdefghijklmnopqrstuvwx"))
+        #expect(result.redactedText.contains("sk-or-[REDACTED]"))
+        #expect(result.redactedText.contains("sk" + "_live_[REDACTED]"))
+        #expect(result.redactedText.contains("xox[REDACTED]"))
+    }
 }
 
 // MARK: - DwellTracker Tests
@@ -263,5 +340,47 @@ struct DwellTrackerPersistenceTests {
 
         // Cleanup
         try? FileManager.default.removeItem(at: dir)
+    }
+
+    @Test("load ignores an oversized dwell-state file")
+    func loadRejectsOversize() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("dwell-state.json")
+        try Data(repeating: 0x61, count: DwellTracker.maxFileBytes + 1).write(to: fileURL)
+
+        let tracker = DwellTracker(fileURL: fileURL)
+        let restored = tracker.load(currentAgents: [
+            AgentID("w1:p1"): Agent(id: AgentID("w1:p1"), kind: .claude, status: .working)
+        ])
+        #expect(restored.isEmpty)
+        #expect(tracker.entry(for: AgentID("w1:p1")) == nil)
+    }
+
+    @Test("save does not overwrite an oversized dwell-state file")
+    func saveDoesNotWipeOversizedFile() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("dwell-state.json")
+        let marker = Data(repeating: 0x61, count: DwellTracker.maxFileBytes + 1)
+        try marker.write(to: fileURL)
+
+        let tracker = DwellTracker(fileURL: fileURL)
+        _ = tracker.load(currentAgents: [:])
+        tracker.update(
+            agentId: AgentID("w1:p1"),
+            status: .working,
+            enteredAt: Date(),
+            lastOutputAt: nil,
+            occupantFingerprint: "claude",
+            stateChangeSeq: 1
+        )
+        tracker.save()
+        let leftover = try Data(contentsOf: fileURL)
+        #expect(leftover.count == marker.count)
     }
 }

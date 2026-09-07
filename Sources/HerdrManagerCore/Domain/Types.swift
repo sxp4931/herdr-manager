@@ -445,6 +445,20 @@ public struct HerdrSnapshot: Sendable {
         self.focusedPaneId = focusedPaneId
     }
 
+    /// Label lookup that never traps on duplicate or empty ids from a
+    /// malformed snapshot. Empty keys are dropped; later duplicates win.
+    public static func uniqueNameMap(_ pairs: [(String, String)]) -> [String: String] {
+        Dictionary(pairs.filter { !$0.0.isEmpty }, uniquingKeysWith: { _, last in last })
+    }
+
+    public var workspaceNameMap: [String: String] {
+        Self.uniqueNameMap(workspaces.map { ($0.workspaceId, $0.name) })
+    }
+
+    public var tabNameMap: [String: String] {
+        Self.uniqueNameMap(tabs.map { ($0.tabId, $0.name) })
+    }
+
     public struct Workspace: Sendable {
         public let workspaceId: String
         public let name: String
@@ -635,6 +649,48 @@ public struct HerdSnapshot: Sendable {
         self.focusedWorkspaceId = focusedWorkspaceId
         self.focusedTabId = focusedTabId
         self.focusedPaneId = focusedPaneId
+    }
+
+    /// Agents as the CLI and other snapshot clients should display them.
+    /// Drops empty pane ids and plain shells; uses `agent.list`'s seq.
+    public func displayAgents(now: Date = Date()) -> [Agent] {
+        agents.compactMap { info in
+            guard !info.paneId.isEmpty else { return nil }
+            guard let agentKind = info.agent, !agentKind.isEmpty else { return nil }
+            let kind: AgentKind
+            if let session = info.agentSession {
+                kind = .custom(session.agent)
+            } else {
+                kind = .custom(agentKind)
+            }
+            let name = info.title ?? info.terminalTitleStripped ?? agentKind
+            let status = AgentStatus(rawValue: info.agentStatus) ?? .unknown
+            let verdict: Verdict
+            switch status {
+            case .blocked:
+                verdict = .awaitingInput(BlockClassification(
+                    kind: .unknownBlock, since: now, summary: "blocked"
+                ))
+            case .unknown:
+                verdict = .unclassifiable(reason: "unknown status")
+            default:
+                verdict = .healthy
+            }
+            return Agent(
+                id: AgentID(info.paneId),
+                kind: kind,
+                name: name,
+                displayName: name,
+                status: status,
+                stateChangeSeq: info.stateChangeSeq,
+                enteredAt: now,
+                lastOutputAt: nil,
+                verdict: verdict,
+                workspaceName: workspaceNames[info.workspaceId] ?? info.workspaceId,
+                tabName: tabNames[info.tabId] ?? info.tabId,
+                cwd: info.foregroundCwd ?? info.cwd ?? ""
+            )
+        }
     }
 }
 

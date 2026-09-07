@@ -6,6 +6,24 @@ import SQLite3
 ///
 /// The actor owns all file I/O so a large transcript cannot block Shepherd's
 /// menu-bar main actor. It never writes to, tails, or uploads the log files.
+///
+/// RAM / poll tradeoffs (intentional):
+/// - JSONL is streamed in 64 KB chunks. Lines above `JSONLLineReader.maxLineBytes`
+///   are drained and skipped so one transcript payload cannot pin RSS.
+/// - Sidecar files (`summary.json`, `meta.json`, `.cwd`) are stat-capped
+///   before read. Oversized stand-ins are ignored.
+/// - Cursor chat blobs are filtered in SQL and again in Swift at
+///   `BoundedFileRead.maxCursorBlobBytes`. Usage objects are extracted
+///   from the SQLite column pointer without copying the blob into `Data`.
+/// - Each file's events fold into window accumulators immediately. A scan
+///   never concatenates every provider's files into one array.
+/// - Cursor meta hex is capped at `BoundedFileRead.maxHexDecodedBytes`.
+///   The SQLite TEXT column is refused above `maxHexEncodedBytes` before
+///   it is copied into a Swift String.
+/// - `fileEventCache` keeps parsed events for unchanged files so a 30s
+///   menu-bar refresh does not re-read gigabyte logs. It is pruned to files
+///   seen in the current scan. The All-time usage window needs those
+///   historical events; dropping them would under-count.
 public actor LocalTokenMeter {
     private let homeDirectory: URL
     private let iso8601Formatter: ISO8601DateFormatter
@@ -34,46 +52,47 @@ public actor LocalTokenMeter {
         }
 
         seenCacheKeysThisScan.removeAll(keepingCapacity: true)
-        var events: [TokenUsageEvent] = []
-        events.append(contentsOf: scanClaude(cwdHints: cwdHints))
-        events.append(contentsOf: scanCodex())
-        events.append(contentsOf: scanKimi())
-        events.append(contentsOf: scanGrok())
-        events.append(contentsOf: scanCursor())
-        events.append(contentsOf: scanOpenCode())
-        fileEventCache = fileEventCache.filter { seenCacheKeysThisScan.contains($0.key) }
-
-        return TokenMeterAggregator.snapshot(
-            events: events,
+        // Fold each file into the window accumulators so a 30s refresh never
+        // concatenates every cached event into a second all-provider array.
+        // `fileEventCache` still retains per-file events so the All-time
+        // window and cwd re-attribution stay correct.
+        var aggregator = TokenMeterAggregator(
             agents: agents,
             priceBook: priceBook,
             now: now,
             calendar: calendar
         )
+        scanClaude(cwdHints: cwdHints, into: &aggregator)
+        scanCodex(into: &aggregator)
+        scanKimi(into: &aggregator)
+        scanGrok(into: &aggregator)
+        scanCursor(into: &aggregator)
+        scanOpenCode(into: &aggregator)
+        fileEventCache = fileEventCache.filter { seenCacheKeysThisScan.contains($0.key) }
+
+        return aggregator.snapshot()
     }
 
     // MARK: - Claude Code
 
-    private func scanClaude(cwdHints: [String: String]) -> [TokenUsageEvent] {
+    private func scanClaude(cwdHints: [String: String], into aggregator: inout TokenMeterAggregator) {
         let root = homeDirectory.appendingPathComponent(".claude/projects", isDirectory: true)
         guard let projectDirectories = try? FileManager.default.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
         ) else {
-            return []
+            return
         }
 
-        var result: [TokenUsageEvent] = []
         for project in projectDirectories where isDirectory(project) {
             let projectHint = cwdHints[project.lastPathComponent]
             for file in jsonlFiles(in: project) {
-                result.append(contentsOf: cachedEvents(for: file, extra: projectHint ?? "") {
+                aggregator.add(cachedEvents(for: file, extra: projectHint ?? "") {
                     scanClaudeTranscript(file, cwdHint: projectHint)
                 })
             }
         }
-        return result
     }
 
     private func scanClaudeTranscript(_ file: URL, cwdHint: String?) -> [TokenUsageEvent] {
@@ -82,7 +101,7 @@ public actor LocalTokenMeter {
         var currentCwd = cwdHint
         var eventsByID: [String: TokenUsageEvent] = [:]
 
-        forEachJSONLLine(in: file) { lineNumber, data in
+        JSONLLineReader.forEachLine(in: file) { lineNumber, data in
             let looksLikeUsage = dataContains(data, "\"assistant\"") && dataContains(data, "\"usage\"")
             let looksLikeCwd = dataContains(data, "\"cwd\"") && data.count <= 65_536
             guard looksLikeUsage || looksLikeCwd else { return }
@@ -147,15 +166,13 @@ public actor LocalTokenMeter {
 
     // MARK: - Codex
 
-    private func scanCodex() -> [TokenUsageEvent] {
+    private func scanCodex(into aggregator: inout TokenMeterAggregator) {
         let root = homeDirectory.appendingPathComponent(".codex/sessions", isDirectory: true)
-        var result: [TokenUsageEvent] = []
         for file in jsonlFiles(in: root) {
-            result.append(contentsOf: cachedEvents(for: file) {
+            aggregator.add(cachedEvents(for: file) {
                 scanCodexSession(file)
             })
         }
-        return result
     }
 
     private func scanCodexSession(_ file: URL) -> [TokenUsageEvent] {
@@ -168,7 +185,7 @@ public actor LocalTokenMeter {
         var accepted = false
         var sawFirstLine = false
 
-        forEachJSONLLine(in: file) { lineNumber, data in
+        JSONLLineReader.forEachLine(in: file) { lineNumber, data in
             if !sawFirstLine {
                 sawFirstLine = true
                 guard let metadata = jsonObject(from: data),
@@ -245,12 +262,12 @@ public actor LocalTokenMeter {
 
     // MARK: - Kimi Code
 
-    private func scanKimi() -> [TokenUsageEvent] {
+    private func scanKimi(into aggregator: inout TokenMeterAggregator) {
         let index = homeDirectory.appendingPathComponent(".kimi-code/session_index.jsonl")
         var sessions: [(directory: URL, workDir: String?)] = []
         var seen: Set<String> = []
 
-        forEachJSONLLine(in: index) { _, data in
+        JSONLLineReader.forEachLine(in: index) { _, data in
             guard let record = jsonObject(from: data),
                   let path = record["sessionDir"] as? String,
                   !path.isEmpty else { return }
@@ -260,7 +277,6 @@ public actor LocalTokenMeter {
             sessions.append((directory: url, workDir: normalizedPath(record["workDir"] as? String)))
         }
 
-        var result: [TokenUsageEvent] = []
         for session in sessions {
             let agentsDirectory = session.directory.appendingPathComponent("agents", isDirectory: true)
             guard let agentDirectories = try? FileManager.default.contentsOfDirectory(
@@ -270,7 +286,7 @@ public actor LocalTokenMeter {
             ) else { continue }
             for agentDirectory in agentDirectories where isDirectory(agentDirectory) {
                 let wire = agentDirectory.appendingPathComponent("wire.jsonl")
-                result.append(contentsOf: cachedEvents(for: wire, extra: session.workDir ?? "") {
+                aggregator.add(cachedEvents(for: wire, extra: session.workDir ?? "") {
                     scanKimiWire(
                         wire,
                         cwd: session.workDir,
@@ -279,13 +295,12 @@ public actor LocalTokenMeter {
                 })
             }
         }
-        return result
     }
 
     private func scanKimiWire(_ file: URL, cwd: String?, sessionID: String) -> [TokenUsageEvent] {
         var currentModel: String?
         var events: [TokenUsageEvent] = []
-        forEachJSONLLine(in: file) { lineNumber, data in
+        JSONLLineReader.forEachLine(in: file) { lineNumber, data in
             guard dataContains(data, "llm.request")
                     || dataContains(data, "usage.record") else { return }
             guard let object = jsonObject(from: data) else { return }
@@ -324,15 +339,14 @@ public actor LocalTokenMeter {
 
     // MARK: - Grok
 
-    private func scanGrok() -> [TokenUsageEvent] {
+    private func scanGrok(into aggregator: inout TokenMeterAggregator) {
         let root = homeDirectory.appendingPathComponent(".grok/sessions", isDirectory: true)
         guard let groups = try? FileManager.default.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
-        ) else { return [] }
+        ) else { return }
 
-        var result: [TokenUsageEvent] = []
         for group in groups where isDirectory(group) {
             let cwd = grokCWD(for: group)
             guard let sessions = try? FileManager.default.contentsOfDirectory(
@@ -350,17 +364,19 @@ public actor LocalTokenMeter {
                     fileFingerprint(of: session.appendingPathComponent("events.jsonl"))
                         .map { "\($0.size):\($0.modification)" } ?? "",
                 ].joined(separator: "|")
-                result.append(contentsOf: cachedEvents(for: file, extra: extra) {
+                aggregator.add(cachedEvents(for: file, extra: extra) {
                     scanGrokUpdates(file, cwd: cwd)
                 })
             }
         }
-        return result
     }
 
     private func grokCWD(for group: URL) -> String? {
         let cwdFile = group.appendingPathComponent(".cwd")
-        if let contents = try? String(contentsOf: cwdFile, encoding: .utf8), !contents.isEmpty {
+        if let contents = BoundedFileRead.text(
+            from: cwdFile,
+            maxBytes: BoundedFileRead.maxPathFileBytes
+        ), !contents.isEmpty {
             return normalizedPath(contents.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         return normalizedPath(group.lastPathComponent.removingPercentEncoding)
@@ -373,7 +389,7 @@ public actor LocalTokenMeter {
         let fallbackDate = modificationDate(of: file)
         var records: [String: (total: Int64, date: Date, model: String?)] = [:]
         var lastSeenModel: String?
-        forEachJSONLLine(in: file) { lineNumber, data in
+        JSONLLineReader.forEachLine(in: file) { lineNumber, data in
             guard dataContains(data, "totalTokens")
                     || dataContains(data, "\"model\"")
                     || dataContains(data, "modelId") else { return }
@@ -448,7 +464,10 @@ public actor LocalTokenMeter {
     private func grokSessionMeta(at session: URL) -> GrokSessionMeta {
         var meta = GrokSessionMeta()
         let summaryURL = session.appendingPathComponent("summary.json")
-        if let data = try? Data(contentsOf: summaryURL),
+        if let data = BoundedFileRead.data(
+            from: summaryURL,
+            maxBytes: BoundedFileRead.maxSidecarBytes
+        ),
            let object = try? JSONSerialization.jsonObject(with: data),
            let record = object as? [String: Any] {
             meta.model = nonEmptyString(record["current_model_id"])
@@ -518,11 +537,9 @@ public actor LocalTokenMeter {
     /// 2. `~/.cursor/chats/<project>/<session>/store.db` — Anthropic-shaped
     ///    `usage` JSON embedded in conversation blobs, plus `lastUsedModel`
     ///    and `cwd` from the session meta.
-    private func scanCursor() -> [TokenUsageEvent] {
-        var events: [TokenUsageEvent] = []
-        events.append(contentsOf: scanCursorUsageLog())
-        events.append(contentsOf: scanCursorChats())
-        return events
+    private func scanCursor(into aggregator: inout TokenMeterAggregator) {
+        aggregator.add(scanCursorUsageLog())
+        scanCursorChats(into: &aggregator)
     }
 
     private func scanCursorUsageLog() -> [TokenUsageEvent] {
@@ -534,7 +551,7 @@ public actor LocalTokenMeter {
 
     private func scanCursorUsageLogUncached(_ file: URL) -> [TokenUsageEvent] {
         var eventsByID: [String: TokenUsageEvent] = [:]
-        forEachJSONLLine(in: file) { lineNumber, data in
+        JSONLLineReader.forEachLine(in: file) { lineNumber, data in
             guard dataContains(data, "input_tokens")
                     || dataContains(data, "inputTokens")
                     || dataContains(data, "\"usage\"") else { return }
@@ -622,15 +639,14 @@ public actor LocalTokenMeter {
         return nil
     }
 
-    private func scanCursorChats() -> [TokenUsageEvent] {
+    private func scanCursorChats(into aggregator: inout TokenMeterAggregator) {
         let root = homeDirectory.appendingPathComponent(".cursor/chats", isDirectory: true)
         guard let projects = try? FileManager.default.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
-        ) else { return [] }
+        ) else { return }
 
-        var events: [TokenUsageEvent] = []
         for project in projects where isDirectory(project) {
             guard let sessions = try? FileManager.default.contentsOfDirectory(
                 at: project,
@@ -641,12 +657,11 @@ public actor LocalTokenMeter {
                 let store = session.appendingPathComponent("store.db")
                 let meta = session.appendingPathComponent("meta.json")
                 let extra = fileFingerprint(of: meta).map { "\($0.size):\($0.modification)" } ?? ""
-                events.append(contentsOf: cachedEvents(for: store, extra: extra) {
+                aggregator.add(cachedEvents(for: store, extra: extra) {
                     scanCursorSession(session)
                 })
             }
         }
-        return events
     }
 
     private func scanCursorSession(_ session: URL) -> [TokenUsageEvent] {
@@ -669,7 +684,7 @@ public actor LocalTokenMeter {
             model = stored
         }
 
-        let sql = "SELECT id, data FROM blobs WHERE length(data) <= 2000000"
+        let sql = "SELECT id, data FROM blobs WHERE length(data) <= \(BoundedFileRead.maxCursorBlobBytes)"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
             return []
@@ -677,21 +692,28 @@ public actor LocalTokenMeter {
         defer { sqlite3_finalize(stmt) }
 
         let usageMarker = Data("\"usage\"".utf8)
+        let testMarker = Data("TokenMeterTests".utf8)
+        let expectMarker = Data("#expect".utf8)
         while sqlite3_step(stmt) == SQLITE_ROW {
             autoreleasepool {
-                guard sqlite3_column_bytes(stmt, 1) <= 2_000_000,
+                let length = Int(sqlite3_column_bytes(stmt, 1))
+                guard BoundedFileRead.sqliteColumnFits(
+                    length,
+                    maxBytes: BoundedFileRead.maxCursorBlobBytes
+                ),
                       let blobID = sqliteText(stmt, index: 0),
-                      let bytes = sqliteBlob(stmt, index: 1) else { return }
+                      let raw = sqlite3_column_blob(stmt, 1) else { return }
+                let buffer = UnsafeRawBufferPointer(start: raw, count: length)
                 // File-read blobs of this repo's tests contain the same Anthropic
                 // `usage` shape as a real API response. Skip those so a Cursor
                 // session that grepped TokenMeterTests cannot mint fake cost.
-                if bytes.range(of: Data("TokenMeterTests".utf8)) != nil
-                    || bytes.range(of: Data("#expect".utf8)) != nil {
+                if firstIndex(of: testMarker, in: buffer, from: 0) != nil
+                    || firstIndex(of: expectMarker, in: buffer, from: 0) != nil {
                     return
                 }
-                guard bytes.range(of: usageMarker) != nil else { return }
-                let blobModel = cursorModelName(in: bytes) ?? model
-                for (index, usage) in cursorAPIUsageObjects(in: bytes).enumerated() {
+                guard firstIndex(of: usageMarker, in: buffer, from: 0) != nil else { return }
+                let blobModel = cursorModelName(in: buffer) ?? model
+                for (index, usage) in cursorAPIUsageObjects(in: buffer).enumerated() {
                     events.append(TokenUsageEvent(
                         id: "cursor-chat:\(sessionID):\(blobID):\(index)",
                         sessionID: sessionID,
@@ -716,7 +738,10 @@ public actor LocalTokenMeter {
     private func cursorSessionMeta(at session: URL) -> CursorSessionMeta {
         let fallback = modificationDate(of: session)
         let metaURL = session.appendingPathComponent("meta.json")
-        guard let data = try? Data(contentsOf: metaURL),
+        guard let data = BoundedFileRead.data(
+            from: metaURL,
+            maxBytes: BoundedFileRead.maxSidecarBytes
+        ),
               let object = try? JSONSerialization.jsonObject(with: data),
               let record = object as? [String: Any] else {
             return CursorSessionMeta(cwd: nil, model: nil, date: fallback)
@@ -738,8 +763,12 @@ public actor LocalTokenMeter {
         }
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_step(stmt) == SQLITE_ROW,
-              let hex = sqliteText(stmt, index: 0),
-              let decoded = dataFromHex(hex),
+              let hex = sqliteText(
+                stmt,
+                index: 0,
+                maxBytes: BoundedFileRead.maxHexEncodedBytes
+              ),
+              let decoded = BoundedFileRead.dataFromHex(hex),
               let object = try? JSONSerialization.jsonObject(with: decoded),
               let record = object as? [String: Any],
               let model = record["lastUsedModel"] as? String,
@@ -751,21 +780,29 @@ public actor LocalTokenMeter {
 
     /// Anthropic-shaped usage objects that sit next to `stop_reason` or
     /// `service_tier` — the API response, not a quoted fixture.
-    private func cursorAPIUsageObjects(in data: Data) -> [TokenUsage] {
-        guard let text = String(data: data, encoding: .utf8)
-            ?? String(data: data, encoding: .isoLatin1) else { return [] }
+    ///
+    /// Scans the SQLite column as a raw byte buffer and only copies the
+    /// small object that follows `"usage"`. Copying a 2 MB chat blob into
+    /// `Data` on every cache miss was a menu-bar RSS spike.
+    private func cursorAPIUsageObjects(in buffer: UnsafeRawBufferPointer) -> [TokenUsage] {
+        let usageMarker = Data("\"usage\"".utf8)
+        let stopReason = Data("stop_reason".utf8)
+        let serviceTier = Data("service_tier".utf8)
         var result: [TokenUsage] = []
-        var searchStart = text.startIndex
-        while let usageRange = text.range(of: "\"usage\"", range: searchStart..<text.endIndex) {
-            let windowStart = text.index(usageRange.lowerBound, offsetBy: -80, limitedBy: text.startIndex)
-                ?? text.startIndex
-            let window = text[windowStart..<usageRange.lowerBound]
-            let isAPIResponse = window.contains("stop_reason") || window.contains("service_tier")
-            searchStart = usageRange.upperBound
+        var searchStart = 0
+        while let usageIndex = firstIndex(of: usageMarker, in: buffer, from: searchStart) {
+            let windowStart = max(0, usageIndex - 80)
+            let isAPIResponse = firstIndex(
+                of: stopReason, in: buffer, from: windowStart, to: usageIndex
+            ) != nil
+                || firstIndex(
+                    of: serviceTier, in: buffer, from: windowStart, to: usageIndex
+                ) != nil
+            searchStart = usageIndex + usageMarker.count
             guard isAPIResponse,
-                  let brace = text[usageRange.upperBound...].firstIndex(of: "{"),
-                  let json = extractJSONObject(from: text, startingAt: brace),
-                  let object = try? JSONSerialization.jsonObject(with: Data(json.utf8)),
+                  let brace = firstIndex(of: 0x7B, in: buffer, from: searchStart),
+                  let json = extractJSONObjectData(from: buffer, startingAt: brace),
+                  let object = try? JSONSerialization.jsonObject(with: json),
                   let usage = object as? [String: Any] else { continue }
 
             let input = integer(usage["input_tokens"])
@@ -790,68 +827,103 @@ public actor LocalTokenMeter {
         return result
     }
 
-    private func cursorModelName(in data: Data) -> String? {
-        guard let text = String(data: data, encoding: .utf8)
-            ?? String(data: data, encoding: .isoLatin1) else { return nil }
-        for marker in ["\"modelName\":\"", "\"lastUsedModel\":\""] {
-            guard let start = text.range(of: marker) else { continue }
-            let rest = text[start.upperBound...]
-            guard let end = rest.firstIndex(of: "\"") else { continue }
-            let model = String(rest[rest.startIndex..<end])
-            if !model.isEmpty { return model }
+    private func cursorModelName(in buffer: UnsafeRawBufferPointer) -> String? {
+        let markers = [
+            Data("\"modelName\":\"".utf8),
+            Data("\"lastUsedModel\":\"".utf8),
+        ]
+        for marker in markers {
+            guard let start = firstIndex(of: marker, in: buffer, from: 0) else { continue }
+            let restStart = start + marker.count
+            guard let end = firstIndex(of: 0x22, in: buffer, from: restStart) else { continue }
+            let count = end - restStart
+            guard count > 0, count <= 200,
+                  let base = buffer.baseAddress else { continue }
+            let modelData = Data(bytes: base.advanced(by: restStart), count: count)
+            guard let model = String(data: modelData, encoding: .utf8),
+                  !model.isEmpty else { continue }
+            return model
         }
         return nil
     }
 
-    private func extractJSONObject(from text: String, startingAt start: String.Index) -> String? {
+    /// Brace-matched JSON object starting at `{`, capped so a huge blob cannot
+    /// pin a 2 MB decode of surrounding chat text.
+    private func extractJSONObjectData(
+        from buffer: UnsafeRawBufferPointer,
+        startingAt start: Int
+    ) -> Data? {
         var depth = 0
         var index = start
         var inString = false
         var escaped = false
-        while index < text.endIndex {
-            let character = text[index]
+        while index < buffer.count {
+            if index - start > 8_000 { return nil }
+            let byte = buffer[index]
             if inString {
                 if escaped {
                     escaped = false
-                } else if character == "\\" {
+                } else if byte == 0x5C {
                     escaped = true
-                } else if character == "\"" {
+                } else if byte == 0x22 {
                     inString = false
                 }
-            } else if character == "\"" {
+            } else if byte == 0x22 {
                 inString = true
-            } else if character == "{" {
+            } else if byte == 0x7B {
                 depth += 1
-            } else if character == "}" {
+            } else if byte == 0x7D {
                 depth -= 1
                 if depth == 0 {
-                    return String(text[start...index])
+                    guard let base = buffer.baseAddress else { return nil }
+                    return Data(bytes: base.advanced(by: start), count: index - start + 1)
                 }
             }
-            index = text.index(after: index)
-            if text.distance(from: start, to: index) > 8_000 { return nil }
+            index += 1
         }
         return nil
     }
 
-    private func sqliteBlob(_ stmt: OpaquePointer, index: Int32) -> Data? {
-        guard let bytes = sqlite3_column_blob(stmt, index) else { return nil }
-        let length = Int(sqlite3_column_bytes(stmt, index))
-        return Data(bytes: bytes, count: length)
+    private func firstIndex(
+        of needle: Data,
+        in buffer: UnsafeRawBufferPointer,
+        from start: Int,
+        to endExclusive: Int? = nil
+    ) -> Int? {
+        guard !needle.isEmpty else { return nil }
+        let needleCount = needle.count
+        let bound = min(endExclusive ?? buffer.count, buffer.count)
+        let lastStart = bound - needleCount
+        guard start >= 0, start <= lastStart else { return nil }
+        return needle.withUnsafeBytes { needleRaw in
+            let needleBytes = needleRaw.bindMemory(to: UInt8.self)
+            var i = start
+            while i <= lastStart {
+                var matched = true
+                for j in 0..<needleCount {
+                    if buffer[i + j] != needleBytes[j] {
+                        matched = false
+                        break
+                    }
+                }
+                if matched { return i }
+                i += 1
+            }
+            return nil
+        }
     }
 
-    private func dataFromHex(_ hex: String) -> Data? {
-        let cleaned = hex.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard cleaned.count.isMultiple(of: 2), !cleaned.isEmpty else { return nil }
-        var data = Data(capacity: cleaned.count / 2)
-        var index = cleaned.startIndex
-        while index < cleaned.endIndex {
-            let next = cleaned.index(index, offsetBy: 2)
-            guard let byte = UInt8(cleaned[index..<next], radix: 16) else { return nil }
-            data.append(byte)
-            index = next
+    private func firstIndex(
+        of byte: UInt8,
+        in buffer: UnsafeRawBufferPointer,
+        from start: Int
+    ) -> Int? {
+        var i = start
+        while i < buffer.count {
+            if buffer[i] == byte { return i }
+            i += 1
         }
-        return data
+        return nil
     }
 
     // MARK: - Helpers
@@ -873,12 +945,12 @@ public actor LocalTokenMeter {
 
     // MARK: - OpenCode SQLite log
 
-    private func scanOpenCode() -> [TokenUsageEvent] {
+    private func scanOpenCode(into aggregator: inout TokenMeterAggregator) {
         let dbURL = homeDirectory
             .appendingPathComponent(".local/share/opencode/opencode.db", isDirectory: false)
-        return cachedEvents(for: dbURL) {
+        aggregator.add(cachedEvents(for: dbURL) {
             scanOpenCodeUncached(dbURL)
-        }
+        })
     }
 
     private func scanOpenCodeUncached(_ dbURL: URL) -> [TokenUsageEvent] {
@@ -947,7 +1019,15 @@ public actor LocalTokenMeter {
         sqlite3_column_int64(stmt, index)
     }
 
-    private func sqliteText(_ stmt: OpaquePointer, index: Int32) -> String? {
+    private func sqliteText(
+        _ stmt: OpaquePointer,
+        index: Int32,
+        maxBytes: Int = 64 * 1024
+    ) -> String? {
+        let length = Int(sqlite3_column_bytes(stmt, index))
+        guard BoundedFileRead.sqliteColumnFits(length, maxBytes: maxBytes) else {
+            return nil
+        }
         guard let cString = sqlite3_column_text(stmt, index) else { return nil }
         return String(cString: cString)
     }
@@ -1105,43 +1185,6 @@ public actor LocalTokenMeter {
         }
     }
 
-    /// Streams JSONL without loading the whole file into a String.
-    private func forEachJSONLLine(in url: URL, body: (Int, Data) -> Void) {
-        guard let stream = InputStream(url: url) else { return }
-        stream.open()
-        defer { stream.close() }
-
-        let chunkSize = 64 * 1024
-        var chunk = [UInt8](repeating: 0, count: chunkSize)
-        var pending = Data()
-        pending.reserveCapacity(chunkSize)
-        var lineNumber = 0
-
-        func emit(_ raw: Data) {
-            var line = raw
-            if line.last == 0x0D {
-                line.removeLast()
-            }
-            if !line.isEmpty {
-                body(lineNumber, line)
-            }
-            lineNumber += 1
-        }
-
-        while true {
-            let n = stream.read(&chunk, maxLength: chunkSize)
-            if n < 0 { return }
-            if n == 0 { break }
-            pending.append(contentsOf: chunk[0..<n])
-            while let newline = pending.firstIndex(of: 0x0A) {
-                emit(pending.subdata(in: pending.startIndex..<newline))
-                pending.removeSubrange(pending.startIndex...newline)
-            }
-        }
-        if !pending.isEmpty {
-            emit(pending)
-        }
-    }
 }
 
 private struct FileFingerprint: Equatable {
@@ -1195,47 +1238,61 @@ private struct TokenMeterAccumulator {
     }
 }
 
-private enum TokenMeterAggregator {
-    static func snapshot(
-        events: [TokenUsageEvent],
-        agents: [Agent],
-        priceBook: TokenMeterPriceBook,
-        now: Date,
-        calendar: Calendar
-    ) -> TokenMeterSnapshot {
-        let windows = UsageWindow.allCases
-        var overall = makeAccumulatorMap(windows: windows)
-        var providerAccumulators: [TokenMeterProvider: [UsageWindow: TokenMeterAccumulator]] = [:]
-        var agentAccumulators: [AgentID: [UsageWindow: TokenMeterAccumulator]] = [:]
-        var modelAccumulators: [String: [UsageWindow: TokenMeterAccumulator]] = [:]
-        var ambiguous = 0
+private struct TokenMeterAggregator {
+    let agents: [Agent]
+    let priceBook: TokenMeterPriceBook
+    let now: Date
+    let calendar: Calendar
+    let windows: [UsageWindow]
+    var overall: [UsageWindow: TokenMeterAccumulator]
+    var providerAccumulators: [TokenMeterProvider: [UsageWindow: TokenMeterAccumulator]] = [:]
+    var agentAccumulators: [AgentID: [UsageWindow: TokenMeterAccumulator]] = [:]
+    var modelAccumulators: [String: [UsageWindow: TokenMeterAccumulator]] = [:]
+    var ambiguous = 0
 
-        for event in events where event.date <= now {
-            let attribution = matchingAgent(for: event, agents: agents)
-            if attribution.ambiguous { ambiguous += 1 }
+    init(agents: [Agent], priceBook: TokenMeterPriceBook, now: Date, calendar: Calendar) {
+        self.agents = agents
+        self.priceBook = priceBook
+        self.now = now
+        self.calendar = calendar
+        self.windows = UsageWindow.allCases
+        self.overall = Self.makeAccumulatorMap(windows: UsageWindow.allCases)
+    }
 
-            for window in windows where event.date >= window.startDate(now: now, calendar: calendar) {
-                overall[window, default: TokenMeterAccumulator()].add(event, priceBook: priceBook)
+    mutating func add(_ events: [TokenUsageEvent]) {
+        for event in events {
+            add(event)
+        }
+    }
 
-                var providerMap = providerAccumulators[event.provider] ?? makeAccumulatorMap(windows: windows)
-                providerMap[window, default: TokenMeterAccumulator()].add(event, priceBook: priceBook)
-                providerAccumulators[event.provider] = providerMap
+    mutating func add(_ event: TokenUsageEvent) {
+        guard event.date <= now else { return }
+        let attribution = Self.matchingAgent(for: event, agents: agents)
+        if attribution.ambiguous { ambiguous += 1 }
 
-                if let model = event.model, !model.isEmpty {
-                    var modelMap = modelAccumulators[model] ?? makeAccumulatorMap(windows: windows)
-                    modelMap[window, default: TokenMeterAccumulator()].add(event, priceBook: priceBook)
-                    modelAccumulators[model] = modelMap
-                }
+        for window in windows where event.date >= window.startDate(now: now, calendar: calendar) {
+            overall[window, default: TokenMeterAccumulator()].add(event, priceBook: priceBook)
 
-                if let agentID = attribution.agentID {
-                    var agentMap = agentAccumulators[agentID] ?? makeAccumulatorMap(windows: windows)
-                    agentMap[window, default: TokenMeterAccumulator()].add(event, priceBook: priceBook)
-                    agentAccumulators[agentID] = agentMap
-                }
+            var providerMap = providerAccumulators[event.provider] ?? Self.makeAccumulatorMap(windows: windows)
+            providerMap[window, default: TokenMeterAccumulator()].add(event, priceBook: priceBook)
+            providerAccumulators[event.provider] = providerMap
+
+            if let model = event.model, !model.isEmpty {
+                var modelMap = modelAccumulators[model] ?? Self.makeAccumulatorMap(windows: windows)
+                modelMap[window, default: TokenMeterAccumulator()].add(event, priceBook: priceBook)
+                modelAccumulators[model] = modelMap
+            }
+
+            if let agentID = attribution.agentID {
+                var agentMap = agentAccumulators[agentID] ?? Self.makeAccumulatorMap(windows: windows)
+                agentMap[window, default: TokenMeterAccumulator()].add(event, priceBook: priceBook)
+                agentAccumulators[agentID] = agentMap
             }
         }
+    }
 
-        return TokenMeterSnapshot(
+    func snapshot() -> TokenMeterSnapshot {
+        TokenMeterSnapshot(
             generatedAt: now,
             overall: overall.mapValues { $0.summary() },
             providers: providerAccumulators.mapValues { $0.mapValues { $0.summary() } },

@@ -37,6 +37,65 @@ public enum NDJSONClientError: Error, Sendable, CustomStringConvertible {
     }
 }
 
+/// Bounded NDJSON framing. A missing newline or a multi-megabyte pane.read
+/// used to grow `readBuffer` without limit and pin the menu-bar process.
+enum NDJSONFraming {
+    static let maxLineBytes = 4 * 1024 * 1024
+
+    enum Outcome: Equatable {
+        case line(Data)
+        case needMore
+        /// A complete line was present and discarded because it exceeded the cap.
+        case skippedOversized
+        /// The buffer exceeded the cap with no newline yet; caller must keep
+        /// reading and discarding until a newline (or EOF).
+        case stillSkipping
+    }
+
+    /// Pull one framed outcome out of `buffer`. `skipping` is true while an
+    /// oversized line is being drained.
+    static func consume(
+        buffer: inout Data,
+        skipping: inout Bool,
+        maxBytes: Int = maxLineBytes
+    ) -> Outcome {
+        if skipping {
+            if let newline = buffer.firstIndex(of: 0x0A) {
+                if newline + 1 < buffer.endIndex {
+                    buffer = Data(buffer[(newline + 1)...])
+                } else {
+                    buffer.removeAll(keepingCapacity: true)
+                }
+                skipping = false
+                return .skippedOversized
+            }
+            buffer.removeAll(keepingCapacity: true)
+            return .stillSkipping
+        }
+
+        if let newlineIdx = buffer.firstIndex(of: 0x0A) {
+            let count = newlineIdx - buffer.startIndex + 1
+            let line = Data(buffer[buffer.startIndex...newlineIdx])
+            if newlineIdx + 1 < buffer.endIndex {
+                buffer = Data(buffer[(newlineIdx + 1)...])
+            } else {
+                buffer.removeAll(keepingCapacity: true)
+            }
+            if count > maxBytes {
+                return .skippedOversized
+            }
+            return .line(line)
+        }
+
+        if buffer.count > maxBytes {
+            skipping = true
+            buffer.removeAll(keepingCapacity: true)
+            return .stillSkipping
+        }
+        return .needMore
+    }
+}
+
 // MARK: - NDJSONClient
 
 public final class NDJSONClient: @unchecked Sendable {
@@ -57,6 +116,7 @@ public final class NDJSONClient: @unchecked Sendable {
     private let txLock = NSLock()
     nonisolated(unsafe) private var requestId: UInt64 = 0
     nonisolated(unsafe) private var readBuffer = Data()
+    nonisolated(unsafe) private var skippingOversize = false
     nonisolated(unsafe) private var isConnected = false
 
     public init(socketPath: String, ioTimeoutSeconds: Int = 30) {
@@ -115,6 +175,7 @@ public final class NDJSONClient: @unchecked Sendable {
         fd = s
         isConnected = true
         readBuffer = Data()
+        skippingOversize = false
 
         // Socket-level I/O timeout so a stalled herdr cannot block forever.
         // A timed-out read/write returns EAGAIN/EWOULDBLOCK, mapped to
@@ -134,6 +195,8 @@ public final class NDJSONClient: @unchecked Sendable {
             fd = -1
         }
         isConnected = false
+        skippingOversize = false
+        readBuffer = Data()
     }
 
     public var connected: Bool {
@@ -227,11 +290,11 @@ public final class NDJSONClient: @unchecked Sendable {
 
         // Read lines until we get a response with matching id
         while true {
-            let responseLine = try readLine()
+            let responseLine = try readLine(skipOversized: false)
             guard let responseDict = try JSONSerialization.jsonObject(with: responseLine) as? [String: Any] else {
                 continue
             }
-            if let responseId = responseDict["id"] as? String, responseId == id {
+            if JSONNumber.matchesStringId(responseDict["id"], expected: id) {
                 if let error = responseDict["error"] as? [String: Any],
                    let message = error["message"] as? String {
                     throw NDJSONClientError.invalidResponse(message)
@@ -272,7 +335,7 @@ public final class NDJSONClient: @unchecked Sendable {
             let thread = Thread {
                 do {
                     while true {
-                        let line = try self.readLine()
+                        let line = try self.readLine(skipOversized: true)
                         // Yield raw Data (Sendable) — consumer parses JSON
                         continuation.yield(line)
                     }
@@ -316,22 +379,32 @@ public final class NDJSONClient: @unchecked Sendable {
         }
     }
 
-    private func readLine() throws -> Data {
+    /// Read one NDJSON line.
+    ///
+    /// `skipOversized` is true for the subscription stream: a huge or
+    /// newline-less event is drained and dropped so it cannot look like a
+    /// disconnect. Request/response traffic (`false`) still drains the
+    /// oversized line so the next frame is aligned, then fails the call.
+    private func readLine(skipOversized: Bool) throws -> Data {
         while true {
-            // Check if we already have a complete line in the buffer
             lock.lock()
-            if let newlineIdx = readBuffer.firstIndex(of: 0x0A) {
-                let line = readBuffer[readBuffer.startIndex...newlineIdx]
-                // Safe slicing: if newlineIdx is the last index, (newlineIdx + 1) == endIndex
-                // and readBuffer[endIndex...] is a valid empty slice
-                let remaining = (newlineIdx + 1 < readBuffer.endIndex) 
-                    ? Data(readBuffer[(newlineIdx + 1)...]) 
-                    : Data()
-                readBuffer = remaining
-                lock.unlock()
-                return Data(line)
-            }
+            let outcome = NDJSONFraming.consume(
+                buffer: &readBuffer,
+                skipping: &skippingOversize
+            )
             lock.unlock()
+
+            switch outcome {
+            case .line(let data):
+                return data
+            case .skippedOversized:
+                if skipOversized { continue }
+                throw NDJSONClientError.invalidResponse(
+                    "NDJSON line exceeded \(NDJSONFraming.maxLineBytes) bytes"
+                )
+            case .stillSkipping, .needMore:
+                break
+            }
 
             lock.lock()
             guard fd >= 0 else {
@@ -355,7 +428,7 @@ public final class NDJSONClient: @unchecked Sendable {
                 }
                 throw NDJSONClientError.readFailed(errno)
             }
-            
+
             lock.lock()
             readBuffer.append(contentsOf: buf[0..<n])
             lock.unlock()

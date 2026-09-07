@@ -179,7 +179,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             var matchedRulePriority: Int?
             if let rule = explain["matched_rule"] as? [String: Any] {
                 matchedRuleId = rule["id"] as? String
-                matchedRulePriority = rule["priority"] as? Int
+                matchedRulePriority = JSONNumber.int(rule["priority"])
             }
 
             return AgentExplainResult(
@@ -206,14 +206,12 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// silently disabled the process-gone diagnosis.
     internal static func parseProcessInfo(_ dict: [String: Any]) -> ProcessInfoResult {
         let payload = (dict["process_info"] as? [String: Any]) ?? dict
-        // Via `Int`: an NSNumber off the wire bridges to either, but a native
-        // Swift `Int` (as in a hand-written fixture) only casts to `Int`.
-        let shellPid = (payload["shell_pid"] as? Int).map(Int32.init(truncatingIfNeeded:))
+        let shellPid = JSONNumber.int(payload["shell_pid"]).map(Int32.init(truncatingIfNeeded:))
         var procs: [ForegroundProcess] = []
         if let fgList = payload["foreground_processes"] as? [[String: Any]] {
             for p in fgList {
                 procs.append(ForegroundProcess(
-                    pid: (p["pid"] as? Int).map(Int32.init(truncatingIfNeeded:)) ?? 0,
+                    pid: JSONNumber.int(p["pid"]).map(Int32.init(truncatingIfNeeded:)) ?? 0,
                     name: p["name"] as? String ?? "",
                     argv0: p["argv0"] as? String,
                     cmdline: p["cmdline"] as? String,
@@ -338,7 +336,11 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         let deadline = Date().addingTimeInterval(Double(max(timeoutMs, 0)) / 1000.0)
         while true {
             do {
-                let result = try await read(paneId: paneId, source: .detection)
+                let result = try await read(
+                    paneId: paneId,
+                    source: .detection,
+                    lines: HeartbeatPoller.detectionReadLines
+                )
                 if !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     return true
                 }
@@ -406,8 +408,8 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             let snapResult = try reqClient.sendRead(method: "session.snapshot", params: [:])
             let snap = try LiveHerdrAdapter.parseSnapshot(snapResult)
 
-            let workspaceNames = Dictionary(uniqueKeysWithValues: snap.workspaces.map { ($0.workspaceId, $0.name) })
-            let tabNames = Dictionary(uniqueKeysWithValues: snap.tabs.map { ($0.tabId, $0.name) })
+            let workspaceNames = snap.workspaceNameMap
+            let tabNames = snap.tabNameMap
 
             return HerdSnapshot(
                 version: snap.version,
@@ -559,8 +561,10 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                 backoff = 1_000_000_000
 
                 for try await lineData in stream {
-                    if let dict = try JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
-                        let event = Self.parseEvent(dict)
+                    // A single malformed line must not tear down the
+                    // subscription: that used to throw out of JSONSerialization
+                    // and look like a disconnect.
+                    if let event = Self.event(fromSubscriptionLine: lineData) {
                         eventContinuation?.yield(event)
                     }
                 }
@@ -596,14 +600,16 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         }
 
         let version = snap["version"] as? String ?? ""
-        let proto = snap["protocol"] as? Int ?? 0
+        let proto = JSONNumber.int(snap["protocol"]) ?? 0
 
         var workspaces: [HerdrSnapshot.Workspace] = []
         if let wsList = snap["workspaces"] as? [[String: Any]] {
             for ws in wsList {
+                let workspaceId = ws["workspace_id"] as? String ?? ""
+                guard !workspaceId.isEmpty else { continue }
                 workspaces.append(HerdrSnapshot.Workspace(
-                    workspaceId: ws["workspace_id"] as? String ?? "",
-                    name: ws["label"] as? String ?? ws["workspace_id"] as? String ?? ""
+                    workspaceId: workspaceId,
+                    name: ws["label"] as? String ?? workspaceId
                 ))
             }
         }
@@ -611,10 +617,12 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         var tabs: [HerdrSnapshot.Tab] = []
         if let tabList = snap["tabs"] as? [[String: Any]] {
             for t in tabList {
+                let tabId = t["tab_id"] as? String ?? ""
+                guard !tabId.isEmpty else { continue }
                 tabs.append(HerdrSnapshot.Tab(
-                    tabId: t["tab_id"] as? String ?? "",
+                    tabId: tabId,
                     workspaceId: t["workspace_id"] as? String ?? "",
-                    name: t["label"] as? String ?? t["tab_id"] as? String ?? ""
+                    name: t["label"] as? String ?? tabId
                 ))
             }
         }
@@ -622,6 +630,8 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         var panes: [HerdrSnapshot.PaneInfo] = []
         if let paneList = snap["panes"] as? [[String: Any]] {
             for p in paneList {
+                let paneId = p["pane_id"] as? String ?? ""
+                guard !paneId.isEmpty else { continue }
                 var agentSession: HerdrSnapshot.AgentSession?
                 if let asDict = p["agent_session"] as? [String: Any] {
                     agentSession = HerdrSnapshot.AgentSession(
@@ -632,17 +642,17 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                     )
                 }
                 panes.append(HerdrSnapshot.PaneInfo(
-                    paneId: p["pane_id"] as? String ?? "",
+                    paneId: paneId,
                     workspaceId: p["workspace_id"] as? String ?? "",
                     tabId: p["tab_id"] as? String ?? "",
                     agent: p["agent"] as? String,
                     agentStatus: p["agent_status"] as? String ?? "unknown",
                     agentSession: agentSession,
                     terminalTitleStripped: p["terminal_title_stripped"] as? String,
-                    stateChangeSeq: p["state_change_seq"] as? UInt64,
+                    stateChangeSeq: JSONNumber.uint64(p["state_change_seq"]),
                     cwd: p["cwd"] as? String,
                     foregroundCwd: p["foreground_cwd"] as? String,
-                    revision: p["revision"] as? UInt64
+                    revision: JSONNumber.uint64(p["revision"])
                 ))
             }
         }
@@ -663,65 +673,53 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         // Real herdr subscription envelope, protocol 17:
         //   {"event":"pane_updated","data":{"type":"pane_updated","pane":{...}}}
         // Event names are UNDERSCORED on the wire (pane_updated, pane_closed,
-        // pane_focused, workspace_focused, ...). We also accept the dotted
-        // forms harmlessly, so older test fixtures and any future herdr
-        // rename back to dotted names keep working.
-        guard let eventKind = dict["event"] as? String,
-              let data = dict["data"] as? [String: Any] else {
+        // pane_focused, workspace_focused, ...). Subscription *types* are
+        // dotted (`pane.updated`). Accept both spellings so a herdr that
+        // echoes the subscribe type as `event` still drives live updates.
+        // Some envelopes use `type` instead of `event` for the same kind.
+        guard let eventKind = (dict["event"] as? String) ?? (dict["type"] as? String) else {
             return .ignored
         }
-        let paneId = data["pane_id"] as? String ?? ""
+        // Nested `data` is the protocol-17 envelope. A flat record that
+        // already carries `pane_id` at the top level is accepted so a
+        // herdr that omits the wrapper still drives live updates.
+        let data = (dict["data"] as? [String: Any]) ?? dict
+        let kind = eventKind.replacingOccurrences(of: ".", with: "_")
+        let pane = (data["pane"] as? [String: Any]) ?? data
+        let paneId = pane["pane_id"] as? String ?? data["pane_id"] as? String ?? ""
 
-        switch eventKind {
-        // MARK: Legacy/dotted forms (kept for back-compat; not the real wire format)
-        case "pane.agent_status_changed":
-            let status = data["agent_status"] as? String ?? "unknown"
-            let seq = data["state_change_seq"] as? UInt64
-            return .agentStatusChanged(paneId: paneId, agentStatus: status, stateChangeSeq: seq)
-        case "pane.created":
-            let wsId = data["workspace_id"] as? String ?? ""
-            let tabId = data["tab_id"] as? String ?? ""
-            return .paneCreated(paneId: paneId, workspaceId: wsId, tabId: tabId)
-        case "pane.closed":
-            return .paneClosed(paneId: paneId)
-        case "pane.moved":
-            let wsId = data["workspace_id"] as? String
-            let tabId = data["tab_id"] as? String
-            return .paneMoved(paneId: paneId, workspaceId: wsId, tabId: tabId)
-
-        // MARK: Real herdr wire format (underscored)
+        switch kind {
         case "pane_agent_status_changed":
-            let status = data["agent_status"] as? String ?? "unknown"
-            let seq = data["state_change_seq"] as? UInt64
+            guard !paneId.isEmpty else { return .ignored }
+            let status = pane["agent_status"] as? String
+                ?? data["agent_status"] as? String
+                ?? "unknown"
+            let seq = JSONNumber.uint64(pane["state_change_seq"])
+                ?? JSONNumber.uint64(data["state_change_seq"])
             return .agentStatusChanged(paneId: paneId, agentStatus: status, stateChangeSeq: seq)
         case "pane_updated":
-            // {"type":"pane_updated","pane":{ ...full pane... }}
-            guard let pane = data["pane"] as? [String: Any] else { return .ignored }
+            guard !paneId.isEmpty else { return .ignored }
             return .paneUpdated(parseAgentInfo(pane))
         case "pane_created":
-            // {"type":"pane_created","pane":{ ...full pane... }}
-            guard let pane = data["pane"] as? [String: Any] else { return .ignored }
-            let pId = pane["pane_id"] as? String ?? ""
-            let wsId = pane["workspace_id"] as? String ?? ""
-            let tabId = pane["tab_id"] as? String ?? ""
-            return .paneCreated(paneId: pId, workspaceId: wsId, tabId: tabId)
+            guard !paneId.isEmpty else { return .ignored }
+            let wsId = pane["workspace_id"] as? String ?? data["workspace_id"] as? String ?? ""
+            let tabId = pane["tab_id"] as? String ?? data["tab_id"] as? String ?? ""
+            return .paneCreated(paneId: paneId, workspaceId: wsId, tabId: tabId)
         case "pane_closed":
-            // {"type":"pane_closed","pane_id":...,"workspace_id":...} — the
-            // .paneClosed case only carries paneId; workspace_id isn't needed
-            // to remove the agent from the store.
+            guard !paneId.isEmpty else { return .ignored }
             return .paneClosed(paneId: paneId)
         case "pane_focused":
-            let wsId = data["workspace_id"] as? String
+            guard !paneId.isEmpty else { return .ignored }
+            let wsId = pane["workspace_id"] as? String ?? data["workspace_id"] as? String
             return .paneFocused(paneId: paneId, workspaceId: wsId)
         case "pane_exited":
+            guard !paneId.isEmpty else { return .ignored }
             return .paneExited(paneId: paneId)
         case "pane_moved":
-            // {"type":"pane_moved","pane":{...}, "previous_pane_id":..., ...}
-            guard let pane = data["pane"] as? [String: Any] else { return .ignored }
-            let pId = pane["pane_id"] as? String ?? ""
-            let wsId = pane["workspace_id"] as? String
-            let tabId = pane["tab_id"] as? String
-            return .paneMoved(paneId: pId, workspaceId: wsId, tabId: tabId)
+            guard !paneId.isEmpty else { return .ignored }
+            let wsId = pane["workspace_id"] as? String ?? data["workspace_id"] as? String
+            let tabId = pane["tab_id"] as? String ?? data["tab_id"] as? String
+            return .paneMoved(paneId: paneId, workspaceId: wsId, tabId: tabId)
         case "workspace_created", "workspace_updated", "workspace_metadata_updated",
              "workspace_closed", "workspace_renamed", "workspace_moved", "workspace_focused",
              "worktree_created", "worktree_opened", "worktree_removed",
@@ -762,10 +760,10 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             agentStatus: dict["agent_status"] as? String ?? "unknown",
             agentSession: agentSession,
             focused: dict["focused"] as? Bool ?? false,
-            stateChangeSeq: dict["state_change_seq"] as? UInt64 ?? 0,
+            stateChangeSeq: JSONNumber.uint64(dict["state_change_seq"]) ?? 0,
             cwd: dict["cwd"] as? String,
             foregroundCwd: dict["foreground_cwd"] as? String,
-            revision: dict["revision"] as? UInt64,
+            revision: JSONNumber.uint64(dict["revision"]),
             tokens: dict["tokens"] as? [String: String] ?? [:],
             stateLabels: dict["state_labels"] as? [String: String] ?? [:],
             interactiveReady: dict["interactive_ready"] as? Bool ?? false,
@@ -779,6 +777,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         let list = dict["agents"] as? [[String: Any]] ?? []
         return list.compactMap { entry -> HerdrAgentInfo? in
             let info = parseAgentInfo(entry)
+            guard !info.paneId.isEmpty else { return nil }
             guard let agent = info.agent, !agent.isEmpty else { return nil }
             return info
         }
@@ -797,18 +796,30 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         minSupportedProtocolVersion...Int.max
 
     public func health() -> AdapterHealth {
-        let proto = latestProtocol()
-        // Protocol 17 is the version this adapter was built and verified
-        // against. Anything newer is presumed additive/compatible (herdr's
-        // protocol has been append-only in practice) so a routine herdr bump
-        // doesn't silently disable every write in the app; anything older is
-        // unverified and left disabled.
-        let minSupportedVersion = Self.minSupportedProtocolVersion
-        if proto == 0 {
-            return AdapterHealth(protocolVersion: 0, compatible: false, writesEnabled: false, reason: "protocol unknown")
+        Self.health(forProtocol: latestProtocol())
+    }
+
+    /// Capability gate used by the menu bar, CLI, and MCP. Protocol 0 means
+    /// no handshake yet. Older than the verified baseline keeps reads and
+    /// disables writes. Newer is treated as additive so a routine herdr bump
+    /// does not silently disable every write.
+    public static func health(forProtocol proto: Int) -> AdapterHealth {
+        let minSupportedVersion = minSupportedProtocolVersion
+        if proto <= 0 {
+            return AdapterHealth(
+                protocolVersion: proto,
+                compatible: false,
+                writesEnabled: false,
+                reason: "protocol unknown"
+            )
         }
         if proto == minSupportedVersion {
-            return AdapterHealth(protocolVersion: proto, compatible: true, writesEnabled: true, reason: nil)
+            return AdapterHealth(
+                protocolVersion: proto,
+                compatible: true,
+                writesEnabled: true,
+                reason: nil
+            )
         }
         if proto > minSupportedVersion {
             return AdapterHealth(
@@ -818,10 +829,51 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                 reason: "herdr protocol \(proto) is newer than the verified \(minSupportedVersion); treating as compatible-with-writes"
             )
         }
-        return AdapterHealth(protocolVersion: proto, compatible: false, writesEnabled: false, reason: "herdr protocol \(proto) is older than the minimum verified \(minSupportedVersion); writes disabled")
+        return AdapterHealth(
+            protocolVersion: proto,
+            compatible: false,
+            writesEnabled: false,
+            reason: "herdr protocol \(proto) is older than the minimum verified \(minSupportedVersion); writes disabled"
+        )
+    }
+
+    /// Parse one subscription line. Invalid JSON is dropped so a corrupt
+    /// event cannot look like a socket disconnect.
+    internal static func event(fromSubscriptionLine lineData: Data) -> HerdrEvent? {
+        guard let object = try? JSONSerialization.jsonObject(with: lineData),
+              let dict = object as? [String: Any] else {
+            return nil
+        }
+        return parseEvent(dict)
     }
 
     // MARK: - Socket Resolution
+
+    /// Copy shown when the resolved socket is missing, so the CLI points at
+    /// the override instead of only the computed path.
+    public static func missingSocketMessage(resolvedPath: String) -> String {
+        """
+        Error: herdr socket not found at \(resolvedPath)
+        Is herdr running? Install it from https://herdr.dev
+        \(socketHint(resolvedPath: resolvedPath))
+        """
+    }
+
+    /// One-line protocol summary for herdmgr. Nil when the handshake is the
+    /// verified baseline so a healthy socket stays quiet.
+    public static func protocolStatusLine(for health: AdapterHealth) -> String? {
+        guard let reason = health.reason else { return nil }
+        return "herdr protocol \(health.protocolVersion): \(reason)"
+    }
+
+    /// Shown after a connect or snapshot failure so the operator can point
+    /// herdmgr at a different socket without guessing the override name.
+    public static func socketHint(resolvedPath: String) -> String {
+        """
+        Socket: \(resolvedPath)
+        Set HERDR_SOCKET_PATH or HERDR_SESSION, or pass --socket if this is the wrong socket.
+        """
+    }
 
     /// Resolve herdr socket path in priority order:
     /// 1. HERDR_SOCKET_PATH (explicit override)
@@ -901,5 +953,102 @@ public struct AdapterHealth: Sendable, Equatable {
         self.compatible = compatible
         self.writesEnabled = writesEnabled
         self.reason = reason
+    }
+}
+
+/// JSONSerialization turns numbers into `NSNumber`; hand-written fixtures use
+/// native `Int`. `as? Int` / `as? UInt64` each miss one of those shapes, which
+/// is how `state_change_seq` and `protocol` used to decode as missing.
+public enum JSONNumber {
+    public static func int(_ value: Any?) -> Int? {
+        guard let value, !isJSONBoolean(value) else { return nil }
+        if let number = value as? NSNumber {
+            return intFromNSNumber(number)
+        }
+        if let value = value as? Int { return value }
+        if let value = value as? Int64 { return Int(value) }
+        if let value = value as? UInt64, value <= UInt64(Int.max) { return Int(value) }
+        if let value = value as? Double {
+            return intFromWholeDouble(value)
+        }
+        if let value = value as? String {
+            return Int(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
+    }
+
+    public static func uint64(_ value: Any?) -> UInt64? {
+        guard let value, !isJSONBoolean(value) else { return nil }
+        if let number = value as? NSNumber {
+            return uint64FromNSNumber(number)
+        }
+        if let value = value as? UInt64 { return value }
+        if let value = value as? Int, value >= 0 { return UInt64(value) }
+        if let value = value as? Int64, value >= 0 { return UInt64(value) }
+        if let value = value as? Double, value >= 0,
+           let asInt = intFromWholeDouble(value) {
+            return UInt64(asInt)
+        }
+        if let value = value as? String {
+            return UInt64(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
+    }
+
+    /// herdr may echo a JSON-RPC `id` as a number even when the request sent
+    /// a string. Treat those as the same response.
+    public static func matchesStringId(_ value: Any?, expected: String) -> Bool {
+        if let string = value as? String {
+            return string == expected
+        }
+        if let int = int(value) {
+            return String(int) == expected
+        }
+        return false
+    }
+
+    /// JSONSerialization boxes `true`/`false` as CFBoolean. Those NSNumbers
+    /// bridge to Int 1/0, which used to make `protocol: true` look like
+    /// protocol 1. Detect the boolean type id before any numeric coerce.
+    private static func isJSONBoolean(_ value: Any) -> Bool {
+        if let number = value as? NSNumber {
+            return CFGetTypeID(number) == CFBooleanGetTypeID()
+        }
+        return value is Bool
+    }
+
+    private static func intFromWholeDouble(_ value: Double) -> Int? {
+        guard value.isFinite,
+              value >= Double(Int.min),
+              value <= Double(Int.max),
+              value.rounded(.towardZero) == value else {
+            return nil
+        }
+        return Int(value)
+    }
+
+    /// JSONSerialization boxes every number as NSNumber. Integers often
+    /// arrive as doubles (`objCType` "d"); `intValue` would truncate 17.5
+    /// to 17 and make `protocol: 17.5` look like protocol 17.
+    private static func intFromNSNumber(_ number: NSNumber) -> Int? {
+        let type = String(cString: number.objCType)
+        if type == "d" || type == "f" {
+            return intFromWholeDouble(number.doubleValue)
+        }
+        let i = number.int64Value
+        guard i >= Int64(Int.min), i <= Int64(Int.max) else { return nil }
+        return Int(i)
+    }
+
+    private static func uint64FromNSNumber(_ number: NSNumber) -> UInt64? {
+        let type = String(cString: number.objCType)
+        if type == "d" || type == "f" {
+            guard let asInt = intFromWholeDouble(number.doubleValue), asInt >= 0 else {
+                return nil
+            }
+            return UInt64(asInt)
+        }
+        guard number.int64Value >= 0 else { return nil }
+        return number.uint64Value
     }
 }
