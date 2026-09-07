@@ -74,7 +74,10 @@ enum JSONLLineReader {
                     pending.removeAll(keepingCapacity: true)
                     start = 0
                 }
-                return
+                // Out of the loop, not out of the function: a file whose last
+                // line carries no trailing newline still has to emit that line
+                // once `eof` is known. Returning here dropped it.
+                break
             }
 
             if eof, !skipping, start < pending.count {
