@@ -121,8 +121,12 @@ struct HerdmgrCommand: AsyncParsableCommand {
         let eventStream = adapter.events()
         for await event in eventStream {
             if case .workspacesChanged = event {
+                // Label/layout churn (tab_focused, layout_updated, ...) says
+                // nothing about the agents. Keep each pane's enteredAt so the
+                // dwell column does not reset to 0s every time the user
+                // switches tabs.
                 if let refreshed = try? await adapter.herdSnapshot() {
-                    agents = refreshed.displayAgents()
+                    agents = refreshed.displayAgents(preserving: agents)
                 }
             } else {
                 applyEvent(event, to: &agents)
