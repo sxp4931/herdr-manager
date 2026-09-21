@@ -669,3 +669,97 @@ struct DiagnoserFinishedClassificationTests {
         #expect(!verdict.isAwaitingInput)
     }
 }
+
+@Suite("Diagnoser does not stamp known states unclassifiable")
+struct DiagnoserUnclassifiableScopeTests {
+    private let nodeForeground = ProcessInfoResult(
+        shellPid: 123,
+        foregroundProcesses: [ForegroundProcess(pid: 456, name: "node", argv0: nil, cmdline: nil, cwd: nil)]
+    )
+
+    @Test("A working agent with recent output is healthy, not unclassifiable")
+    func workingWithinThresholdIsHealthy() async {
+        let agent = Agent(
+            id: AgentID("w1:p1"),
+            kind: .claude,
+            status: .working,
+            enteredAt: Date().addingTimeInterval(-60),
+            lastOutputAt: Date().addingTimeInterval(-5)
+        )
+        let adapter = MockHerdrAdapter(
+            explainResult: AgentExplainResult(
+                agent: "claude",
+                state: "working",
+                matchedRuleId: nil,
+                matchedRulePriority: nil,
+                screenDetectionSkipped: false
+            ),
+            processInfoResult: nodeForeground
+        )
+        let verdict = await Diagnoser().diagnose(agent: agent, adapter: adapter)
+        #expect(verdict.isHealthy)
+        #expect(!verdict.isUnclassifiable)
+        #expect(verdict.reasonText == nil)
+    }
+
+    @Test("A working hook-reported agent is healthy even with screen detection skipped")
+    func workingHookReportedIsHealthy() async {
+        let agent = Agent(
+            id: AgentID("w1:p1"),
+            kind: .opencode,
+            status: .working,
+            enteredAt: Date().addingTimeInterval(-30)
+        )
+        let adapter = MockHerdrAdapter(
+            explainResult: AgentExplainResult(
+                agent: "opencode",
+                state: nil,
+                matchedRuleId: nil,
+                matchedRulePriority: nil,
+                screenDetectionSkipped: true
+            ),
+            processInfoResult: nodeForeground
+        )
+        let verdict = await Diagnoser().diagnose(agent: agent, adapter: adapter)
+        #expect(verdict.isHealthy)
+    }
+
+    @Test("A working agent whose explain and process info both fail is healthy")
+    func workingWithFailedLookupsIsHealthy() async {
+        let agent = Agent(
+            id: AgentID("w1:p1"),
+            kind: .claude,
+            status: .working,
+            enteredAt: Date().addingTimeInterval(-30)
+        )
+        let verdict = await Diagnoser().diagnose(agent: agent, adapter: MockHerdrAdapter())
+        #expect(verdict.isHealthy)
+    }
+
+    @Test("Unknown status is still unclassifiable")
+    func unknownStaysUnclassifiable() async {
+        let agent = Agent(id: AgentID("w1:p1"), kind: .claude, status: .unknown)
+        let verdict = await Diagnoser().diagnose(
+            agent: agent,
+            adapter: MockHerdrAdapter(processInfoResult: nodeForeground)
+        )
+        #expect(verdict.isUnclassifiable)
+    }
+
+    @Test("Blocked with screen detection skipped still degrades to unclassifiable")
+    func blockedHookReportedIsUnclassifiable() async {
+        let agent = Agent(id: AgentID("w1:p1"), kind: .opencode, status: .blocked)
+        let adapter = MockHerdrAdapter(
+            explainResult: AgentExplainResult(
+                agent: "opencode",
+                state: nil,
+                matchedRuleId: nil,
+                matchedRulePriority: nil,
+                screenDetectionSkipped: true
+            ),
+            processInfoResult: nodeForeground
+        )
+        let verdict = await Diagnoser().diagnose(agent: agent, adapter: adapter)
+        #expect(verdict.isUnclassifiable)
+    }
+}
