@@ -1135,3 +1135,89 @@ struct NDJSONFramingTests {
         #expect(String(data: line, encoding: .utf8) == "next\n")
     }
 }
+
+/// Any non-null JSON-RPC `error` must fail the call. Only an error object
+/// with a string `message` used to throw; `{"error":{"code":-32601}}` or
+/// `{"error":"boom"}` fell through and returned the envelope as a result,
+/// so a rejected write looked sent and a failed snapshot parsed as an empty
+/// herd on protocol 0.
+@Suite("NDJSONClient response unwrapping")
+struct NDJSONResponseUnwrapTests {
+    private func invalidResponseDetail(_ response: [String: Any]) -> String? {
+        do {
+            _ = try NDJSONClient.unwrapResponse(response)
+            return nil
+        } catch NDJSONClientError.invalidResponse(let detail) {
+            return detail
+        } catch {
+            return "unexpected error: \(error)"
+        }
+    }
+
+    @Test("Returns the nested result object")
+    func returnsNestedResult() throws {
+        let result = try NDJSONClient.unwrapResponse([
+            "id": "1",
+            "result": ["type": "session_snapshot"] as [String: Any]
+        ])
+        #expect(result["type"] as? String == "session_snapshot")
+    }
+
+    @Test("A flat response without `result` is still returned as-is")
+    func returnsFlatResponse() throws {
+        let result = try NDJSONClient.unwrapResponse(["id": "1", "type": "pane_read"])
+        #expect(result["type"] as? String == "pane_read")
+    }
+
+    @Test("A JSON null error next to a result is success")
+    func nullErrorIsSuccess() throws {
+        let result = try NDJSONClient.unwrapResponse([
+            "id": "1",
+            "error": NSNull(),
+            "result": ["ok": true] as [String: Any]
+        ])
+        #expect(result["ok"] as? Bool == true)
+    }
+
+    @Test("Surfaces herdr's error message unchanged")
+    func surfacesMessage() {
+        let detail = invalidResponseDetail([
+            "id": "1",
+            "error": ["code": -32000, "message": "pane not found"] as [String: Any]
+        ])
+        #expect(detail == "pane not found")
+    }
+
+    @Test("An error object without a message still fails the call")
+    func codeOnlyErrorThrows() {
+        let detail = invalidResponseDetail([
+            "id": "1",
+            "error": ["code": -32601] as [String: Any]
+        ])
+        #expect(detail?.contains("-32601") == true)
+    }
+
+    @Test("An error object with a non-string message still fails the call")
+    func nonStringMessageThrows() {
+        let detail = invalidResponseDetail([
+            "id": "1",
+            "error": ["code": "pane_not_found", "message": 42] as [String: Any]
+        ])
+        #expect(detail?.contains("pane_not_found") == true)
+    }
+
+    @Test("A bare string error fails the call with that text")
+    func stringErrorThrows() {
+        #expect(invalidResponseDetail(["id": "1", "error": "boom"]) == "boom")
+    }
+
+    @Test("An empty error object still fails even when a result is present")
+    func emptyErrorObjectThrows() {
+        let detail = invalidResponseDetail([
+            "id": "1",
+            "error": [String: Any](),
+            "result": ["type": "pane_read"] as [String: Any]
+        ])
+        #expect(detail != nil)
+    }
+}

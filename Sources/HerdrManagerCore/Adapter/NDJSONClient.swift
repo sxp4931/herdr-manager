@@ -295,18 +295,42 @@ public final class NDJSONClient: @unchecked Sendable {
                 continue
             }
             if JSONNumber.matchesStringId(responseDict["id"], expected: id) {
-                if let error = responseDict["error"] as? [String: Any],
-                   let message = error["message"] as? String {
-                    throw NDJSONClientError.invalidResponse(message)
-                }
-                if let result = responseDict["result"] as? [String: Any] {
-                    return result
-                }
-                // Some responses may have the result at top level
-                return responseDict
+                return try Self.unwrapResponse(responseDict)
             }
             // Not our response — could be an event; skip for now
         }
+    }
+
+    /// Unwrap one matched response. Any non-null `error` fails the call.
+    /// Only an error object with a string `message` used to throw:
+    /// `{"error":{"code":-32601}}` or `{"error":"boom"}` fell through and
+    /// returned the envelope as a successful result, so a rejected write
+    /// looked sent and a failed `session.snapshot` parsed as an empty herd
+    /// on protocol 0 ("protocol unknown") instead of surfacing the error.
+    static func unwrapResponse(_ response: [String: Any]) throws -> [String: Any] {
+        if let error = response["error"], !(error is NSNull) {
+            throw NDJSONClientError.invalidResponse(errorDetail(error))
+        }
+        if let result = response["result"] as? [String: Any] {
+            return result
+        }
+        // Some responses may have the result at top level
+        return response
+    }
+
+    private static func errorDetail(_ error: Any) -> String {
+        if let message = error as? String, !message.isEmpty {
+            return message
+        }
+        if let object = error as? [String: Any] {
+            if let message = object["message"] as? String, !message.isEmpty {
+                return message
+            }
+            if let code = object["code"], !(code is NSNull) {
+                return "herdr error \(code)"
+            }
+        }
+        return "herdr returned an error"
     }
 
     /// Send `events.subscribe` and block until herdr confirms it (or rejects
