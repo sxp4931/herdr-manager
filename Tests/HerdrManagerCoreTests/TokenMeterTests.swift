@@ -144,10 +144,11 @@ struct TokenMeterPricingTests {
         #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high")?.inputPerMillion == 2.0)
         #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high")?.cacheReadPerMillion == 0.50)
         #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high")?.outputPerMillion == 6.0)
-        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high-fast")?.inputPerMillion == 2.0)
-        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high-fast")?.cacheReadPerMillion == 0.50)
-        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high-fast")?.outputPerMillion == 6.0)
-        #expect(book.pricing(for: .cursor, model: "cursor-grok-4-6-high-fast")?.outputPerMillion == 6.0)
+        // Cursor bills Grok 4.6 Fast at 2x the standard rate.
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high-fast")?.inputPerMillion == 4.0)
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high-fast")?.cacheReadPerMillion == 1.0)
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high-fast")?.outputPerMillion == 12.0)
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4-6-high-fast")?.outputPerMillion == 12.0)
         #expect(book.pricing(for: .cursor, model: "grok-4.6")?.outputPerMillion == 6.0)
         #expect(TokenMeterProvider(rawValue: "grok-build") == .grok)
         #expect(TokenMeterProvider(rawValue: "grok-build-plan") == .grok)
@@ -177,6 +178,143 @@ struct TokenMeterPricingTests {
         #expect(book.pricing(for: .deepseek, model: "deepseek-v4-pro-0813")?.outputPerMillion == 0.87)
     }
 
+    @Test("Resolves September 2026 Claude, OpenAI, Grok, and Cursor list prices")
+    func september2026ListPrices() {
+        let book = TokenMeterPriceBook.defaults
+
+        // Fable 5.1 / Mythos 5.1 bill cache hits at 0.025x input.
+        for model in ["claude-fable-5-1", "claude-fable-5.1", "claude-mythos-5-1", "claude-mythos-5.1"] {
+            let pricing = book.pricing(for: .claude, model: model)
+            #expect(pricing?.inputPerMillion == 10.0)
+            #expect(pricing?.cacheReadPerMillion == 0.25)
+            #expect(pricing?.cacheWrite5mPerMillion == 12.50)
+            #expect(pricing?.cacheWrite1hPerMillion == 20.0)
+            #expect(pricing?.outputPerMillion == 50.0)
+        }
+        #expect(book.pricing(for: .claude, model: "claude-fable-5")?.cacheReadPerMillion == 1.0)
+        for model in ["claude-opus-4-7", "claude-opus-4.7", "claude-opus-4-6", "claude-opus-4.6"] {
+            let pricing = book.pricing(for: .claude, model: model)
+            #expect(pricing?.inputPerMillion == 5.0)
+            #expect(pricing?.cacheReadPerMillion == 0.50)
+            #expect(pricing?.cacheWrite5mPerMillion == 6.25)
+            #expect(pricing?.cacheWrite1hPerMillion == 10.0)
+            #expect(pricing?.outputPerMillion == 25.0)
+        }
+        #expect(book.pricing(for: .claude, model: "claude-sonnet-5")?.outputPerMillion == 10.0)
+        #expect(book.pricing(for: .cursor, model: "claude-opus-5-fast")?.inputPerMillion == 10.0)
+        #expect(book.pricing(for: .cursor, model: "claude-opus-5-fast")?.cacheReadPerMillion == 1.0)
+        #expect(book.pricing(for: .cursor, model: "claude-opus-4-8-fast")?.outputPerMillion == 50.0)
+
+        let astra = book.pricing(for: .codex, model: "gpt-6-astra")
+        #expect(astra?.inputPerMillion == 10.0)
+        #expect(astra?.cacheReadPerMillion == 1.0)
+        #expect(astra?.cacheWrite5mPerMillion == 12.50)
+        #expect(astra?.outputPerMillion == 50.0)
+        let sol = book.pricing(for: .codex, model: "gpt-5.6-sol")
+        #expect(sol?.inputPerMillion == 4.0)
+        #expect(sol?.cacheReadPerMillion == 0.40)
+        #expect(sol?.cacheWrite5mPerMillion == 5.0)
+        #expect(sol?.outputPerMillion == 20.0)
+        #expect(book.pricing(for: .codex, model: "gpt-5.6-cyber")?.inputPerMillion == 12.50)
+        #expect(book.pricing(for: .codex, model: "gpt-5.6-cyber")?.cacheWrite5mPerMillion == 15.625)
+        #expect(book.pricing(for: .codex, model: "gpt-5.5-cyber")?.cacheReadPerMillion == 1.25)
+        #expect(book.pricing(for: .codex, model: "gpt-5.5-cyber")?.outputPerMillion == 75.0)
+
+        for model in ["grok-4.7", "grok-4-7"] {
+            let pricing = book.pricing(for: .grok, model: model)
+            #expect(pricing?.inputPerMillion == 2.0)
+            #expect(pricing?.cacheReadPerMillion == 0.50)
+            #expect(pricing?.outputPerMillion == 6.0)
+        }
+        for model in ["grok-4.7-build-fast", "grok-4-7-build-fast", "grok-4.7-fast", "grok-4-7-fast"] {
+            let pricing = book.pricing(for: .grok, model: model)
+            #expect(pricing?.inputPerMillion == 4.0)
+            #expect(pricing?.cacheReadPerMillion == 1.0)
+            #expect(pricing?.outputPerMillion == 12.0)
+        }
+
+        let composer = book.pricing(for: .cursor, model: "composer-2.5")
+        #expect(composer?.inputPerMillion == 0.50)
+        #expect(composer?.cacheReadPerMillion == 0.20)
+        #expect(composer?.outputPerMillion == 2.50)
+        let composerFast = book.pricing(for: .cursor, model: "composer-2.5-fast")
+        #expect(composerFast?.inputPerMillion == 3.0)
+        #expect(composerFast?.cacheReadPerMillion == 0.50)
+        #expect(composerFast?.outputPerMillion == 15.0)
+    }
+
+    @Test("Cursor Grok Fast ids price at 2x; standard-speed effort ids use the base key")
+    func cursorGrokFastVariants() {
+        let book = TokenMeterPriceBook.defaults
+        let standard = TokenMeterPricing(inputPerMillion: 2.0, cacheReadPerMillion: 0.50, outputPerMillion: 6.0)
+        let fast = TokenMeterPricing(inputPerMillion: 4.0, cacheReadPerMillion: 1.0, outputPerMillion: 12.0)
+
+        for version in ["4.7", "4-7", "4.6", "4-6"] {
+            #expect(book.entries["cursor-grok-\(version)"] == standard)
+            for effort in ["", "-low", "-medium", "-high", "-xhigh"] {
+                let model = "cursor-grok-\(version)\(effort)"
+                #expect(book.pricing(for: .cursor, model: model) == standard)
+                #expect(book.entries["\(model)-fast"] == fast)
+                #expect(book.pricing(for: .cursor, model: "\(model)-fast") == fast)
+            }
+        }
+    }
+
+    @Test("The longest contained fragment wins over a shorter family key")
+    func longestFragmentWins() {
+        let book = TokenMeterPriceBook.defaults
+
+        // Each specific id contains the general key, yet must resolve to its
+        // own, differently priced entry.
+        let collisions: [(TokenMeterProvider, String, String)] = [
+            (.claude, "claude-fable-5-1", "claude-fable-5"),
+            (.claude, "claude-mythos-5.1", "claude-mythos-5"),
+            (.cursor, "claude-opus-5-fast", "claude-opus-5"),
+            (.cursor, "claude-opus-4-8-fast", "claude-opus-4-8"),
+            (.codex, "gpt-5.6-sol", "gpt-5"),
+            (.codex, "gpt-5.6-cyber", "gpt-5"),
+            (.codex, "gpt-5.5-cyber", "gpt-5.5"),
+            (.grok, "grok-4.7-build-fast", "grok-4.7"),
+            (.grok, "grok-4-7-fast", "grok-4-7"),
+            (.cursor, "cursor-grok-4.7-fast", "cursor-grok-4.7"),
+            (.cursor, "cursor-grok-4.7-xhigh-fast", "cursor-grok-4.7"),
+            (.cursor, "cursor-grok-4-6-xhigh-fast", "cursor-grok-4-6"),
+            (.cursor, "composer-2.5-fast", "composer-2.5"),
+        ]
+        for (provider, specific, general) in collisions {
+            #expect(specific.contains(general))
+            #expect(book.entries[specific] != nil)
+            #expect(book.pricing(for: provider, model: specific) == book.entries[specific])
+            #expect(book.pricing(for: provider, model: specific) != book.pricing(for: provider, model: general))
+        }
+
+        // Longer logged ids resolve through the most specific key they contain.
+        #expect(book.pricing(for: .cursor, model: "cursor-composer-2.5") == book.entries["composer-2.5"])
+        #expect(book.pricing(for: .cursor, model: "cursor-composer-2-5-fast") == book.entries["composer-2-5-fast"])
+        #expect(book.pricing(for: .codex, model: "gpt-5.3-codex-low") == book.entries["gpt-5.3-codex"])
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4-7-xhigh") == book.entries["cursor-grok-4-7"])
+
+        // Unreleased siblings stay unpriced instead of borrowing a neighbour.
+        #expect(book.pricing(for: .grok, model: "grok-4.8") == nil)
+        #expect(book.pricing(for: .codex, model: "gpt-6-nova") == nil)
+        #expect(book.pricing(for: .cursor, model: "composer-3") == nil)
+    }
+
+    @Test("New dotted keys have identically priced hyphenated twins")
+    func dottedAndHyphenatedTwinsAgree() {
+        let book = TokenMeterPriceBook.defaults
+        let dotted = [
+            "claude-fable-5.1", "claude-mythos-5.1", "claude-opus-4.7", "claude-opus-4.6",
+            "claude-opus-4.8-fast", "grok-4.7", "grok-4.7-fast", "grok-4.7-build-fast",
+            "composer-2.5", "composer-2.5-fast",
+        ]
+        for key in dotted {
+            let twin = key.replacingOccurrences(of: ".", with: "-")
+            #expect(book.entries[key] != nil)
+            #expect(book.entries[key] == book.entries[twin])
+        }
+    }
+
     @Test("Merges missing default model prices without overwriting edits")
     func mergingMissingDefaultsKeepsOverrides() {
         let custom = TokenMeterPricing(inputPerMillion: 9, outputPerMillion: 11)
@@ -199,7 +337,9 @@ struct TokenMeterPricingTests {
             (.kimi, "kimi-k2.7-code"),
             (.kimi, nil),
             (.grok, "grok-4.6"),
+            (.grok, "grok-4.7-build-fast"),
             (.codex, "gpt-5.2"),
+            (.codex, "gpt-6-astra"),
             (.claude, "claude-sonnet-4.5"),
             (.claude, "claude-future-9"),
             (.kimi, "kimi-unreleased-9"),
@@ -214,7 +354,8 @@ struct TokenMeterPricingTests {
     func suggestedPricingDoesNotLeakIntoPricing() {
         let book = TokenMeterPriceBook.defaults
 
-        let grokUnknown = "grok-4.7-fast"
+        // grok-4.7* is priced now; use a sibling that contains no priced id.
+        let grokUnknown = "grok-4.9-fast"
         let grokHint = book.suggestedPricing(for: .grok, model: grokUnknown)
         #expect(grokHint == book.pricing(for: .grok, model: "grok-4.20"))
         #expect(book.pricing(for: .grok, model: grokUnknown) == nil)
