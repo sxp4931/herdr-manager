@@ -1,20 +1,25 @@
 # State
 - Branch `claude/opus-extra-herdr-models-pricing-0921` (PR #3), stacked on the pricing commit 858fc41. Passes 1–5 ran on `grok/quality-burn-0906` (merged as f7d0366).
 - Clock cancelled; stop only on STOP file.
-- Reliability pass 6 (2026-09-21) complete and pushed. `swift` is not available in this environment; tests added but not executed here.
+- Reliability pass 7 (2026-09-21) complete and pushed. `swift` is not available in this environment; tests added but not executed here.
 
 ## Progress
 | # | Status | Notes |
 |---|--------|-------|
 | 1 | pass6 | Event cache folds history older than every finite window (bounded by sessions, not turns). Price and attribution resolved once per (provider, model) / (provider, cwd) per refresh; accumulators mutated in place. |
-| 2 | pass6 | Any JSON-RPC `error` (code-only, string, empty) fails the request instead of reading as success. Core errors keep their reason in `localizedDescription`. |
-| 3 | pass6 | Silent clock starts at max(lastOutputAt, enteredAt): an agent resuming after a long prompt is not instantly flagged silent. |
-| 4 | pass6 | SharedActionStore write failures throw (no phantom transitions); an undecodable store is never overwritten; markExecuted needs a claim; markFailed cannot overwrite terminal states; MCP marks a claimed write failed when the herdr call throws. |
+| 2 | pass7 | Any JSON-RPC `error` fails the request (pass 6). Protocol reading resets to unknown when the event stream drops or a request cannot connect, so writes are never gated on a vanished herdr's version. |
+| 3 | pass7 | Working-and-not-silent is healthy, not unclassifiable. Stale `pane_updated` (seq behind stored) is dropped. Attention lists share one comparator with a pane-id tie-break. |
+| 4 | pass7 | Notifications fire only on status transitions the store accepted; blocked alerts key on the episode, not `pane:0`, so every blocked episode notifies. |
 | 5 | pass5 | herdmgr uses herdSnapshot (agent.list + labels) so shells are dropped and seq is real. JSON includes state_change_seq. Label events resync. |
 | 6 | pass5 | SecretRedactor also covers OpenRouter `sk-or-`, Stripe `sk_live_`/`sk_test_`, and Slack `xox*` tokens. MCP tool results already always redact. |
 | 7 | pass5 | Working tree clean. `swift` / `swift test` not available in this environment — tests added but not executed. No push. |
 
 ## Log
+- 15:11 ET — Pass 7 / wrap-up: commits f5ecfb3, 3b4775d, d85ed1b, d7975fc on `claude/opus-extra-herdr-models-pricing-0921`, pushed to PR #3. Tree clean; no `.build` artifacts. `swift test` not run (no toolchain). All five pass-6 "found but not fixed" items closed.
+- 15:10 ET — Pass 7 / item 2 (d7975fc): LiveHerdrAdapter clears `_latestProtocolVersion` on subscription disconnect and on any `connectFailed` request. MCP (no subscription loop, re-reads only at 0) kept a stale reading indefinitely before. AppModel sets `adapterHealth` nil when offline so a stale protocol banner does not outlive its server. Not covered: a herdr restart between two MCP calls with no failed request in between (undetectable on one-shot sockets without re-reading).
+- 15:06 ET — Pass 7 / item 3 (d85ed1b): `AttentionTriage.ranksBefore` (priority, enteredAt, pane id) replaces four hand-rolled sorts (store, panel Needs-you, herdmgr, MCP herd.overview/agent.list — MCP had no tie-break at all). Panel Running list tie-breaks on pane id.
+- 15:02 ET — Pass 7 / items 3+4 (3b4775d): AgentStore and herdmgr drop a `pane_updated` whose non-zero seq is behind the stored one (including a stale "no agent" that would remove a live agent). `applyEvent` returns the `AgentStatusTransition` it accepted; AppModel notifies and diagnoses only from that. Blocked notification key was `pane:seq` and pane_updated has no seq, so each agent got one blocked alert per launch; now keyed by `episodeKey`.
+- 14:57 ET — Pass 7 / item 3 (f5ecfb3): Diagnoser returned S4 for every working agent that was not silent/gone ("state: working" / "working but unclassifiable" reason line on healthy rows). Working/done/idle now return healthy; S4 is unknown status or blocked with screen detection skipped.
 - 15:01 ET — Pass 6 / wrap-up: commits 503c31f, 84a25fd, 8f49a06, 3e71e2d, 59dad7b on `claude/opus-extra-herdr-models-pricing-0921`, pushed to PR #3. Tree clean; no `.build` artifacts. `swift test` not run (no toolchain).
 - 15:01 ET — Pass 6 / item 1 (59dad7b): the 30s token-meter refresh called `priceBook.pricing` (lowercase + sort of every entry) up to 20× per event, re-resolved agent cwd symlinks per event, and copied nested accumulator maps (and their Sets) per event×window. Now memoized and in place. `fileEventCache` folds events older than the earliest hour/day/week/month start per (provider, session, model, cwd, split); clamped-cost events stay separate; a cutoff that moves back forces a re-read. Tradeoff: `ambiguousAttributionCount` counts a folded group once (UI only checks > 0). Supersedes the earlier "cache retains all historical events" tradeoff.
 - 14:53 ET — Pass 6 / item 2 (3e71e2d): NDJSONClientError, SharedActionStoreError, SettingsStoreError, and the MCP revalidation/agent-resolution errors adopt LocalizedError so `error.localizedDescription` shows the real reason, not "The operation couldn't be completed".
