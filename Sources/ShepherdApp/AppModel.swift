@@ -176,6 +176,10 @@ final class AppModel {
         guard previous != state else { return }
         connectionState = state
         if state == .disconnected {
+            // The protocol reading belonged to the herdr that just went away;
+            // a stale "older protocol" banner must not outlive it. The next
+            // successful snapshot sets a fresh reading.
+            setHealth(nil)
             requestPreflight()
         } else if state == .connected {
             markConnectedIfNeeded()
@@ -188,7 +192,7 @@ final class AppModel {
         if lastError != message { lastError = message }
     }
 
-    private func setHealth(_ health: AdapterHealth) {
+    private func setHealth(_ health: AdapterHealth?) {
         if adapterHealth != health { adapterHealth = health }
     }
 

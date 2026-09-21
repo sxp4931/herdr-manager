@@ -958,6 +958,49 @@ struct AdapterHealthTests {
     }
 }
 
+@Suite("LiveHerdrAdapter protocol reading after herdr goes away")
+struct ProtocolReadingResetTests {
+    /// A socket path nothing listens on, so every connect fails the way it
+    /// does while herdr is stopped or restarting.
+    private func unreachableSocketPath() -> String {
+        "/tmp/herdr-missing-\(UUID().uuidString.prefix(8)).sock"
+    }
+
+    @Test("A request that cannot reach herdr forgets the old protocol reading")
+    func connectFailureClearsReading() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        adapter.setLatestProtocol(LiveHerdrAdapter.minSupportedProtocolVersion)
+        #expect(adapter.health().writesEnabled)
+
+        do {
+            _ = try await adapter.herdSnapshot()
+            Issue.record("Expected the snapshot to fail with no herdr listening")
+        } catch {
+            #expect(error is NDJSONClientError)
+        }
+
+        let health = adapter.health()
+        #expect(health.protocolVersion == 0)
+        #expect(!health.writesEnabled)
+        #expect(health.reason == "protocol unknown")
+    }
+
+    @Test("An older-protocol reading does not outlive a failed connect")
+    func failedConnectClearsOlderReading() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        adapter.setLatestProtocol(16)
+        #expect(adapter.health().reason?.contains("older") == true)
+
+        do {
+            try await adapter.connect()
+            Issue.record("Expected connect to fail with no herdr listening")
+        } catch {}
+
+        #expect(adapter.health().protocolVersion == 0)
+        #expect(adapter.health().reason == "protocol unknown")
+    }
+}
+
 @Suite("Subscription line decode failures")
 struct SubscriptionLineDecodeTests {
     @Test("Valid pane_updated line yields an event")
