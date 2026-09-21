@@ -541,41 +541,25 @@ final class AppModel {
                 break
             }
 
-            // Check for a blocked transition BEFORE applying (so we can compare
-            // against the pre-event status) on whichever event shape carries a
-            // status. `pane_updated` (`.paneUpdated`) is what herdr actually
-            // sends on protocol 17; `.agentStatusChanged` is the legacy/dotted
-            // shape kept for back-compat and rarely if ever fires live — both
-            // are handled so notifications/diagnosis trigger from the real feed.
-            if case .agentStatusChanged(let paneId, let agentStatus, let seq) = event {
-                let agentId = AgentID(paneId)
-                let previousStatus = store.agents[agentId]?.status
-                let newStatus = AgentStatus(rawValue: agentStatus) ?? .unknown
-
-                store.applyEvent(event)
-                notifyAndDiagnoseIfNeeded(agentId: agentId, previousStatus: previousStatus, newStatus: newStatus, seq: seq)
-            } else if case .paneUpdated(let info) = event {
-                let agentId = AgentID(info.paneId)
-                let previousStatus = store.agents[agentId]?.status
-                let newStatus = AgentStatus(rawValue: info.agentStatus) ?? .unknown
-
-                store.applyEvent(event)
-                notifyAndDiagnoseIfNeeded(agentId: agentId, previousStatus: previousStatus, newStatus: newStatus, seq: info.stateChangeSeq)
-            } else {
-                store.applyEvent(event)
+            // React only to status changes the store accepted. `pane_updated`
+            // is what herdr sends on protocol 17; `.agentStatusChanged` is the
+            // legacy/dotted shape. Comparing the raw event against the
+            // pre-event status used to notify for events the store dropped
+            // (stale seq, untracked pane), so a blocked alert could fire for a
+            // pane the panel still showed as working.
+            if let transition = store.applyEvent(event) {
+                notifyAndDiagnoseIfNeeded(transition)
             }
         }
     }
 
     /// Shared "did this agent just become blocked/start working" reaction for
     /// both event shapes runEventLoop understands.
-    private func notifyAndDiagnoseIfNeeded(agentId: AgentID, previousStatus: AgentStatus?, newStatus: AgentStatus, seq: UInt64?) {
-        if newStatus == .blocked && previousStatus != .blocked {
-            if let agent = store.agents[agentId] {
-                _ = notificationManager.notifyBlocked(agent: agent, seq: seq)
-            }
+    private func notifyAndDiagnoseIfNeeded(_ transition: AgentStatusTransition) {
+        if transition.to == .blocked, let agent = store.agents[transition.agentId] {
+            _ = notificationManager.notifyBlocked(agent: agent, episodeKey: transition.episodeKey)
         }
-        if (newStatus == .blocked || newStatus == .working) && previousStatus != newStatus {
+        if transition.to == .blocked || transition.to == .working {
             Task { [weak self] in
                 guard let self else { return }
                 await self.runDiagnosisAndNotify()
