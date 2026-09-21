@@ -835,7 +835,15 @@ actor MCPServer {
                         return makeToolError("Revalidation failed: \(error). No input sent.")
                     }
 
-                    try await adapter.prompt(paneId: paneId, text: text)
+                    do {
+                        try await adapter.prompt(paneId: paneId, text: text)
+                    } catch {
+                        return await failClaimedWrite(
+                            actionId: actionId, tool: "agent.say",
+                            params: ["agent_id": agentIdStr, "text_length": "\(text.count)"],
+                            preState: "status=\(status)", error: error
+                        )
+                    }
                     await policy.recordWrite(agentId: agentIdStr)
                     try? await sharedActionStore.markExecuted(actionId)
 
@@ -968,7 +976,15 @@ actor MCPServer {
                 }
 
                 let keys: [String] = level == "escape" ? ["esc"] : ["ctrl+c"]
-                try await adapter.sendKeys(paneId: paneId, keys: keys)
+                do {
+                    try await adapter.sendKeys(paneId: paneId, keys: keys)
+                } catch {
+                    return await failClaimedWrite(
+                        actionId: actionId, tool: "agent.interrupt",
+                        params: ["agent_id": agentIdStr, "level": level],
+                        preState: "status=\(paneInfo.agentStatus)", error: error
+                    )
+                }
                 await policy.recordWrite(agentId: agentIdStr)
                 try? await sharedActionStore.markExecuted(actionId)
 
@@ -1061,7 +1077,16 @@ actor MCPServer {
                     return makeToolError("Revalidation failed: \(error). No input sent.")
                 }
 
-                try await adapter.closePane(paneId: paneId)
+                do {
+                    try await adapter.closePane(paneId: paneId)
+                } catch {
+                    return await failClaimedWrite(
+                        actionId: actionId, tool: "agent.stop",
+                        params: ["agent_id": agentIdStr, "reason": reason],
+                        preState: "status=\(paneInfo.agentStatus)", error: error,
+                        keepForever: true
+                    )
+                }
                 await policy.recordWrite(agentId: agentIdStr)
                 try? await sharedActionStore.markExecuted(actionId)
 
@@ -1214,8 +1239,11 @@ actor MCPServer {
             params["_fp_seq"] = "0"
         }
 
-        guard let actionId = try? await sharedActionStore.create(tool: "session.spawn", params: params) else {
-            return makeToolError("Failed to record spawn action (lock unavailable)")
+        let actionId: String
+        do {
+            actionId = try await sharedActionStore.create(tool: "session.spawn", params: params)
+        } catch {
+            return makeToolError("Failed to record spawn action: \(error)")
         }
 
         // MCP session creation is explicitly auto-allowed. Keep the action in
@@ -1428,6 +1456,29 @@ actor MCPServer {
         guard let error = await checkWritesEnabled() else { return nil }
         try? await sharedActionStore.markFailed(actionId, detail: detail)
         return error
+    }
+
+    /// A claimed, approved write threw. Record the failure on the shared
+    /// action and in the journal. Without this the row sat in `.executing`
+    /// until the deadline reaper relabelled it "expired while executing",
+    /// so `action.status` misreported a herdr rejection for up to two minutes.
+    private func failClaimedWrite(
+        actionId: String,
+        tool: String,
+        params: [String: String],
+        preState: String,
+        error: Error,
+        keepForever: Bool = false
+    ) async -> [String: Any] {
+        try? await sharedActionStore.markFailed(actionId, detail: "write failed: \(error)")
+        await journal.record(JournalEntry(
+            actionId: actionId, tool: tool,
+            params: params,
+            caller: "mcp", preState: preState,
+            outcome: "failed",
+            keepForever: keepForever
+        ))
+        return makeToolError("\(tool) failed after approval: \(error) (actionId: \(actionId))")
     }
 
     // MARK: - Answer Key Mapping

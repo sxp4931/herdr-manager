@@ -230,13 +230,142 @@ struct SharedActionStoreTests {
         #expect(action?.failDetail == "expired while executing")
     }
 
-    @Test("markExecuted changes state")
+    @Test("markExecuted completes a claimed action")
     func markExecuted() async throws {
         let store = tempStore()
         let id = try await store.create(tool: "bash", params: [:])
+        try await store.approve(id)
+        #expect(try await store.claimExecuting(actionId: id) != nil)
         try await store.markExecuted(id)
         let status = await store.status(id)
         #expect(status == .executed)
+    }
+
+    @Test("markExecuted does not complete an action that was never claimed")
+    func markExecutedRequiresClaim() async throws {
+        let store = tempStore()
+        let pending = try await store.create(tool: "agent.interrupt", params: [:])
+        try await store.markExecuted(pending)
+        #expect(await store.status(pending) == .pending)
+
+        let denied = try await store.create(tool: "agent.stop", params: [:])
+        try await store.deny(denied)
+        try await store.markExecuted(denied)
+        #expect(await store.status(denied) == .denied)
+    }
+
+    @Test("markExecuted records a claimed write the deadline reaper already failed")
+    func markExecutedAfterDeadlineReap() async throws {
+        let store = tempStore()
+        let id = try await store.create(
+            tool: "agent.stop",
+            params: [:],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        try await store.approve(id)
+        #expect(try await store.claimExecuting(actionId: id) != nil)
+        try await store.expireStale(now: Date().addingTimeInterval(60))
+        #expect(await store.status(id) == .failed)
+
+        // The write landed after the reaper ran: executed is the truth.
+        try await store.markExecuted(id)
+        let action = await store.get(id)
+        #expect(action?.state == .executed)
+        #expect(action?.failDetail == nil)
+    }
+
+    @Test("markFailed does not rewrite a denied, expired, or executed action")
+    func markFailedKeepsTerminalStates() async throws {
+        let store = tempStore()
+
+        let denied = try await store.create(tool: "agent.interrupt", params: [:])
+        try await store.deny(denied)
+        try await store.markFailed(denied, detail: "action no longer claimable")
+        #expect(await store.status(denied) == .denied)
+        #expect(await store.get(denied)?.failDetail == nil)
+
+        // The MCP "no longer claimable" path: the claim itself expired it.
+        let expired = try await store.create(
+            tool: "agent.stop",
+            params: [:],
+            expiresAt: Date().addingTimeInterval(30)
+        )
+        try await store.approve(expired)
+        #expect(try await store.claimExecuting(
+            actionId: expired, now: Date().addingTimeInterval(60)
+        ) == nil)
+        try await store.markFailed(expired, detail: "action no longer claimable")
+        #expect(await store.status(expired) == .expired)
+
+        let executed = try await store.create(tool: "agent.say", params: [:])
+        try await store.approve(executed)
+        #expect(try await store.claimExecuting(actionId: executed) != nil)
+        try await store.markExecuted(executed)
+        try await store.markFailed(executed, detail: "late failure")
+        #expect(await store.status(executed) == .executed)
+    }
+
+    @Test("markFailed fails an executing claim whose write threw")
+    func markFailedExecutingClaim() async throws {
+        let store = tempStore()
+        let id = try await store.create(tool: "agent.say", params: [:])
+        try await store.approve(id)
+        #expect(try await store.claimExecuting(actionId: id) != nil)
+        try await store.markFailed(id, detail: "write failed: connection closed")
+        let action = await store.get(id)
+        #expect(action?.state == .failed)
+        #expect(action?.failDetail == "write failed: connection closed")
+    }
+
+    @Test("create throws instead of returning an id that was never persisted")
+    func createThrowsWhenStoreCannotBeReplaced() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // A directory where the JSON file belongs makes the final rename fail.
+        let fileURL = dir.appendingPathComponent("pending-actions.json")
+        try FileManager.default.createDirectory(at: fileURL, withIntermediateDirectories: true)
+        let store = SharedActionStore(fileURL: fileURL)
+        do {
+            _ = try await store.create(tool: "agent.interrupt", params: [:])
+            Issue.record("create should throw when the store cannot be written")
+        } catch let error as SharedActionStoreError {
+            guard case .writeFailed = error else {
+                Issue.record("Expected writeFailed, got \(error)")
+                return
+            }
+        }
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            .filter { $0.hasSuffix(".tmp") }
+        #expect(leftovers.isEmpty)
+    }
+
+    @Test("Write paths refuse to overwrite a store file they cannot decode")
+    func createRefusesUndecodableFile() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("pending-actions.json")
+        // e.g. a newer build wrote a state this build does not know.
+        let original = Data(#"[{"actionId":"a1","state":"cancelled"}]"#.utf8)
+        try original.write(to: fileURL)
+        let store = SharedActionStore(fileURL: fileURL)
+        do {
+            _ = try await store.create(tool: "agent.interrupt", params: [:])
+            Issue.record("create should throw on an undecodable store")
+        } catch let error as SharedActionStoreError {
+            guard case .unreadable = error else {
+                Issue.record("Expected unreadable, got \(error)")
+                return
+            }
+        }
+        await #expect(throws: SharedActionStoreError.self) {
+            try await store.reapStale(now: Date().addingTimeInterval(25 * 3600))
+        }
+        #expect(try Data(contentsOf: fileURL) == original)
+        #expect(await store.pendingActions().isEmpty)
     }
 
     @Test("markFailed changes state with detail")
@@ -749,6 +878,8 @@ struct SharedActionStoreReapStaleTests {
     func oldTerminalPruned() async throws {
         let store = tempStore()
         let id = try await store.create(tool: "bash", params: [:])
+        try await store.approve(id)
+        #expect(try await store.claimExecuting(actionId: id) != nil)
         try await store.markExecuted(id)
         // Fast-forward 25 hours
         let future = Date().addingTimeInterval(25 * 3600)
@@ -761,6 +892,8 @@ struct SharedActionStoreReapStaleTests {
     func recentTerminalSurvives() async throws {
         let store = tempStore()
         let id = try await store.create(tool: "bash", params: [:])
+        try await store.approve(id)
+        #expect(try await store.claimExecuting(actionId: id) != nil)
         try await store.markExecuted(id)
         // Reap with current time — action was just created, so it should survive
         try await store.reapStale(now: Date())
