@@ -7,8 +7,9 @@ import Foundation
 /// - S3: Process gone — pane.process_info shows a bare shell while the agent
 ///       is supposed to be alive (working/blocked/unknown).
 /// - S1: Awaiting input — status==blocked + agent.explain → matched_rule.id → BlockKind
-/// - S2: Silent — status==working ∧ now−lastOutputAt > threshold, enriched with CPU via `ps`
-/// - S4: Unclassifiable — unknown status or screen_detection_skipped → degraded classification
+/// - S2: Silent — status==working ∧ now−max(lastOutputAt, enteredAt) > threshold, enriched with CPU via `ps`
+/// - S4: Unclassifiable — unknown status, or blocked with screen_detection_skipped → degraded classification.
+///       Working (not silent), done, and idle are healthy and never reach S4.
 public actor Diagnoser {
 
     public init() {}
@@ -49,14 +50,19 @@ public actor Diagnoser {
             return s2
         }
 
-        // Finished / idle are legitimate end states. They must not fall
-        // through to S4, which used to stamp `.unclassifiable("status: done")`
-        // over the healthy verdict from the snapshot.
-        if agent.status == .done || agent.status == .idle {
+        // Working (and not silent, not gone), finished, and idle are known
+        // states with nothing left to classify. They must not fall through
+        // to S4, which stamped every active agent with "state: working" or
+        // "working but unclassifiable" on each diagnosis pass.
+        switch agent.status {
+        case .working, .done, .idle:
             return .healthy
+        case .blocked, .unknown:
+            break
         }
 
-        // S4: Unclassifiable
+        // S4: Unclassifiable — unknown status, or a blocked pane whose
+        // screen detection was skipped so S1 could not classify it.
         return await checkUnclassifiable(agent: agent, paneId: paneId, adapter: adapter)
     }
 
@@ -155,7 +161,7 @@ public actor Diagnoser {
         guard agent.status == .working else { return nil }
 
         let threshold = silentThreshold ?? Self.silentThreshold(for: agent.kind)
-        let lastOutput = agent.lastOutputAt ?? agent.enteredAt
+        let lastOutput = Self.silentClockStart(for: agent)
         let elapsed = Date().timeIntervalSince(lastOutput)
 
         guard elapsed > threshold else { return nil }
@@ -164,6 +170,16 @@ public actor Diagnoser {
         let cpu = await cpuState(for: agent, paneId: paneId, adapter: adapter)
 
         return .silent(since: lastOutput, cpu: cpu)
+    }
+
+    /// Silence is counted from the later of the last output change and the
+    /// start of the current status episode. `lastOutputAt` survives status
+    /// changes, so a pane approved after a 20-minute prompt would otherwise
+    /// read as 20 minutes silent the moment it went back to working — and
+    /// the working transition triggers an immediate diagnosis + notification.
+    static func silentClockStart(for agent: Agent) -> Date {
+        guard let lastOutput = agent.lastOutputAt else { return agent.enteredAt }
+        return max(lastOutput, agent.enteredAt)
     }
 
     // MARK: - S4: Unclassifiable
@@ -186,8 +202,6 @@ public actor Diagnoser {
         switch agent.status {
         case .unknown:
             return .unclassifiable(reason: "unknown status")
-        case .working:
-            return .unclassifiable(reason: "working but unclassifiable")
         default:
             return .unclassifiable(reason: "status: \(agent.status.rawValue)")
         }

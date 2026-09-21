@@ -179,12 +179,15 @@ struct HerdmgrCommand: AsyncParsableCommand {
             // status table only tracks the fields buildAgentList/printTable
             // use, so just keep status/seq in sync for an existing row.
             guard let idx = agents.firstIndex(where: { $0.id.raw == info.paneId }) else { return }
+            // Same rules as AgentStore: a real seq behind the stored one is a
+            // stale event, and a missing seq (0) keeps the agent.list value.
+            if info.stateChangeSeq != 0, info.stateChangeSeq < agents[idx].stateChangeSeq { return }
             let newStatus = AgentStatus(rawValue: info.agentStatus) ?? .unknown
             if newStatus != agents[idx].status {
                 agents[idx].enteredAt = Date()
             }
             agents[idx].status = newStatus
-            agents[idx].stateChangeSeq = info.stateChangeSeq
+            if info.stateChangeSeq != 0 { agents[idx].stateChangeSeq = info.stateChangeSeq }
             agents[idx].verdict = verdict(for: newStatus)
         case .paneFocused:
             // herdmgr's plain table doesn't track focus — nothing to update.
@@ -218,12 +221,7 @@ struct HerdmgrCommand: AsyncParsableCommand {
             list = agents.sorted { $0.id.raw < $1.id.raw }
         } else {
             list = agents.filter { AttentionTriage.attentionWorthy($0) }
-                .sorted { a, b in
-                    let pa = AttentionTriage.priority(a)
-                    let pb = AttentionTriage.priority(b)
-                    if pa != pb { return pa < pb }
-                    return a.enteredAt < b.enteredAt
-                }
+                .sorted(by: AttentionTriage.ranksBefore)
         }
 
         if list.isEmpty {

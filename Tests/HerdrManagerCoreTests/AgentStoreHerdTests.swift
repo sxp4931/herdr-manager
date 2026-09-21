@@ -308,6 +308,124 @@ struct ApplyEventPaneUpdatedTests {
     }
 }
 
+// MARK: - applyEvent ordering and accepted transitions
+
+@Suite("AgentStore.applyEvent stale events and transitions")
+struct ApplyEventStaleAndTransitionTests {
+
+    @Test("A pane_updated with an older seq does not move status backward")
+    @MainActor
+    func staleSeqIsIgnored() {
+        let store = AgentStore()
+        store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)))
+        let before = store.agents[AgentID("wA:p1")]
+
+        let transition = store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)))
+
+        #expect(transition == nil)
+        #expect(store.agents[AgentID("wA:p1")] == before)
+        #expect(store.agents[AgentID("wA:p1")]?.status == .blocked)
+        #expect(store.agents[AgentID("wA:p1")]?.stateChangeSeq == 5)
+    }
+
+    @Test("A pane_updated older than the last agent.list resync is ignored")
+    @MainActor
+    func staleAgainstHerdSnapshot() {
+        let store = AgentStore()
+        store.applyHerdSnapshot(HerdSnapshot(
+            version: "0.7.5",
+            protocol: 17,
+            agents: [makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 9)],
+            workspaceNames: ["wA": "Alpha"],
+            tabNames: ["wA:t1": "main"],
+            focusedWorkspaceId: nil,
+            focusedTabId: nil,
+            focusedPaneId: nil
+        ))
+        store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 8)))
+        #expect(store.agents[AgentID("wA:p1")]?.status == .blocked)
+    }
+
+    @Test("A stale pane_updated that reports no agent does not drop a live agent")
+    @MainActor
+    func staleShellEventDoesNotRemove() {
+        let store = AgentStore()
+        store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", stateChangeSeq: 5)))
+        store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agent: nil, stateChangeSeq: 3)))
+        #expect(store.agents[AgentID("wA:p1")] != nil)
+    }
+
+    @Test("A pane_updated with no seq still applies and keeps the stored seq")
+    @MainActor
+    func seqlessEventApplies() {
+        let store = AgentStore()
+        store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)))
+
+        let transition = store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 0)))
+
+        #expect(transition?.from == .blocked)
+        #expect(transition?.to == .working)
+        #expect(store.agents[AgentID("wA:p1")]?.status == .working)
+        #expect(store.agents[AgentID("wA:p1")]?.stateChangeSeq == 5)
+    }
+
+    @Test("Only an accepted status change is reported as a transition")
+    @MainActor
+    func transitionOnlyOnStatusChange() {
+        let store = AgentStore()
+        let first = store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 2)))
+        #expect(first?.from == nil)
+        #expect(first?.to == .blocked)
+        #expect(first?.agentId == AgentID("wA:p1"))
+
+        let repeated = store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 2)))
+        #expect(repeated == nil)
+
+        #expect(store.applyEvent(.paneFocused(paneId: "wA:p1", workspaceId: "wA")) == nil)
+        #expect(store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p2", agent: nil))) == nil)
+    }
+
+    @Test("agentStatusChanged reports nothing for a stale seq or an untracked pane")
+    @MainActor
+    func agentStatusChangedIgnoredCases() {
+        let store = AgentStore()
+        store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 7)))
+
+        let stale = store.applyEvent(.agentStatusChanged(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 6))
+        #expect(stale == nil)
+        #expect(store.agents[AgentID("wA:p1")]?.status == .working)
+
+        let untracked = store.applyEvent(.agentStatusChanged(paneId: "wA:p9", agentStatus: "blocked", stateChangeSeq: 1))
+        #expect(untracked == nil)
+        #expect(store.agents[AgentID("wA:p9")] == nil)
+
+        let accepted = store.applyEvent(.agentStatusChanged(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 8))
+        #expect(accepted?.from == .working)
+        #expect(accepted?.to == .blocked)
+        #expect(accepted?.stateChangeSeq == 8)
+    }
+
+    @Test("Two blocked episodes between resyncs get distinct episode keys")
+    @MainActor
+    func blockedEpisodesHaveDistinctKeys() async {
+        // pane_updated carries no seq, so the stored seq stays put across
+        // episodes. A key built from seq alone made the second blocked
+        // episode look like a duplicate and swallowed its notification.
+        let store = AgentStore()
+        store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 3)))
+
+        let firstBlocked = store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)))
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 0)))
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        let secondBlocked = store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)))
+
+        #expect(firstBlocked?.stateChangeSeq == secondBlocked?.stateChangeSeq)
+        #expect(firstBlocked != nil && secondBlocked != nil)
+        #expect(firstBlocked?.episodeKey != secondBlocked?.episodeKey)
+    }
+}
+
 // MARK: - applyEvent(.paneExited) / .workspacesChanged / .paneFocused
 
 @Suite("AgentStore.applyEvent (misc new cases)")
@@ -459,10 +577,49 @@ struct AttentionTriageTests {
             verdict: .healthy
         )) == 2)
     }
+
+    @Test("Equal priority and dwell fall back to pane id, whatever the input order")
+    func tieBreaksOnPaneId() {
+        let now = Date()
+        let agents = ["w2:p1", "w1:p3", "w1:p1", "w1:p2"].map {
+            Agent(id: AgentID($0), status: .blocked, enteredAt: now)
+        }
+        let expected = ["w1:p1", "w1:p2", "w1:p3", "w2:p1"]
+        #expect(agents.sorted(by: AttentionTriage.ranksBefore).map(\.id.raw) == expected)
+        #expect(agents.reversed().sorted(by: AttentionTriage.ranksBefore).map(\.id.raw) == expected)
+    }
+
+    @Test("Priority outranks dwell, and dwell outranks pane id")
+    func priorityThenDwellThenId() {
+        let now = Date()
+        let longBlocked = Agent(id: AgentID("w9:p9"), status: .blocked, enteredAt: now.addingTimeInterval(-600))
+        let newBlocked = Agent(id: AgentID("w1:p1"), status: .blocked, enteredAt: now)
+        let oldDone = Agent(id: AgentID("w0:p0"), status: .done, enteredAt: now.addingTimeInterval(-3600))
+        let sorted = [oldDone, newBlocked, longBlocked].sorted(by: AttentionTriage.ranksBefore)
+        #expect(sorted.map(\.id.raw) == ["w9:p9", "w1:p1", "w0:p0"])
+    }
 }
 
 @Suite("AgentStore.attentionAgents")
 struct AttentionAgentsTests {
+    @Test("Equal-priority agents with the same dwell keep a stable pane-id order")
+    @MainActor
+    func stableOrderForTies() {
+        let store = AgentStore()
+        let now = Date()
+        for raw in ["w3:p1", "w1:p2", "w2:p7", "w1:p1"] {
+            store.agents[AgentID(raw)] = Agent(id: AgentID(raw), status: .blocked, enteredAt: now)
+        }
+        let first = store.attentionAgents.map(\.id.raw)
+        #expect(first == ["w1:p1", "w1:p2", "w2:p7", "w3:p1"])
+
+        // Mutating the dictionary (a new pane joins, one leaves) must not
+        // reshuffle the rows that were already tied.
+        store.agents[AgentID("w0:p1")] = Agent(id: AgentID("w0:p1"), status: .working, enteredAt: now)
+        store.agents.removeValue(forKey: AgentID("w2:p7"))
+        #expect(store.attentionAgents.map(\.id.raw) == ["w1:p1", "w1:p2", "w3:p1"])
+    }
+
     @Test("Ranks process-gone before silent and includes done in the glance list")
     @MainActor
     func ranksWorstFirst() {
@@ -613,6 +770,7 @@ struct DiagnoseAllRaceTests {
                 id: id,
                 status: .working,
                 stateChangeSeq: 3,
+                enteredAt: Date().addingTimeInterval(-30 * 60),
                 lastOutputAt: Date().addingTimeInterval(-20 * 60),
                 verdict: .healthy
             )

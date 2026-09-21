@@ -26,7 +26,7 @@ struct MCPServerMain {
 
 // MARK: - Revalidation Errors
 
-private enum MCPRevalidationError: Error, CustomStringConvertible {
+private enum MCPRevalidationError: Error, CustomStringConvertible, LocalizedError {
     case paneGone(String)
     case occupantChanged(expected: String, current: String)
     case seqAdvanced(expected: UInt64, current: UInt64)
@@ -47,10 +47,13 @@ private enum MCPRevalidationError: Error, CustomStringConvertible {
             return "Writes not enabled: \(reason)"
         }
     }
+
+    var errorDescription: String? { description }
 }
 
-private struct AgentResolutionError: Error, CustomStringConvertible {
+private struct AgentResolutionError: Error, CustomStringConvertible, LocalizedError {
     let description: String
+    var errorDescription: String? { description }
 }
 
 // MARK: - Rate Limiter
@@ -835,7 +838,15 @@ actor MCPServer {
                         return makeToolError("Revalidation failed: \(error). No input sent.")
                     }
 
-                    try await adapter.prompt(paneId: paneId, text: text)
+                    do {
+                        try await adapter.prompt(paneId: paneId, text: text)
+                    } catch {
+                        return await failClaimedWrite(
+                            actionId: actionId, tool: "agent.say",
+                            params: ["agent_id": agentIdStr, "text_length": "\(text.count)"],
+                            preState: "status=\(status)", error: error
+                        )
+                    }
                     await policy.recordWrite(agentId: agentIdStr)
                     try? await sharedActionStore.markExecuted(actionId)
 
@@ -968,7 +979,15 @@ actor MCPServer {
                 }
 
                 let keys: [String] = level == "escape" ? ["esc"] : ["ctrl+c"]
-                try await adapter.sendKeys(paneId: paneId, keys: keys)
+                do {
+                    try await adapter.sendKeys(paneId: paneId, keys: keys)
+                } catch {
+                    return await failClaimedWrite(
+                        actionId: actionId, tool: "agent.interrupt",
+                        params: ["agent_id": agentIdStr, "level": level],
+                        preState: "status=\(paneInfo.agentStatus)", error: error
+                    )
+                }
                 await policy.recordWrite(agentId: agentIdStr)
                 try? await sharedActionStore.markExecuted(actionId)
 
@@ -1061,7 +1080,16 @@ actor MCPServer {
                     return makeToolError("Revalidation failed: \(error). No input sent.")
                 }
 
-                try await adapter.closePane(paneId: paneId)
+                do {
+                    try await adapter.closePane(paneId: paneId)
+                } catch {
+                    return await failClaimedWrite(
+                        actionId: actionId, tool: "agent.stop",
+                        params: ["agent_id": agentIdStr, "reason": reason],
+                        preState: "status=\(paneInfo.agentStatus)", error: error,
+                        keepForever: true
+                    )
+                }
                 await policy.recordWrite(agentId: agentIdStr)
                 try? await sharedActionStore.markExecuted(actionId)
 
@@ -1214,8 +1242,11 @@ actor MCPServer {
             params["_fp_seq"] = "0"
         }
 
-        guard let actionId = try? await sharedActionStore.create(tool: "session.spawn", params: params) else {
-            return makeToolError("Failed to record spawn action (lock unavailable)")
+        let actionId: String
+        do {
+            actionId = try await sharedActionStore.create(tool: "session.spawn", params: params)
+        } catch {
+            return makeToolError("Failed to record spawn action: \(error)")
         }
 
         // MCP session creation is explicitly auto-allowed. Keep the action in
@@ -1430,6 +1461,29 @@ actor MCPServer {
         return error
     }
 
+    /// A claimed, approved write threw. Record the failure on the shared
+    /// action and in the journal. Without this the row sat in `.executing`
+    /// until the deadline reaper relabelled it "expired while executing",
+    /// so `action.status` misreported a herdr rejection for up to two minutes.
+    private func failClaimedWrite(
+        actionId: String,
+        tool: String,
+        params: [String: String],
+        preState: String,
+        error: Error,
+        keepForever: Bool = false
+    ) async -> [String: Any] {
+        try? await sharedActionStore.markFailed(actionId, detail: "write failed: \(error)")
+        await journal.record(JournalEntry(
+            actionId: actionId, tool: tool,
+            params: params,
+            caller: "mcp", preState: preState,
+            outcome: "failed",
+            keepForever: keepForever
+        ))
+        return makeToolError("\(tool) failed after approval: \(error) (actionId: \(actionId))")
+    }
+
     // MARK: - Answer Key Mapping
 
     /// Map an answer choice to keystrokes, gated on the detected block kind.
@@ -1583,10 +1637,9 @@ actor MCPServer {
             let wsName = workspaceNames[wsId] ?? wsId
             lines.append("\(wsName) (\(wsId)) — \(wsAgents.count) agent\(wsAgents.count == 1 ? "" : "s")")
 
-            // Sort: blocked first, then done, then silent, then working, then idle
-            let sorted = wsAgents.sorted { a, b in
-                statusPriority(a) < statusPriority(b)
-            }
+            // Worst first (gone/blocked, silent, done, rest), then by pane id
+            // so equal-priority rows keep their order between calls.
+            let sorted = wsAgents.sorted(by: AttentionTriage.ranksBefore)
 
             for agent in sorted {
                 let glyph = statusGlyph(agent)
@@ -1611,7 +1664,7 @@ actor MCPServer {
         lines.append(pad("Status", 8) + " " + pad("Name", 20) + " " + pad("Kind", 10) + " " + pad("Workspace", 12) + " " + pad("Pane", 8) + " Verdict")
         lines.append(String(repeating: "─", count: 90))
 
-        let sorted = agents.sorted { statusPriority($0) < statusPriority($1) }
+        let sorted = agents.sorted(by: AttentionTriage.ranksBefore)
         for agent in sorted {
             let glyph = statusGlyph(agent)
             let kindStr = agentKindString(agent.kind)
@@ -1863,10 +1916,6 @@ actor MCPServer {
         case .idle: return "🟢"
         case .unknown: return "⚪"
         }
-    }
-
-    nonisolated private static func statusPriority(_ agent: Agent) -> Int {
-        AttentionTriage.priority(agent)
     }
 
     nonisolated private static func verdictName(_ verdict: Verdict) -> String {

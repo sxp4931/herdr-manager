@@ -24,6 +24,15 @@ import SQLite3
 ///   menu-bar refresh does not re-read gigabyte logs. It is pruned to files
 ///   seen in the current scan. The All-time usage window needs those
 ///   historical events; dropping them would under-count.
+/// - Cached events older than every finite window are folded into one event
+///   per (provider, session, model, cwd) by `TokenUsageCompaction`, so the
+///   cache grows with sessions rather than with every logged turn. The
+///   folded totals, sessions, models, attribution, and cost are unchanged;
+///   `ambiguousAttributionCount` counts folded events once, which only
+///   matters to callers that need more than "any ambiguity".
+/// - Each refresh resolves a (provider, model) price and a (provider, cwd)
+///   attribution once, not once per event and window: the price-book lookup
+///   lowercases and sorts every entry, and cwd matching hits the filesystem.
 public actor LocalTokenMeter {
     private let homeDirectory: URL
     private let iso8601Formatter: ISO8601DateFormatter
@@ -31,6 +40,9 @@ public actor LocalTokenMeter {
     /// Avoids re-reading multi-gigabyte JSONL/SQLite logs every 30s.
     private var fileEventCache: [String: CachedFileEvents] = [:]
     private var seenCacheKeysThisScan: Set<String> = []
+    /// Events before this date only count toward All-time in the current
+    /// scan, so the cache may keep them folded.
+    private var compactionCutoff: Date = .distantPast
 
     public init(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) {
         self.homeDirectory = homeDirectory
@@ -52,6 +64,7 @@ public actor LocalTokenMeter {
         }
 
         seenCacheKeysThisScan.removeAll(keepingCapacity: true)
+        compactionCutoff = TokenUsageCompaction.cutoff(now: now, calendar: calendar)
         // Fold each file into the window accumulators so a 30s refresh never
         // concatenates every cached event into a second all-provider array.
         // `fileEventCache` still retains per-file events so the All-time
@@ -1154,15 +1167,28 @@ public actor LocalTokenMeter {
             fileEventCache.removeValue(forKey: key)
             return []
         }
-        if let cached = fileEventCache[key],
+        if var cached = fileEventCache[key],
            cached.fingerprint == fingerprint,
-           cached.extra == extra {
+           cached.extra == extra,
+           cached.compactedBefore <= compactionCutoff {
+            // The cutoff only moves forward with the clock. Folding again
+            // keeps a long-lived cache from growing with each new month.
+            if cached.compactedBefore < compactionCutoff {
+                cached.events = TokenUsageCompaction.compact(cached.events, before: compactionCutoff)
+                cached.compactedBefore = compactionCutoff
+                fileEventCache[key] = cached
+            }
             return cached.events
         }
-        let events = autoreleasepool { scan() }
+        // A cutoff that moved back (clock change, time zone, test `now`)
+        // would need history that was already folded, so read the file again.
+        let events = autoreleasepool {
+            TokenUsageCompaction.compact(scan(), before: compactionCutoff)
+        }
         fileEventCache[key] = CachedFileEvents(
             fingerprint: fingerprint,
             extra: extra,
+            compactedBefore: compactionCutoff,
             events: events
         )
         return events
@@ -1195,12 +1221,123 @@ private struct FileFingerprint: Equatable {
 private struct CachedFileEvents {
     var fingerprint: FileFingerprint
     var extra: String
+    /// `events` holds folded history for dates before this cutoff.
+    var compactedBefore: Date
     var events: [TokenUsageEvent]
+}
+
+// MARK: - History compaction
+
+/// Folds usage events that can only land in the All-time window.
+///
+/// Events before `cutoff(now:calendar:)` are merged per (provider, session,
+/// model, cwd, split/total-only). Everything the aggregator reads from them
+/// is preserved: token sums, actions, the session and model sets, agent
+/// attribution (provider + cwd), and pricing (provider + model). Cost is
+/// linear in the token counts except where uncached input is clamped at
+/// zero, so events that hit that clamp are never merged.
+enum TokenUsageCompaction {
+    /// The earliest start of the hour, day, week, and month windows.
+    static func cutoff(now: Date, calendar: Calendar) -> Date {
+        UsageWindow.allCases
+            .filter { $0 != .allTime }
+            .map { $0.startDate(now: now, calendar: calendar) }
+            .min() ?? now
+    }
+
+    static func compact(_ events: [TokenUsageEvent], before cutoff: Date) -> [TokenUsageEvent] {
+        var kept: [TokenUsageEvent] = []
+        var groups: [Key: Group] = [:]
+        var order: [Key] = []
+
+        for event in events {
+            guard event.date < cutoff, isLinearlyPriced(event.usage) else {
+                kept.append(event)
+                continue
+            }
+            let key = Key(
+                provider: event.provider,
+                sessionID: event.sessionID,
+                model: event.model,
+                cwd: event.cwd,
+                isSplit: event.usage.isSplit
+            )
+            if groups[key] == nil {
+                groups[key] = Group(first: event)
+                order.append(key)
+            } else {
+                groups[key]?.add(event)
+            }
+        }
+
+        // Nothing to fold: hand back the original array rather than a copy.
+        guard groups.count < events.count - kept.count else { return events }
+
+        kept.reserveCapacity(kept.count + order.count)
+        for key in order {
+            if let group = groups[key] {
+                kept.append(group.event)
+            }
+        }
+        return kept
+    }
+
+    /// Whether `TokenMeterPricing.cost(for:)` is linear for this usage, so a
+    /// sum of such usages costs the same as the sum of their costs.
+    private static func isLinearlyPriced(_ usage: TokenUsage) -> Bool {
+        guard usage.isSplit else { return true }
+        return usage.inputTokens
+            >= usage.cacheReadTokens + usage.cacheWrite5mTokens + usage.cacheWrite1hTokens
+    }
+
+    private struct Key: Hashable {
+        let provider: TokenMeterProvider
+        let sessionID: String
+        let model: String?
+        let cwd: String?
+        let isSplit: Bool
+    }
+
+    private struct Group {
+        let first: TokenUsageEvent
+        var usage: TokenUsage
+        var actions: Int
+        var latest: Date
+        var count = 1
+
+        init(first: TokenUsageEvent) {
+            self.first = first
+            self.usage = first.usage
+            self.actions = first.actions
+            self.latest = first.date
+        }
+
+        mutating func add(_ event: TokenUsageEvent) {
+            usage.add(event.usage)
+            actions += event.actions
+            latest = max(latest, event.date)
+            count += 1
+        }
+
+        var event: TokenUsageEvent {
+            guard count > 1 else { return first }
+            return TokenUsageEvent(
+                id: "\(first.id)+\(count - 1)",
+                sessionID: first.sessionID,
+                provider: first.provider,
+                model: first.model,
+                cwd: first.cwd,
+                date: latest,
+                usage: usage,
+                actions: actions
+            )
+        }
+    }
 }
 
 // MARK: - Aggregation
 
-private struct TokenMeterAccumulator {
+struct TokenMeterAccumulator {
     var usage = TokenUsage()
     var cost: Double = 0
     var pricedEvents = 0
@@ -1210,17 +1347,21 @@ private struct TokenMeterAccumulator {
     var models: Set<String> = []
     var actions = 0
 
-    mutating func add(_ event: TokenUsageEvent, priceBook: TokenMeterPriceBook) {
+    /// - Parameters:
+    ///   - sessionKey: `provider:sessionID`, built once per event.
+    ///   - eventCost: The event's priced cost, or nil when its model has no
+    ///     price.
+    mutating func add(_ event: TokenUsageEvent, sessionKey: String, cost eventCost: Double?) {
         usage.add(event.usage)
-        sessions.insert("\(event.provider.rawValue):\(event.sessionID)")
+        sessions.insert(sessionKey)
         if let model = event.model, !model.isEmpty { models.insert(model) }
         actions += event.actions
 
-        guard let pricing = priceBook.pricing(for: event.provider, model: event.model) else {
+        guard let eventCost else {
             hasUnpricedUsage = true
             return
         }
-        cost += pricing.cost(for: event.usage)
+        cost += eventCost
         pricedEvents += 1
         costIsEstimated = costIsEstimated || !event.usage.isSplit || event.model == nil
     }
@@ -1238,12 +1379,21 @@ private struct TokenMeterAccumulator {
     }
 }
 
-private struct TokenMeterAggregator {
-    let agents: [Agent]
+/// Folds usage events into per-window accumulators for one refresh.
+///
+/// Everything that does not depend on the event is resolved once: window
+/// start dates, agent cwds (symlink resolution), and, memoized per key,
+/// the price for a (provider, model) and the agent for a (provider, cwd).
+struct TokenMeterAggregator {
     let priceBook: TokenMeterPriceBook
     let now: Date
-    let calendar: Calendar
-    let windows: [UsageWindow]
+    private let windowStarts: [(window: UsageWindow, start: Date)]
+    /// Every window, empty. Copied on first sight of a provider, model, or
+    /// agent so each summary map lists all windows.
+    private let emptyAccumulatorMap: [UsageWindow: TokenMeterAccumulator]
+    private let candidates: [AgentCandidate]
+    private var pricingCache: [PricingKey: TokenMeterPricing?] = [:]
+    private var attributionCache: [AttributionKey: Attribution] = [:]
     var overall: [UsageWindow: TokenMeterAccumulator]
     var providerAccumulators: [TokenMeterProvider: [UsageWindow: TokenMeterAccumulator]] = [:]
     var agentAccumulators: [AgentID: [UsageWindow: TokenMeterAccumulator]] = [:]
@@ -1251,12 +1401,27 @@ private struct TokenMeterAggregator {
     var ambiguous = 0
 
     init(agents: [Agent], priceBook: TokenMeterPriceBook, now: Date, calendar: Calendar) {
-        self.agents = agents
         self.priceBook = priceBook
         self.now = now
-        self.calendar = calendar
-        self.windows = UsageWindow.allCases
-        self.overall = Self.makeAccumulatorMap(windows: UsageWindow.allCases)
+        self.windowStarts = UsageWindow.allCases.map { window in
+            (window: window, start: window.startDate(now: now, calendar: calendar))
+        }
+        self.candidates = agents.map { agent in
+            AgentCandidate(
+                id: agent.id,
+                // opencode is one CLI that can run deepseek/qwen/local
+                // models, so it matches any priced event whose working
+                // directory matches, regardless of the event's provider.
+                provider: agent.kind == .opencode ? nil : TokenMeterProvider(agentKind: agent.kind),
+                matchesAnyProvider: agent.kind == .opencode,
+                cwd: Self.normalizedAgentCWD(agent.cwd)
+            )
+        }
+        let emptyMap = Dictionary(
+            uniqueKeysWithValues: UsageWindow.allCases.map { ($0, TokenMeterAccumulator()) }
+        )
+        self.emptyAccumulatorMap = emptyMap
+        self.overall = emptyMap
     }
 
     mutating func add(_ events: [TokenUsageEvent]) {
@@ -1267,26 +1432,34 @@ private struct TokenMeterAggregator {
 
     mutating func add(_ event: TokenUsageEvent) {
         guard event.date <= now else { return }
-        let attribution = Self.matchingAgent(for: event, agents: agents)
+        let attribution = matchingAgent(for: event)
         if attribution.ambiguous { ambiguous += 1 }
+        let sessionKey = "\(event.provider.rawValue):\(event.sessionID)"
+        let cost = pricing(for: event).map { $0.cost(for: event.usage) }
+        let model = event.model.flatMap { $0.isEmpty ? nil : $0 }
+        // A local, so the `default:` autoclosures below do not capture self
+        // while a nested map of self is being mutated.
+        let emptyMap = emptyAccumulatorMap
 
-        for window in windows where event.date >= window.startDate(now: now, calendar: calendar) {
-            overall[window, default: TokenMeterAccumulator()].add(event, priceBook: priceBook)
+        // Mutate the nested maps in place. Copying a map out and back in
+        // duplicated every accumulator's session and model sets per event.
+        for (window, start) in windowStarts where event.date >= start {
+            overall[window, default: TokenMeterAccumulator()]
+                .add(event, sessionKey: sessionKey, cost: cost)
+            providerAccumulators[event.provider, default: emptyMap][
+                window, default: TokenMeterAccumulator()
+            ].add(event, sessionKey: sessionKey, cost: cost)
 
-            var providerMap = providerAccumulators[event.provider] ?? Self.makeAccumulatorMap(windows: windows)
-            providerMap[window, default: TokenMeterAccumulator()].add(event, priceBook: priceBook)
-            providerAccumulators[event.provider] = providerMap
-
-            if let model = event.model, !model.isEmpty {
-                var modelMap = modelAccumulators[model] ?? Self.makeAccumulatorMap(windows: windows)
-                modelMap[window, default: TokenMeterAccumulator()].add(event, priceBook: priceBook)
-                modelAccumulators[model] = modelMap
+            if let model {
+                modelAccumulators[model, default: emptyMap][
+                    window, default: TokenMeterAccumulator()
+                ].add(event, sessionKey: sessionKey, cost: cost)
             }
 
             if let agentID = attribution.agentID {
-                var agentMap = agentAccumulators[agentID] ?? Self.makeAccumulatorMap(windows: windows)
-                agentMap[window, default: TokenMeterAccumulator()].add(event, priceBook: priceBook)
-                agentAccumulators[agentID] = agentMap
+                agentAccumulators[agentID, default: emptyMap][
+                    window, default: TokenMeterAccumulator()
+                ].add(event, sessionKey: sessionKey, cost: cost)
             }
         }
     }
@@ -1302,32 +1475,37 @@ private struct TokenMeterAggregator {
         )
     }
 
-    private static func makeAccumulatorMap(
-        windows: [UsageWindow]
-    ) -> [UsageWindow: TokenMeterAccumulator] {
-        Dictionary(uniqueKeysWithValues: windows.map { ($0, TokenMeterAccumulator()) })
+    private mutating func pricing(for event: TokenUsageEvent) -> TokenMeterPricing? {
+        let key = PricingKey(provider: event.provider, model: event.model)
+        if let cached = pricingCache[key] {
+            return cached
+        }
+        let pricing = priceBook.pricing(for: event.provider, model: event.model)
+        // `updateValue` stores a nil price too; assigning nil would remove it.
+        pricingCache.updateValue(pricing, forKey: key)
+        return pricing
     }
 
-    private static func matchingAgent(
-        for event: TokenUsageEvent,
-        agents: [Agent]
-    ) -> (agentID: AgentID?, ambiguous: Bool) {
+    private mutating func matchingAgent(for event: TokenUsageEvent) -> Attribution {
         guard let eventCWD = event.cwd else {
-            return (nil, false)
+            return Attribution(agentID: nil, ambiguous: false)
         }
-        let matches = agents.filter { agent in
-            if agent.kind == .opencode {
-                // opencode is one CLI that can run deepseek/qwen/local models,
-                // so it matches any priced event whose working directory
-                // matches, regardless of the event's provider.
-                return normalizedAgentCWD(agent.cwd) == eventCWD
-            }
-            return TokenMeterProvider(agentKind: agent.kind) == event.provider
-                && normalizedAgentCWD(agent.cwd) == eventCWD
+        let key = AttributionKey(provider: event.provider, cwd: eventCWD)
+        if let cached = attributionCache[key] {
+            return cached
         }
-        if matches.count == 1 { return (matches[0].id, false) }
-        if matches.count > 1 { return (nil, true) }
-        return (nil, false)
+        let matches = candidates.filter { candidate in
+            (candidate.matchesAnyProvider || candidate.provider == event.provider)
+                && candidate.cwd == eventCWD
+        }
+        let attribution: Attribution
+        if matches.count == 1 {
+            attribution = Attribution(agentID: matches[0].id, ambiguous: false)
+        } else {
+            attribution = Attribution(agentID: nil, ambiguous: matches.count > 1)
+        }
+        attributionCache[key] = attribution
+        return attribution
     }
 
     private static func normalizedAgentCWD(_ path: String) -> String? {
@@ -1336,5 +1514,27 @@ private struct TokenMeterAggregator {
             .standardizedFileURL
             .resolvingSymlinksInPath()
             .path
+    }
+
+    private struct AgentCandidate {
+        let id: AgentID
+        let provider: TokenMeterProvider?
+        let matchesAnyProvider: Bool
+        let cwd: String?
+    }
+
+    private struct PricingKey: Hashable {
+        let provider: TokenMeterProvider
+        let model: String?
+    }
+
+    private struct AttributionKey: Hashable {
+        let provider: TokenMeterProvider
+        let cwd: String
+    }
+
+    private struct Attribution {
+        let agentID: AgentID?
+        let ambiguous: Bool
     }
 }

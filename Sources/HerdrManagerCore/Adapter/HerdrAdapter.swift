@@ -73,14 +73,23 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     private func onIO<T: Sendable>(
         _ body: @escaping @Sendable () throws -> T
     ) async throws -> T {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
-            ioQueue.async {
-                do {
-                    continuation.resume(returning: try body())
-                } catch {
-                    continuation.resume(throwing: error)
+        do {
+            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+                ioQueue.async {
+                    do {
+                        continuation.resume(returning: try body())
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
                 }
             }
+        } catch let error as NDJSONClientError {
+            // herdr is not accepting connections: it stopped or is restarting,
+            // and whatever answers next may be a different build.
+            if case .connectFailed = error {
+                clearProtocolReading()
+            }
+            throw error
         }
     }
 
@@ -96,7 +105,9 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         stateLock.unlock()
     }
 
-    private func setLatestProtocol(_ version: Int) {
+    /// Internal (not private) so `@testable` tests can seed a reading
+    /// without a live herdr.
+    func setLatestProtocol(_ version: Int) {
         stateLock.lock()
         _latestProtocolVersion = version
         stateLock.unlock()
@@ -106,6 +117,15 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         stateLock.lock()
         defer { stateLock.unlock() }
         return _latestProtocolVersion
+    }
+
+    /// Forget the protocol reading once herdr is known to have gone away.
+    /// The next server may be a different build; gating writes on the old
+    /// reading could send a write to a herdr that no longer supports it.
+    /// 0 reads as "protocol unknown" (writes off) until the next snapshot,
+    /// which is also what makes the MCP write gate re-read it.
+    private func clearProtocolReading() {
+        setLatestProtocol(0)
     }
 
     public func connect() async throws {
@@ -576,6 +596,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             guard !Task.isCancelled else { return }
             if wasConnected {
                 setConnectionState(.disconnected)
+                clearProtocolReading()
                 eventContinuation?.yield(.disconnected)
                 wasConnected = false
             }

@@ -144,10 +144,11 @@ struct TokenMeterPricingTests {
         #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high")?.inputPerMillion == 2.0)
         #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high")?.cacheReadPerMillion == 0.50)
         #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high")?.outputPerMillion == 6.0)
-        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high-fast")?.inputPerMillion == 2.0)
-        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high-fast")?.cacheReadPerMillion == 0.50)
-        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high-fast")?.outputPerMillion == 6.0)
-        #expect(book.pricing(for: .cursor, model: "cursor-grok-4-6-high-fast")?.outputPerMillion == 6.0)
+        // Cursor bills Grok 4.6 Fast at 2x the standard rate.
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high-fast")?.inputPerMillion == 4.0)
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high-fast")?.cacheReadPerMillion == 1.0)
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4.6-high-fast")?.outputPerMillion == 12.0)
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4-6-high-fast")?.outputPerMillion == 12.0)
         #expect(book.pricing(for: .cursor, model: "grok-4.6")?.outputPerMillion == 6.0)
         #expect(TokenMeterProvider(rawValue: "grok-build") == .grok)
         #expect(TokenMeterProvider(rawValue: "grok-build-plan") == .grok)
@@ -177,6 +178,143 @@ struct TokenMeterPricingTests {
         #expect(book.pricing(for: .deepseek, model: "deepseek-v4-pro-0813")?.outputPerMillion == 0.87)
     }
 
+    @Test("Resolves September 2026 Claude, OpenAI, Grok, and Cursor list prices")
+    func september2026ListPrices() {
+        let book = TokenMeterPriceBook.defaults
+
+        // Fable 5.1 / Mythos 5.1 bill cache hits at 0.025x input.
+        for model in ["claude-fable-5-1", "claude-fable-5.1", "claude-mythos-5-1", "claude-mythos-5.1"] {
+            let pricing = book.pricing(for: .claude, model: model)
+            #expect(pricing?.inputPerMillion == 10.0)
+            #expect(pricing?.cacheReadPerMillion == 0.25)
+            #expect(pricing?.cacheWrite5mPerMillion == 12.50)
+            #expect(pricing?.cacheWrite1hPerMillion == 20.0)
+            #expect(pricing?.outputPerMillion == 50.0)
+        }
+        #expect(book.pricing(for: .claude, model: "claude-fable-5")?.cacheReadPerMillion == 1.0)
+        for model in ["claude-opus-4-7", "claude-opus-4.7", "claude-opus-4-6", "claude-opus-4.6"] {
+            let pricing = book.pricing(for: .claude, model: model)
+            #expect(pricing?.inputPerMillion == 5.0)
+            #expect(pricing?.cacheReadPerMillion == 0.50)
+            #expect(pricing?.cacheWrite5mPerMillion == 6.25)
+            #expect(pricing?.cacheWrite1hPerMillion == 10.0)
+            #expect(pricing?.outputPerMillion == 25.0)
+        }
+        #expect(book.pricing(for: .claude, model: "claude-sonnet-5")?.outputPerMillion == 10.0)
+        #expect(book.pricing(for: .cursor, model: "claude-opus-5-fast")?.inputPerMillion == 10.0)
+        #expect(book.pricing(for: .cursor, model: "claude-opus-5-fast")?.cacheReadPerMillion == 1.0)
+        #expect(book.pricing(for: .cursor, model: "claude-opus-4-8-fast")?.outputPerMillion == 50.0)
+
+        let astra = book.pricing(for: .codex, model: "gpt-6-astra")
+        #expect(astra?.inputPerMillion == 10.0)
+        #expect(astra?.cacheReadPerMillion == 1.0)
+        #expect(astra?.cacheWrite5mPerMillion == 12.50)
+        #expect(astra?.outputPerMillion == 50.0)
+        let sol = book.pricing(for: .codex, model: "gpt-5.6-sol")
+        #expect(sol?.inputPerMillion == 4.0)
+        #expect(sol?.cacheReadPerMillion == 0.40)
+        #expect(sol?.cacheWrite5mPerMillion == 5.0)
+        #expect(sol?.outputPerMillion == 20.0)
+        #expect(book.pricing(for: .codex, model: "gpt-5.6-cyber")?.inputPerMillion == 12.50)
+        #expect(book.pricing(for: .codex, model: "gpt-5.6-cyber")?.cacheWrite5mPerMillion == 15.625)
+        #expect(book.pricing(for: .codex, model: "gpt-5.5-cyber")?.cacheReadPerMillion == 1.25)
+        #expect(book.pricing(for: .codex, model: "gpt-5.5-cyber")?.outputPerMillion == 75.0)
+
+        for model in ["grok-4.7", "grok-4-7"] {
+            let pricing = book.pricing(for: .grok, model: model)
+            #expect(pricing?.inputPerMillion == 2.0)
+            #expect(pricing?.cacheReadPerMillion == 0.50)
+            #expect(pricing?.outputPerMillion == 6.0)
+        }
+        for model in ["grok-4.7-build-fast", "grok-4-7-build-fast", "grok-4.7-fast", "grok-4-7-fast"] {
+            let pricing = book.pricing(for: .grok, model: model)
+            #expect(pricing?.inputPerMillion == 4.0)
+            #expect(pricing?.cacheReadPerMillion == 1.0)
+            #expect(pricing?.outputPerMillion == 12.0)
+        }
+
+        let composer = book.pricing(for: .cursor, model: "composer-2.5")
+        #expect(composer?.inputPerMillion == 0.50)
+        #expect(composer?.cacheReadPerMillion == 0.20)
+        #expect(composer?.outputPerMillion == 2.50)
+        let composerFast = book.pricing(for: .cursor, model: "composer-2.5-fast")
+        #expect(composerFast?.inputPerMillion == 3.0)
+        #expect(composerFast?.cacheReadPerMillion == 0.50)
+        #expect(composerFast?.outputPerMillion == 15.0)
+    }
+
+    @Test("Cursor Grok Fast ids price at 2x; standard-speed effort ids use the base key")
+    func cursorGrokFastVariants() {
+        let book = TokenMeterPriceBook.defaults
+        let standard = TokenMeterPricing(inputPerMillion: 2.0, cacheReadPerMillion: 0.50, outputPerMillion: 6.0)
+        let fast = TokenMeterPricing(inputPerMillion: 4.0, cacheReadPerMillion: 1.0, outputPerMillion: 12.0)
+
+        for version in ["4.7", "4-7", "4.6", "4-6"] {
+            #expect(book.entries["cursor-grok-\(version)"] == standard)
+            for effort in ["", "-low", "-medium", "-high", "-xhigh"] {
+                let model = "cursor-grok-\(version)\(effort)"
+                #expect(book.pricing(for: .cursor, model: model) == standard)
+                #expect(book.entries["\(model)-fast"] == fast)
+                #expect(book.pricing(for: .cursor, model: "\(model)-fast") == fast)
+            }
+        }
+    }
+
+    @Test("The longest contained fragment wins over a shorter family key")
+    func longestFragmentWins() {
+        let book = TokenMeterPriceBook.defaults
+
+        // Each specific id contains the general key, yet must resolve to its
+        // own, differently priced entry.
+        let collisions: [(TokenMeterProvider, String, String)] = [
+            (.claude, "claude-fable-5-1", "claude-fable-5"),
+            (.claude, "claude-mythos-5.1", "claude-mythos-5"),
+            (.cursor, "claude-opus-5-fast", "claude-opus-5"),
+            (.cursor, "claude-opus-4-8-fast", "claude-opus-4-8"),
+            (.codex, "gpt-5.6-sol", "gpt-5"),
+            (.codex, "gpt-5.6-cyber", "gpt-5"),
+            (.codex, "gpt-5.5-cyber", "gpt-5.5"),
+            (.grok, "grok-4.7-build-fast", "grok-4.7"),
+            (.grok, "grok-4-7-fast", "grok-4-7"),
+            (.cursor, "cursor-grok-4.7-fast", "cursor-grok-4.7"),
+            (.cursor, "cursor-grok-4.7-xhigh-fast", "cursor-grok-4.7"),
+            (.cursor, "cursor-grok-4-6-xhigh-fast", "cursor-grok-4-6"),
+            (.cursor, "composer-2.5-fast", "composer-2.5"),
+        ]
+        for (provider, specific, general) in collisions {
+            #expect(specific.contains(general))
+            #expect(book.entries[specific] != nil)
+            #expect(book.pricing(for: provider, model: specific) == book.entries[specific])
+            #expect(book.pricing(for: provider, model: specific) != book.pricing(for: provider, model: general))
+        }
+
+        // Longer logged ids resolve through the most specific key they contain.
+        #expect(book.pricing(for: .cursor, model: "cursor-composer-2.5") == book.entries["composer-2.5"])
+        #expect(book.pricing(for: .cursor, model: "cursor-composer-2-5-fast") == book.entries["composer-2-5-fast"])
+        #expect(book.pricing(for: .codex, model: "gpt-5.3-codex-low") == book.entries["gpt-5.3-codex"])
+        #expect(book.pricing(for: .cursor, model: "cursor-grok-4-7-xhigh") == book.entries["cursor-grok-4-7"])
+
+        // Unreleased siblings stay unpriced instead of borrowing a neighbour.
+        #expect(book.pricing(for: .grok, model: "grok-4.8") == nil)
+        #expect(book.pricing(for: .codex, model: "gpt-6-nova") == nil)
+        #expect(book.pricing(for: .cursor, model: "composer-3") == nil)
+    }
+
+    @Test("New dotted keys have identically priced hyphenated twins")
+    func dottedAndHyphenatedTwinsAgree() {
+        let book = TokenMeterPriceBook.defaults
+        let dotted = [
+            "claude-fable-5.1", "claude-mythos-5.1", "claude-opus-4.7", "claude-opus-4.6",
+            "claude-opus-4.8-fast", "grok-4.7", "grok-4.7-fast", "grok-4.7-build-fast",
+            "composer-2.5", "composer-2.5-fast",
+        ]
+        for key in dotted {
+            let twin = key.replacingOccurrences(of: ".", with: "-")
+            #expect(book.entries[key] != nil)
+            #expect(book.entries[key] == book.entries[twin])
+        }
+    }
+
     @Test("Merges missing default model prices without overwriting edits")
     func mergingMissingDefaultsKeepsOverrides() {
         let custom = TokenMeterPricing(inputPerMillion: 9, outputPerMillion: 11)
@@ -199,7 +337,9 @@ struct TokenMeterPricingTests {
             (.kimi, "kimi-k2.7-code"),
             (.kimi, nil),
             (.grok, "grok-4.6"),
+            (.grok, "grok-4.7-build-fast"),
             (.codex, "gpt-5.2"),
+            (.codex, "gpt-6-astra"),
             (.claude, "claude-sonnet-4.5"),
             (.claude, "claude-future-9"),
             (.kimi, "kimi-unreleased-9"),
@@ -214,7 +354,8 @@ struct TokenMeterPricingTests {
     func suggestedPricingDoesNotLeakIntoPricing() {
         let book = TokenMeterPriceBook.defaults
 
-        let grokUnknown = "grok-4.7-fast"
+        // grok-4.7* is priced now; use a sibling that contains no priced id.
+        let grokUnknown = "grok-4.9-fast"
         let grokHint = book.suggestedPricing(for: .grok, model: grokUnknown)
         #expect(grokHint == book.pricing(for: .grok, model: "grok-4.20"))
         #expect(book.pricing(for: .grok, model: grokUnknown) == nil)
@@ -1129,6 +1270,313 @@ struct BoundedUsageLogIOTests {
     private func utcCalendar() -> Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar
+    }
+
+    private func date(_ string: String) -> Date {
+        let formatter = ISO8601DateFormatter()
+        return formatter.date(from: string)!
+    }
+}
+
+@Suite("Token meter history compaction and aggregation")
+struct TokenMeterCompactionTests {
+    @Test("The compaction cutoff is the earliest finite window start")
+    func compactionCutoff() {
+        let calendar = utcCalendar()
+        #expect(
+            TokenUsageCompaction.cutoff(now: date("2026-01-15T13:00:00Z"), calendar: calendar)
+                == date("2026-01-01T00:00:00Z")
+        )
+        // Thirty minutes into a month that starts on a Sunday, the rolling
+        // hour reaches back further than the day, week, and month.
+        #expect(
+            TokenUsageCompaction.cutoff(now: date("2026-02-01T00:30:00Z"), calendar: calendar)
+                == date("2026-01-31T23:30:00Z")
+        )
+    }
+
+    @Test("Compaction folds pre-window history into one event per session, model, and cwd")
+    func compactionFoldsHistory() {
+        let events = historyFixture()
+        let cutoff = date("2026-01-01T00:00:00Z")
+
+        let compacted = TokenUsageCompaction.compact(events, before: cutoff)
+
+        // 10 December events in 6 groups, plus 2 January events left alone.
+        #expect(compacted.count == 8)
+        let ids = Set(compacted.map(\.id))
+        #expect(ids.contains("recent-claude"))
+        #expect(ids.contains("recent-codex"))
+        // A group of one keeps the original event.
+        #expect(ids.contains("haiku-1"))
+        #expect(compacted.filter { $0.date < cutoff }.count == 6)
+
+        let sonnet = compacted.first {
+            $0.date < cutoff && $0.sessionID == "a" && $0.model == "claude-sonnet-4.5"
+        }
+        #expect(sonnet?.usage.inputTokens == 3_000)
+        #expect(sonnet?.usage.cacheReadTokens == 1_900)
+        #expect(sonnet?.usage.outputTokens == 130)
+        #expect(sonnet?.actions == 3)
+        #expect(sonnet?.date == date("2025-12-03T10:00:00Z"))
+
+        let grok = compacted.first { $0.provider == .grok }
+        #expect(grok?.usage.isSplit == false)
+        #expect(grok?.usage.totalTokens == 15_000)
+    }
+
+    @Test("Compacted history produces the same summaries in every window and bucket")
+    func compactionPreservesSummaries() {
+        let events = historyFixture()
+        let now = date("2026-01-15T13:00:00Z")
+        let calendar = utcCalendar()
+        let agents = [
+            Agent(id: AgentID("w1:p1"), kind: .claude, cwd: "/repo"),
+            Agent(id: AgentID("w1:p2"), kind: .codex, cwd: "/repo"),
+        ]
+        let compacted = TokenUsageCompaction.compact(
+            events,
+            before: TokenUsageCompaction.cutoff(now: now, calendar: calendar)
+        )
+        #expect(compacted.count < events.count)
+
+        var original = TokenMeterAggregator(agents: agents, priceBook: priceBook, now: now, calendar: calendar)
+        original.add(events)
+        var folded = TokenMeterAggregator(agents: agents, priceBook: priceBook, now: now, calendar: calendar)
+        folded.add(compacted)
+        let expected = original.snapshot()
+        let actual = folded.snapshot()
+
+        for window in UsageWindow.allCases {
+            expectEquivalent(expected.overallSummary(for: window), actual.overallSummary(for: window))
+            for provider in [TokenMeterProvider.claude, .codex, .grok] {
+                expectEquivalent(
+                    expected.providerSummary(for: provider, window: window),
+                    actual.providerSummary(for: provider, window: window)
+                )
+            }
+            for model in ["claude-sonnet-4.5", "claude-haiku-4.5", "grok-4.6", "zz-unpriced"] {
+                expectEquivalent(
+                    expected.modelSummary(for: model, window: window),
+                    actual.modelSummary(for: model, window: window)
+                )
+            }
+            for agent in agents {
+                expectEquivalent(
+                    expected.agentSummary(for: agent.id, window: window),
+                    actual.agentSummary(for: agent.id, window: window)
+                )
+            }
+        }
+
+        // Not vacuous: history counts in All-time only, and it is priced.
+        let allTime = actual.overallSummary(for: .allTime)
+        #expect(allTime.usage.inputTokens == 5_810)
+        #expect(allTime.sessions == 4)
+        #expect(allTime.hasUnpricedUsage)
+        #expect(allTime.costUSD != nil)
+        #expect(actual.overallSummary(for: .month).usage.inputTokens == 1_000)
+        #expect(actual.agentSummary(for: AgentID("w1:p2"), window: .allTime).usage.inputTokens == 600)
+    }
+
+    @Test("Compaction keeps events whose cost is clamped, so their price is unchanged")
+    func compactionKeepsClampedEvents() {
+        let now = date("2026-01-15T13:00:00Z")
+        let calendar = utcCalendar()
+        // More cache reads than input tokens clamps uncached input to zero.
+        // Summing it with a normal event would un-clamp and change the cost.
+        let events = [
+            event("clamped", session: "a", model: "claude-sonnet-4.5", at: "2025-12-02T10:00:00Z",
+                  usage: TokenUsage(inputTokens: 10, cacheReadTokens: 50, outputTokens: 1)),
+            event("normal", session: "a", model: "claude-sonnet-4.5", at: "2025-12-03T10:00:00Z",
+                  usage: TokenUsage(inputTokens: 100, outputTokens: 1)),
+        ]
+
+        let compacted = TokenUsageCompaction.compact(
+            events,
+            before: TokenUsageCompaction.cutoff(now: now, calendar: calendar)
+        )
+
+        #expect(Set(compacted.map(\.id)) == ["clamped", "normal"])
+        var original = TokenMeterAggregator(agents: [], priceBook: priceBook, now: now, calendar: calendar)
+        original.add(events)
+        var folded = TokenMeterAggregator(agents: [], priceBook: priceBook, now: now, calendar: calendar)
+        folded.add(compacted)
+        expectEquivalent(
+            original.snapshot().overallSummary(for: .allTime),
+            folded.snapshot().overallSummary(for: .allTime)
+        )
+    }
+
+    @Test("Attribution is resolved per provider, not just per directory")
+    func attributionIsPerProvider() {
+        let now = date("2026-01-15T13:00:00Z")
+        let opencode = Agent(id: AgentID("w1:p1"), kind: .opencode, cwd: "/repo")
+        let claude = Agent(id: AgentID("w1:p2"), kind: .claude, cwd: "/repo")
+        var aggregator = TokenMeterAggregator(
+            agents: [opencode, claude],
+            priceBook: priceBook,
+            now: now,
+            calendar: utcCalendar()
+        )
+
+        // A Claude event matches both panes; a Codex event in the same
+        // directory only matches opencode, which runs any provider.
+        aggregator.add([
+            event("claude-1", session: "a", model: "claude-sonnet-4.5", at: "2026-01-15T11:00:00Z",
+                  usage: TokenUsage(inputTokens: 100, outputTokens: 1)),
+            event("codex-1", provider: .codex, session: "c", model: nil, at: "2026-01-15T11:05:00Z",
+                  usage: TokenUsage(inputTokens: 40, outputTokens: 2)),
+            event("claude-2", session: "a", model: "claude-sonnet-4.5", at: "2026-01-15T11:10:00Z",
+                  usage: TokenUsage(inputTokens: 100, outputTokens: 1)),
+        ])
+        let snapshot = aggregator.snapshot()
+
+        #expect(snapshot.ambiguousAttributionCount == 2)
+        #expect(snapshot.agentSummary(for: opencode.id, window: .day).usage.inputTokens == 40)
+        #expect(snapshot.agentSummary(for: claude.id, window: .day).hasUsage == false)
+    }
+
+    @Test("A cached log is re-read when the clock moves back before its compacted history")
+    func cacheRescansWhenCutoffMovesBack() async throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTokenMeter-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let file = home
+            .appendingPathComponent(".codex/sessions/2025/12", isDirectory: true)
+            .appendingPathComponent("rollout-history.jsonl")
+        try FileManager.default.createDirectory(
+            at: file.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try ([
+            #"{"timestamp":"2025-12-10T09:00:00Z","type":"session_meta","payload":{"id":"session-history","cwd":"/repo"}}"#,
+            #"{"timestamp":"2025-12-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10}}}}"#,
+            #"{"timestamp":"2025-12-10T11:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"cached_input_tokens":0,"output_tokens":30}}}}"#,
+            #"{"timestamp":"2026-01-15T11:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":600,"cached_input_tokens":0,"output_tokens":60}}}}"#,
+        ].joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+
+        let meter = LocalTokenMeter(homeDirectory: home)
+        let january = await meter.snapshot(
+            agents: [],
+            priceBook: priceBook,
+            now: date("2026-01-15T13:00:00Z"),
+            calendar: utcCalendar()
+        )
+        let januaryAgain = await meter.snapshot(
+            agents: [],
+            priceBook: priceBook,
+            now: date("2026-01-15T13:00:00Z"),
+            calendar: utcCalendar()
+        )
+        #expect(january.overallSummary(for: .allTime).usage.inputTokens == 600)
+        #expect(january.overallSummary(for: .month).usage.inputTokens == 300)
+        #expect(januaryAgain.overallSummary(for: .allTime) == january.overallSummary(for: .allTime))
+        #expect(januaryAgain.overallSummary(for: .month) == january.overallSummary(for: .month))
+
+        // December history was folded under January's cutoff. Seen from
+        // 11:30 on Dec 10, the hour window must hold only the 11:00 delta.
+        let december = await meter.snapshot(
+            agents: [],
+            priceBook: priceBook,
+            now: date("2025-12-10T11:30:00Z"),
+            calendar: utcCalendar()
+        )
+        #expect(december.overallSummary(for: .hour).usage.inputTokens == 200)
+        #expect(december.overallSummary(for: .day).usage.inputTokens == 300)
+        #expect(december.overallSummary(for: .allTime).usage.inputTokens == 300)
+    }
+
+    // MARK: - Fixtures
+
+    private var priceBook: TokenMeterPriceBook {
+        TokenMeterPriceBook(entries: [
+            "claude:sonnet": TokenMeterPricing(
+                inputPerMillion: 3,
+                cacheReadPerMillion: 0.3,
+                cacheWrite5mPerMillion: 3.75,
+                cacheWrite1hPerMillion: 6,
+                outputPerMillion: 15
+            ),
+            "claude:haiku": TokenMeterPricing(inputPerMillion: 1, outputPerMillion: 5),
+            "grok:grok-4": TokenMeterPricing(inputPerMillion: 2, cacheReadPerMillion: 0.5, outputPerMillion: 10),
+            "codex": TokenMeterPricing(inputPerMillion: 1.25, cacheReadPerMillion: 0.125, outputPerMillion: 10),
+        ])
+    }
+
+    /// December 2025 history across providers, sessions, models, and cwds,
+    /// plus two events inside January 2026's finite windows.
+    private func historyFixture() -> [TokenUsageEvent] {
+        [
+            event("sonnet-1", session: "a", model: "claude-sonnet-4.5", at: "2025-12-02T10:00:00Z",
+                  usage: TokenUsage(inputTokens: 1_000, cacheReadTokens: 400, cacheWrite5mTokens: 100, outputTokens: 50),
+                  actions: 2),
+            event("sonnet-2", session: "a", model: "claude-sonnet-4.5", at: "2025-12-03T10:00:00Z",
+                  usage: TokenUsage(inputTokens: 2_000, cacheReadTokens: 1_500, outputTokens: 80),
+                  actions: 1),
+            event("haiku-1", session: "a", model: "claude-haiku-4.5", at: "2025-12-03T11:00:00Z",
+                  usage: TokenUsage(inputTokens: 500, outputTokens: 20)),
+            event("other-cwd", session: "b", model: "claude-sonnet-4.5", cwd: "/other", at: "2025-12-20T10:00:00Z",
+                  usage: TokenUsage(inputTokens: 700, outputTokens: 30)),
+            event("grok-1", provider: .grok, session: "g", model: "grok-4.6", at: "2025-12-05T10:00:00Z",
+                  usage: .totalOnly(10_000)),
+            event("grok-2", provider: .grok, session: "g", model: "grok-4.6", at: "2025-12-06T10:00:00Z",
+                  usage: .totalOnly(5_000)),
+            event("codex-1", provider: .codex, session: "c", model: nil, at: "2025-12-07T10:00:00Z",
+                  usage: TokenUsage(inputTokens: 300, cacheReadTokens: 100, outputTokens: 10)),
+            event("codex-2", provider: .codex, session: "c", model: nil, at: "2025-12-08T10:00:00Z",
+                  usage: TokenUsage(inputTokens: 200, outputTokens: 5)),
+            event("unpriced-1", session: "a", model: "zz-unpriced", at: "2025-12-09T10:00:00Z",
+                  usage: TokenUsage(inputTokens: 50, outputTokens: 5)),
+            event("unpriced-2", session: "a", model: "zz-unpriced", at: "2025-12-10T10:00:00Z",
+                  usage: TokenUsage(inputTokens: 60, outputTokens: 6)),
+            event("recent-claude", session: "a", model: "claude-sonnet-4.5", at: "2026-01-15T11:00:00Z",
+                  usage: TokenUsage(inputTokens: 900, outputTokens: 40)),
+            event("recent-codex", provider: .codex, session: "c", model: nil, at: "2026-01-15T12:30:00Z",
+                  usage: TokenUsage(inputTokens: 100, outputTokens: 3)),
+        ]
+    }
+
+    private func event(
+        _ id: String,
+        provider: TokenMeterProvider = .claude,
+        session: String,
+        model: String?,
+        cwd: String = "/repo",
+        at timestamp: String,
+        usage: TokenUsage,
+        actions: Int = 0
+    ) -> TokenUsageEvent {
+        TokenUsageEvent(
+            id: id,
+            sessionID: session,
+            provider: provider,
+            model: model,
+            cwd: cwd,
+            date: date(timestamp),
+            usage: usage,
+            actions: actions
+        )
+    }
+
+    private func expectEquivalent(_ expected: TokenMeterSummary, _ actual: TokenMeterSummary) {
+        #expect(actual.usage == expected.usage)
+        #expect(actual.sessions == expected.sessions)
+        #expect(actual.models == expected.models)
+        #expect(actual.actions == expected.actions)
+        #expect(actual.costIsEstimated == expected.costIsEstimated)
+        #expect(actual.hasUnpricedUsage == expected.hasUnpricedUsage)
+        #expect((actual.costUSD == nil) == (expected.costUSD == nil))
+        if let expectedCost = expected.costUSD, let actualCost = actual.costUSD {
+            #expect(abs(actualCost - expectedCost) <= 1e-9 * max(1, abs(expectedCost)))
+        }
+    }
+
+    private func utcCalendar() -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        calendar.firstWeekday = 1
         return calendar
     }
 

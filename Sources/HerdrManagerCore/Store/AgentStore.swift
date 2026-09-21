@@ -1,6 +1,35 @@
 import Foundation
 import Observation
 
+// MARK: - AgentStatusTransition
+
+/// A status change `AgentStore.applyEvent` accepted. Notifications and
+/// diagnosis react to this, not to the raw event: the store drops stale
+/// and untracked-pane events, and those must not notify either.
+public struct AgentStatusTransition: Equatable, Sendable {
+    public let agentId: AgentID
+    /// Nil when the event introduced a pane the store was not tracking.
+    public let from: AgentStatus?
+    public let to: AgentStatus
+    public let stateChangeSeq: UInt64
+    public let enteredAt: Date
+
+    public init(agentId: AgentID, from: AgentStatus?, to: AgentStatus, stateChangeSeq: UInt64, enteredAt: Date) {
+        self.agentId = agentId
+        self.from = from
+        self.to = to
+        self.stateChangeSeq = stateChangeSeq
+        self.enteredAt = enteredAt
+    }
+
+    /// Identifies the status episode this transition opened. `pane_updated`
+    /// carries no seq, so the stored seq stays at the last `agent.list`
+    /// value across several episodes; the episode start tells them apart.
+    public var episodeKey: String {
+        "\(agentId.raw):\(stateChangeSeq):\(enteredAt.timeIntervalSinceReferenceDate)"
+    }
+}
+
 // MARK: - AgentStore
 
 @MainActor
@@ -175,17 +204,23 @@ public final class AgentStore {
 
     // MARK: - Events
 
-    public func applyEvent(_ event: HerdrEvent) {
+    /// Apply one subscription event.
+    /// - Returns: The status change the store accepted, or nil when the event
+    ///   carried no status, was stale, targeted an untracked pane, or left
+    ///   the status unchanged.
+    @discardableResult
+    public func applyEvent(_ event: HerdrEvent) -> AgentStatusTransition? {
         switch event {
         case .agentStatusChanged(let paneId, let agentStatus, let seq):
             let agentId = AgentID(paneId)
-            guard var agent = agents[agentId] else { return }
+            guard var agent = agents[agentId] else { return nil }
 
             // Sequence guard: only apply if new seq >= current
             if let newSeq = seq, newSeq < agent.stateChangeSeq {
-                return
+                return nil
             }
 
+            let previousStatus = agent.status
             let newStatus = AgentStatus(rawValue: agentStatus) ?? .unknown
             if newStatus != agent.status {
                 agent.enteredAt = Date()
@@ -194,6 +229,7 @@ public final class AgentStore {
             if let seq { agent.stateChangeSeq = seq }
             agent.verdict = Self.verdict(for: newStatus)
             agents[agentId] = agent
+            return Self.transition(from: previousStatus, to: agent)
 
         case .paneCreated(let paneId, let workspaceId, let tabId):
             let agentId = AgentID(paneId)
@@ -219,18 +255,27 @@ public final class AgentStore {
             }
 
         case .paneUpdated(let info):
-            guard !info.paneId.isEmpty else { return }
+            guard !info.paneId.isEmpty else { return nil }
             let agentId = AgentID(info.paneId)
+            let existing = agents[agentId]
+
+            // A real seq behind the stored one is an older state than the
+            // store already holds — an event that was queued while a newer
+            // `agent.list` resync or status event landed. Applying it would
+            // move the status backward (blocked -> working) and drag the
+            // stored seq down with it.
+            if info.stateChangeSeq != 0, let existing, info.stateChangeSeq < existing.stateChangeSeq {
+                return nil
+            }
 
             guard let agentKind = info.agent, !agentKind.isEmpty else {
                 // The pane no longer runs an agent (dropped back to a plain
                 // shell) — it is not an agent anymore, so drop it too.
                 agents.removeValue(forKey: agentId)
-                return
+                return nil
             }
 
             let status = AgentStatus(rawValue: info.agentStatus) ?? .unknown
-            let existing = agents[agentId]
 
             // `pane_updated` events don't carry `state_change_seq` (only
             // `agent.list` does — see applyHerdSnapshot), so a real seq of 0
@@ -260,7 +305,7 @@ public final class AgentStore {
             // a real sequence number.
             let stateChangeSeq = seqIsMeaningful ? info.stateChangeSeq : (existing?.stateChangeSeq ?? 0)
 
-            agents[agentId] = Agent(
+            let updated = Agent(
                 id: agentId,
                 kind: kind,
                 name: name,
@@ -274,6 +319,8 @@ public final class AgentStore {
                 tabName: tabName,
                 cwd: info.foregroundCwd ?? info.cwd ?? existing?.cwd ?? ""
             )
+            agents[agentId] = updated
+            return Self.transition(from: existing?.status, to: updated)
 
         case .paneFocused:
             // Focus changes don't affect dwell/verdict state, and `Agent`
@@ -292,6 +339,18 @@ public final class AgentStore {
         case .connected, .disconnected, .ignored:
             break
         }
+        return nil
+    }
+
+    private static func transition(from previous: AgentStatus?, to agent: Agent) -> AgentStatusTransition? {
+        guard previous != agent.status else { return nil }
+        return AgentStatusTransition(
+            agentId: agent.id,
+            from: previous,
+            to: agent.status,
+            stateChangeSeq: agent.stateChangeSeq,
+            enteredAt: agent.enteredAt
+        )
     }
 
     /// Apply persisted dwell timestamps back onto the live agents after a
@@ -318,12 +377,7 @@ public final class AgentStore {
     public var attentionAgents: [Agent] {
         agents.values
             .filter { AttentionTriage.attentionWorthy($0) }
-            .sorted { a, b in
-                let pa = AttentionTriage.priority(a)
-                let pb = AttentionTriage.priority(b)
-                if pa != pb { return pa < pb }
-                return a.enteredAt < b.enteredAt
-            }
+            .sorted(by: AttentionTriage.ranksBefore)
     }
 
     public var blockedCount: Int {

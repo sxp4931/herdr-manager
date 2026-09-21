@@ -1,20 +1,31 @@
 # State
-- Branch grok/quality-burn-0906
+- Branch `claude/opus-extra-herdr-models-pricing-0921` (PR #3), stacked on the pricing commit 858fc41. Passes 1–5 ran on `grok/quality-burn-0906` (merged as f7d0366).
 - Clock cancelled; stop only on STOP file.
-- Pass #5 complete. `swift` is not available in this environment; tests added but not executed here.
+- Reliability pass 7 (2026-09-21) complete and pushed. `swift` is not available in this environment; tests added but not executed here.
 
 ## Progress
 | # | Status | Notes |
 |---|--------|-------|
-| 1 | pass5 | Settings.json load/save capped at 256 KB (no wipe). Cursor blobs scanned as SQLite pointers, refused above 2 MB. Detection hash uses a 64 KB suffix. Event cache still kept for all-time. |
-| 2 | pass5 | pane_updated empty pane_id ignored. Snapshot/agent.list drop empty ids. Name maps uniquingKeys last-wins (no Dictionary trap). JSONNumber rejects JSON 17.5. |
-| 3 | pass5 | AttentionTriage.counts is the exclusive badge/CLI/MCP tally. Menu bar no longer treats stale silent on done/idle as silence. |
-| 4 | pass5 | status/get expire past-deadline rows so a poll cannot present an un-approvable write. Spawn/answer/say re-check writesEnabled immediately before the write. |
+| 1 | pass6 | Event cache folds history older than every finite window (bounded by sessions, not turns). Price and attribution resolved once per (provider, model) / (provider, cwd) per refresh; accumulators mutated in place. |
+| 2 | pass7 | Any JSON-RPC `error` fails the request (pass 6). Protocol reading resets to unknown when the event stream drops or a request cannot connect, so writes are never gated on a vanished herdr's version. |
+| 3 | pass7 | Working-and-not-silent is healthy, not unclassifiable. Stale `pane_updated` (seq behind stored) is dropped. Attention lists share one comparator with a pane-id tie-break. |
+| 4 | pass7 | Notifications fire only on status transitions the store accepted; blocked alerts key on the episode, not `pane:0`, so every blocked episode notifies. |
 | 5 | pass5 | herdmgr uses herdSnapshot (agent.list + labels) so shells are dropped and seq is real. JSON includes state_change_seq. Label events resync. |
 | 6 | pass5 | SecretRedactor also covers OpenRouter `sk-or-`, Stripe `sk_live_`/`sk_test_`, and Slack `xox*` tokens. MCP tool results already always redact. |
 | 7 | pass5 | Working tree clean. `swift` / `swift test` not available in this environment — tests added but not executed. No push. |
 
 ## Log
+- 15:11 ET — Pass 7 / wrap-up: commits f5ecfb3, 3b4775d, d85ed1b, d7975fc on `claude/opus-extra-herdr-models-pricing-0921`, pushed to PR #3. Tree clean; no `.build` artifacts. `swift test` not run (no toolchain). All five pass-6 "found but not fixed" items closed.
+- 15:10 ET — Pass 7 / item 2 (d7975fc): LiveHerdrAdapter clears `_latestProtocolVersion` on subscription disconnect and on any `connectFailed` request. MCP (no subscription loop, re-reads only at 0) kept a stale reading indefinitely before. AppModel sets `adapterHealth` nil when offline so a stale protocol banner does not outlive its server. Not covered: a herdr restart between two MCP calls with no failed request in between (undetectable on one-shot sockets without re-reading).
+- 15:06 ET — Pass 7 / item 3 (d85ed1b): `AttentionTriage.ranksBefore` (priority, enteredAt, pane id) replaces four hand-rolled sorts (store, panel Needs-you, herdmgr, MCP herd.overview/agent.list — MCP had no tie-break at all). Panel Running list tie-breaks on pane id.
+- 15:02 ET — Pass 7 / items 3+4 (3b4775d): AgentStore and herdmgr drop a `pane_updated` whose non-zero seq is behind the stored one (including a stale "no agent" that would remove a live agent). `applyEvent` returns the `AgentStatusTransition` it accepted; AppModel notifies and diagnoses only from that. Blocked notification key was `pane:seq` and pane_updated has no seq, so each agent got one blocked alert per launch; now keyed by `episodeKey`.
+- 14:57 ET — Pass 7 / item 3 (f5ecfb3): Diagnoser returned S4 for every working agent that was not silent/gone ("state: working" / "working but unclassifiable" reason line on healthy rows). Working/done/idle now return healthy; S4 is unknown status or blocked with screen detection skipped.
+- 15:01 ET — Pass 6 / wrap-up: commits 503c31f, 84a25fd, 8f49a06, 3e71e2d, 59dad7b on `claude/opus-extra-herdr-models-pricing-0921`, pushed to PR #3. Tree clean; no `.build` artifacts. `swift test` not run (no toolchain).
+- 15:01 ET — Pass 6 / item 1 (59dad7b): the 30s token-meter refresh called `priceBook.pricing` (lowercase + sort of every entry) up to 20× per event, re-resolved agent cwd symlinks per event, and copied nested accumulator maps (and their Sets) per event×window. Now memoized and in place. `fileEventCache` folds events older than the earliest hour/day/week/month start per (provider, session, model, cwd, split); clamped-cost events stay separate; a cutoff that moves back forces a re-read. Tradeoff: `ambiguousAttributionCount` counts a folded group once (UI only checks > 0). Supersedes the earlier "cache retains all historical events" tradeoff.
+- 14:53 ET — Pass 6 / item 2 (3e71e2d): NDJSONClientError, SharedActionStoreError, SettingsStoreError, and the MCP revalidation/agent-resolution errors adopt LocalizedError so `error.localizedDescription` shows the real reason, not "The operation couldn't be completed".
+- 14:53 ET — Pass 6 / item 4 (8f49a06): SharedActionStore writes throw on rename failure and clean the temp file; strict decode refuses to rewrite an undecodable store; markExecuted only from executing/failed, markFailed only from pending/approved/executing. MCP say/interrupt/stop mark the claimed action failed and journal it when the herdr write throws.
+- 14:50 ET — Pass 6 / item 2 (84a25fd): NDJSONClient.unwrapResponse fails on any non-null `error`, including code-only, string, and empty-object errors, which previously fell through as a successful empty result.
+- 14:49 ET — Pass 6 / item 3 (503c31f): Diagnoser S2 counts silence from max(lastOutputAt, enteredAt). `lastOutputAt` survives status changes, so an agent approved after a 20-minute prompt read as 20 minutes silent the moment it resumed and was notified.
 - 14:14 ET — Pass 5 / item 7: Tree clean on `grok/quality-burn-0906`. No `.build`/DMG artifacts. `swift test` not run (no toolchain). Local commits only. Pass 5 closed.
 - 14:13 ET — Pass 5 / item 6: SecretRedactor redacts OpenRouter sk-or- (hyphenated, missed by generic sk-), Stripe sk_live_/sk_test_ (underscores), and Slack xoxb-/xoxp- tokens so MCP inspect/tail cannot leak them.
 - 14:12 ET — Pass 5 / item 5: herdmgr loads HerdSnapshot.displayAgents (agent.list + labels) instead of session.snapshot panes, so plain shells are omitted and state_change_seq is real. --json includes seq. workspace/tab events resync the herd so labels stay current.

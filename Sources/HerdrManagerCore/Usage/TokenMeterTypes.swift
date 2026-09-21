@@ -338,7 +338,10 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
     /// from the Usage screen when a provider changes rates or a gateway uses a
     /// different model price.
     public static let defaults = TokenMeterPriceBook(entries: [
-        // Anthropic: Sonnet 5 introductory rate in effect in July/August 2026.
+        // Anthropic list rates, verified against
+        // https://platform.claude.com/docs/en/about-claude/pricing on
+        // 2026-09-21. Sonnet 5's $2 / $10 launch rate is now its standard
+        // price; the increase planned for 2026-09-01 was cancelled.
         "claude-sonnet-5": TokenMeterPricing(
             inputPerMillion: 2.0,
             cacheReadPerMillion: 0.20,
@@ -395,6 +398,64 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             cacheWrite1hPerMillion: 20.0,
             outputPerMillion: 50.0
         ),
+        // Claude Fable 5.1 / Mythos 5.1 bill cache hits at 0.025x input
+        // ($0.25), not the 0.1x ($1) of Fable 5 / Mythos 5. Must be listed
+        // explicitly: otherwise the "claude-fable-5" / "claude-mythos-5"
+        // fragments would price their cache reads 4x too high.
+        "claude-fable-5-1": TokenMeterPricing(
+            inputPerMillion: 10.0,
+            cacheReadPerMillion: 0.25,
+            cacheWrite5mPerMillion: 12.50,
+            cacheWrite1hPerMillion: 20.0,
+            outputPerMillion: 50.0
+        ),
+        "claude-fable-5.1": TokenMeterPricing(
+            inputPerMillion: 10.0,
+            cacheReadPerMillion: 0.25,
+            cacheWrite5mPerMillion: 12.50,
+            cacheWrite1hPerMillion: 20.0,
+            outputPerMillion: 50.0
+        ),
+        "claude-mythos-5-1": TokenMeterPricing(
+            inputPerMillion: 10.0,
+            cacheReadPerMillion: 0.25,
+            cacheWrite5mPerMillion: 12.50,
+            cacheWrite1hPerMillion: 20.0,
+            outputPerMillion: 50.0
+        ),
+        "claude-mythos-5.1": TokenMeterPricing(
+            inputPerMillion: 10.0,
+            cacheReadPerMillion: 0.25,
+            cacheWrite5mPerMillion: 12.50,
+            cacheWrite1hPerMillion: 20.0,
+            outputPerMillion: 50.0
+        ),
+        // Anthropic fast mode (research preview) for Opus 5 / Opus 4.8 is
+        // $10 / $50 with the standard cache multipliers stacked on top.
+        // Cursor logs it as `claude-opus-5-fast` / `claude-opus-4-8-fast`
+        // (https://cursor.com/docs/models-and-pricing.md, 2026-09-21);
+        // without these keys it would fall through to the standard Opus rate.
+        "claude-opus-5-fast": TokenMeterPricing(
+            inputPerMillion: 10.0,
+            cacheReadPerMillion: 1.0,
+            cacheWrite5mPerMillion: 12.50,
+            cacheWrite1hPerMillion: 20.0,
+            outputPerMillion: 50.0
+        ),
+        "claude-opus-4-8-fast": TokenMeterPricing(
+            inputPerMillion: 10.0,
+            cacheReadPerMillion: 1.0,
+            cacheWrite5mPerMillion: 12.50,
+            cacheWrite1hPerMillion: 20.0,
+            outputPerMillion: 50.0
+        ),
+        "claude-opus-4.8-fast": TokenMeterPricing(
+            inputPerMillion: 10.0,
+            cacheReadPerMillion: 1.0,
+            cacheWrite5mPerMillion: 12.50,
+            cacheWrite1hPerMillion: 20.0,
+            outputPerMillion: 50.0
+        ),
         "claude-opus-4.5": TokenMeterPricing(
             inputPerMillion: 5.0,
             cacheReadPerMillion: 0.50,
@@ -419,6 +480,35 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             outputPerMillion: 25.0
         ),
         "claude-opus-4-8": TokenMeterPricing(
+            inputPerMillion: 5.0,
+            cacheReadPerMillion: 0.50,
+            cacheWrite5mPerMillion: 6.25,
+            cacheWrite1hPerMillion: 10.0,
+            outputPerMillion: 25.0
+        ),
+        // Opus 4.7 / 4.6 share the Opus 4.5+ list rate (verified 2026-09-21).
+        "claude-opus-4.7": TokenMeterPricing(
+            inputPerMillion: 5.0,
+            cacheReadPerMillion: 0.50,
+            cacheWrite5mPerMillion: 6.25,
+            cacheWrite1hPerMillion: 10.0,
+            outputPerMillion: 25.0
+        ),
+        "claude-opus-4-7": TokenMeterPricing(
+            inputPerMillion: 5.0,
+            cacheReadPerMillion: 0.50,
+            cacheWrite5mPerMillion: 6.25,
+            cacheWrite1hPerMillion: 10.0,
+            outputPerMillion: 25.0
+        ),
+        "claude-opus-4.6": TokenMeterPricing(
+            inputPerMillion: 5.0,
+            cacheReadPerMillion: 0.50,
+            cacheWrite5mPerMillion: 6.25,
+            cacheWrite1hPerMillion: 10.0,
+            outputPerMillion: 25.0
+        ),
+        "claude-opus-4-6": TokenMeterPricing(
             inputPerMillion: 5.0,
             cacheReadPerMillion: 0.50,
             cacheWrite5mPerMillion: 6.25,
@@ -451,12 +541,45 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
         // https://platform.openai.com/docs/pricing on 2026-08-06. Codex
         // sessions often omit the model id, so the provider fallback uses
         // the GPT-5.6 Terra rate.
+        //
+        // GPT-6 Astra list rate, verified against
+        // https://developers.openai.com/api/docs/pricing.md on 2026-09-21.
+        // No gpt-5 key is a fragment of "gpt-6", so it needs its own entry.
+        "gpt-6-astra": TokenMeterPricing(
+            inputPerMillion: 10.0,
+            cacheReadPerMillion: 1.0,
+            cacheWrite5mPerMillion: 12.50,
+            cacheWrite1hPerMillion: 12.50,
+            outputPerMillion: 50.0
+        ),
+        // GPT-5.6 Sol promotional list rate (same source and date; OpenAI
+        // says it runs at least through 2026-11-21). Was $5 / $30.
         "gpt-5.6-sol": TokenMeterPricing(
-            inputPerMillion: 5.0,
-            cacheReadPerMillion: 0.50,
-            cacheWrite5mPerMillion: 6.25,
-            cacheWrite1hPerMillion: 6.25,
-            outputPerMillion: 30.0
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 0.40,
+            cacheWrite5mPerMillion: 5.0,
+            cacheWrite1hPerMillion: 5.0,
+            outputPerMillion: 20.0
+        ),
+        // Daybreak cyber models (same source and date). Must be listed
+        // explicitly: otherwise "gpt-5.6-cyber" would fall through to the
+        // "gpt-5" fragment and "gpt-5.5-cyber" to "gpt-5.5". gpt-5.5-cyber
+        // publishes no cache-write rate, so writes use the input rate. The
+        // gpt-daybreak-*-latest aliases are not priced: OpenAI repoints them
+        // (and their price) as new Daybreak models ship.
+        "gpt-5.6-cyber": TokenMeterPricing(
+            inputPerMillion: 12.50,
+            cacheReadPerMillion: 1.25,
+            cacheWrite5mPerMillion: 15.625,
+            cacheWrite1hPerMillion: 15.625,
+            outputPerMillion: 75.0
+        ),
+        "gpt-5.5-cyber": TokenMeterPricing(
+            inputPerMillion: 12.50,
+            cacheReadPerMillion: 1.25,
+            cacheWrite5mPerMillion: 12.50,
+            cacheWrite1hPerMillion: 12.50,
+            outputPerMillion: 75.0
         ),
         "gpt-5.6-terra": TokenMeterPricing(
             inputPerMillion: 2.0,
@@ -729,6 +852,44 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
         // https://docs.x.ai/developers/pricing on 2026-08-16. Long-context
         // (≥200k prompt) rows are not modelled: the local logs do not say
         // whether a turn crossed that threshold.
+        //
+        // grok-4.7 (verified 2026-09-21) matches grok-4.6. Must be listed
+        // explicitly: no older grok key is a fragment of "grok-4.7".
+        "grok-4.7": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 6.0
+        ),
+        "grok-4-7": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 6.0
+        ),
+        // Grok 4.7 Fast: the same model on faster infrastructure at 2x the
+        // standard rate, offered only in Cursor and Grok Build (not the
+        // public API). Grok Build logs it as `grok-4.7-build-fast`;
+        // `grok-4.7-fast` is the product-name slug, kept so a Fast id never
+        // falls back to the standard "grok-4.7" rate.
+        "grok-4.7-build-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "grok-4-7-build-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "grok-4.7-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "grok-4-7-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
         "grok-4.6": TokenMeterPricing(
             inputPerMillion: 2.0,
             cacheReadPerMillion: 0.50,
@@ -820,6 +981,73 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             outputPerMillion: 2.0
         ),
         // Cursor agent / CLI logs `cursor-grok-*` rather than the bare xAI id.
+        // Cursor list rates, verified against
+        // https://cursor.com/docs/models-and-pricing.md and its per-model
+        // pages on 2026-09-21. Standard-speed effort ids (`-low`, `-medium`,
+        // `-high`, `-xhigh`) resolve through the base key. Fast (2x standard)
+        // ids each need their own key: otherwise the base key would be the
+        // longest fragment they contain. Cursor's "500k" rows are its >256k
+        // long-context rates and, like xAI's, are not modelled.
+        "cursor-grok-4.7": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 6.0
+        ),
+        "cursor-grok-4.7-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "cursor-grok-4.7-low-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "cursor-grok-4.7-medium-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "cursor-grok-4.7-high-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "cursor-grok-4.7-xhigh-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "cursor-grok-4-7": TokenMeterPricing(
+            inputPerMillion: 2.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 6.0
+        ),
+        "cursor-grok-4-7-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "cursor-grok-4-7-low-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "cursor-grok-4-7-medium-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "cursor-grok-4-7-high-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "cursor-grok-4-7-xhigh-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
         "cursor-grok-4.6": TokenMeterPricing(
             inputPerMillion: 2.0,
             cacheReadPerMillion: 0.50,
@@ -830,10 +1058,30 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             cacheReadPerMillion: 0.50,
             outputPerMillion: 6.0
         ),
+        "cursor-grok-4.6-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "cursor-grok-4.6-low-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "cursor-grok-4.6-medium-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
         "cursor-grok-4.6-high-fast": TokenMeterPricing(
-            inputPerMillion: 2.0,
-            cacheReadPerMillion: 0.50,
-            outputPerMillion: 6.0
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "cursor-grok-4.6-xhigh-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
         ),
         "cursor-grok-4-6": TokenMeterPricing(
             inputPerMillion: 2.0,
@@ -845,10 +1093,30 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             cacheReadPerMillion: 0.50,
             outputPerMillion: 6.0
         ),
+        "cursor-grok-4-6-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "cursor-grok-4-6-low-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "cursor-grok-4-6-medium-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
         "cursor-grok-4-6-high-fast": TokenMeterPricing(
-            inputPerMillion: 2.0,
-            cacheReadPerMillion: 0.50,
-            outputPerMillion: 6.0
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
+        ),
+        "cursor-grok-4-6-xhigh-fast": TokenMeterPricing(
+            inputPerMillion: 4.0,
+            cacheReadPerMillion: 1.0,
+            outputPerMillion: 12.0
         ),
         "cursor-grok-4.5": TokenMeterPricing(
             inputPerMillion: 2.0,
@@ -864,6 +1132,31 @@ public struct TokenMeterPriceBook: Codable, Equatable, Sendable {
             inputPerMillion: 2.0,
             cacheReadPerMillion: 0.30,
             outputPerMillion: 6.0
+        ),
+
+        // Cursor Composer 2.5 list rates, verified against
+        // https://cursor.com/docs/models-and-pricing.md on 2026-09-21. Cursor
+        // lists no cache-write fee, so writes use the input rate. The
+        // fragments also cover `cursor-composer-2.5*` ids.
+        "composer-2.5": TokenMeterPricing(
+            inputPerMillion: 0.50,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.50
+        ),
+        "composer-2-5": TokenMeterPricing(
+            inputPerMillion: 0.50,
+            cacheReadPerMillion: 0.20,
+            outputPerMillion: 2.50
+        ),
+        "composer-2.5-fast": TokenMeterPricing(
+            inputPerMillion: 3.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 15.0
+        ),
+        "composer-2-5-fast": TokenMeterPricing(
+            inputPerMillion: 3.0,
+            cacheReadPerMillion: 0.50,
+            outputPerMillion: 15.0
         ),
     ])
 }

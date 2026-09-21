@@ -4,7 +4,8 @@ import HerdrManagerCore
 
 @MainActor
 final class NotificationManager {
-    /// Tracks (paneId, seq) pairs we've already notified for, to avoid duplicates.
+    /// Tracks blocked episode keys and silent agent keys we've already
+    /// notified for, to avoid duplicates.
     private var notifiedKeys: Set<String> = []
 
     /// User-controlled master switch. When `false`, no authorization is
@@ -79,10 +80,14 @@ final class NotificationManager {
     }
 
     /// Post a blocked notification for the agent. Returns true if a notification was posted.
+    /// - Parameter episodeKey: `AgentStatusTransition.episodeKey` for the
+    ///   blocked episode. Keying on the event seq alone suppressed every
+    ///   blocked alert after an agent's first: `pane_updated` carries no
+    ///   seq, so each episode keyed as "pane:0".
     @discardableResult
-    func notifyBlocked(agent: Agent, seq: UInt64?) -> Bool {
+    func notifyBlocked(agent: Agent, episodeKey: String) -> Bool {
         guard isEnabled else { return false }
-        let key = "\(agent.id.raw):\(seq ?? 0)"
+        let key = "blocked:\(episodeKey)"
         guard !notifiedKeys.contains(key) else { return false }
         notifiedKeys.insert(key)
 
@@ -105,7 +110,7 @@ final class NotificationManager {
         content.sound = .default
 
         let request = UNNotificationRequest(
-            identifier: "herdr-blocked-\(agent.id.raw)-\(seq ?? 0)",
+            identifier: "herdr-blocked-\(episodeKey)",
             content: content,
             trigger: nil
         )

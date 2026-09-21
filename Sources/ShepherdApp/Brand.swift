@@ -208,7 +208,7 @@ enum Brand {
     /// hit a permission prompt can land with `status == .blocked` carrying a
     /// `.silent` verdict. herdr's status is the fresher fact and the more
     /// urgent one, and every other surface already ranks it that way — the
-    /// menu-bar tally, `PanelView.needsYouPriority`, and the row's own
+    /// menu-bar tally, `AttentionTriage.priority`, and the row's own
     /// `alarmed` glow all test blocked first. Ranking the stale verdict above
     /// it here would put an amber SILENT pill on a row wearing a red urgency
     /// glow, under a red badge in the menu bar.

@@ -6,19 +6,33 @@ import Darwin
 /// Thrown when the cross-process advisory lock cannot be acquired. The store
 /// refuses to proceed unlocked — degrading silently to an unguarded
 /// read-modify-write is exactly the corruption risk the lock exists to prevent.
-public enum SharedActionStoreError: Error, CustomStringConvertible {
+public enum SharedActionStoreError: Error, CustomStringConvertible, LocalizedError {
     case lockUnavailable(String)
     /// The on-disk store is larger than `maxFileBytes`. Reads treat it as
     /// empty; writes must throw rather than replace it with a one-row file.
     case fileTooLarge
+    /// The on-disk store exists but does not decode (corrupt, or written by
+    /// a build with a newer schema). Writes must not replace it with a
+    /// one-row file and drop the other process's live actions.
+    case unreadable(String)
+    /// The new store contents could not be written or renamed into place.
+    /// Callers must not report a create/claim/transition that never landed.
+    case writeFailed(String)
     public var description: String {
         switch self {
         case .lockUnavailable(let detail):
             return "Cross-process lock unavailable: \(detail)"
         case .fileTooLarge:
             return "Pending-action store exceeds \(SharedActionStore.maxFileBytes) bytes; refusing to overwrite"
+        case .unreadable(let detail):
+            return "Pending-action store is unreadable; refusing to overwrite: \(detail)"
+        case .writeFailed(let detail):
+            return "Pending-action store write failed: \(detail)"
         }
     }
+
+    /// Keeps the reason in `localizedDescription` ("Approve failed: …").
+    public var errorDescription: String? { description }
 }
 
 // MARK: - SharedActionStore
@@ -80,13 +94,21 @@ public actor SharedActionStore {
         return size > Self.maxFileBytes
     }
 
-    /// Write paths must not treat an oversized file as empty — that would
-    /// encode a fresh array and POSIX-rename over live pending actions.
+    /// Write paths must not treat an oversized or undecodable file as empty
+    /// — that would encode a fresh array and POSIX-rename over live pending
+    /// actions. Reads stay lenient (an unreadable store lists nothing).
     private func loadActionsForWrite() throws -> [PendingAction] {
         if fileIsOversized() {
             throw SharedActionStoreError.fileTooLarge
         }
-        return loadActions()
+        guard let data = BoundedFileRead.data(from: fileURL, maxBytes: Self.maxFileBytes) else {
+            return []
+        }
+        do {
+            return try decoder.decode([PendingAction].self, from: data)
+        } catch {
+            throw SharedActionStoreError.unreadable(String(describing: error))
+        }
     }
 
     /// Get only pending actions (for UI). Past-deadline pending records are
@@ -126,7 +148,7 @@ public actor SharedActionStore {
                 actionId: actionId, tool: tool, params: params, expiresAt: expiresAt
             )
             actions.append(action)
-            writeActions(actions)
+            try writeActions(actions)
             return actionId
         }
     }
@@ -157,20 +179,32 @@ public actor SharedActionStore {
         }
     }
 
-    /// Mark an action as executed.
+    /// Mark a claimed action as executed. Only an `.executing` claim — or
+    /// one the deadline reaper failed while its write was still in flight —
+    /// can complete. A pending, denied, or expired row was never written and
+    /// must not be recorded as executed.
     public func markExecuted(_ actionId: String) throws {
         try mutate(actionId) { action in
+            guard action.state == .executing || action.state == .failed else { return false }
             action.state = .executed
+            action.failDetail = nil
             return true
         }
     }
 
-    /// Mark an action as failed.
+    /// Mark an action as failed. Terminal outcomes are final: a late "no
+    /// longer claimable" after the claim itself expired the row, or a stray
+    /// failure after a completed write, must not rewrite what happened.
     public func markFailed(_ actionId: String, detail: String) throws {
         try mutate(actionId) { action in
-            action.state = .failed
-            action.failDetail = detail
-            return true
+            switch action.state {
+            case .pending, .approved, .executing:
+                action.state = .failed
+                action.failDetail = detail
+                return true
+            case .executed, .denied, .expired, .failed:
+                return false
+            }
         }
     }
 
@@ -185,7 +219,7 @@ public actor SharedActionStore {
                 }
             }
             if changed {
-                writeActions(actions)
+                try writeActions(actions)
             }
         }
     }
@@ -204,11 +238,11 @@ public actor SharedActionStore {
             guard actions[idx].state == .approved else { return nil }
             guard now <= actions[idx].expiresAt else {
                 actions[idx].state = .expired
-                writeActions(actions)
+                try writeActions(actions)
                 return nil
             }
             actions[idx].state = .executing
-            writeActions(actions)
+            try writeActions(actions)
             return actions[idx]
         }
     }
@@ -229,11 +263,11 @@ public actor SharedActionStore {
             guard actions[idx].state == .pending else { return nil }
             guard now <= actions[idx].expiresAt else {
                 actions[idx].state = .expired
-                writeActions(actions)
+                try writeActions(actions)
                 return nil
             }
             actions[idx].state = .executing
-            writeActions(actions)
+            try writeActions(actions)
             return actions[idx]
         }
     }
@@ -265,7 +299,7 @@ public actor SharedActionStore {
             if actions.count != before { dirty = true }
 
             if dirty {
-                writeActions(actions)
+                try writeActions(actions)
             }
         }
     }
@@ -279,36 +313,50 @@ public actor SharedActionStore {
                 return
             }
             if transform(&actions[idx]) {
-                writeActions(actions)
+                try writeActions(actions)
             }
         }
     }
 
     /// Write actions to disk atomically: write to a temp file in the same directory,
     /// set 0600, then POSIX-rename over the destination (no absent-file window).
-    private func writeActions(_ actions: [PendingAction]) {
+    ///
+    /// Throws when the new contents did not land. This used to log and
+    /// return, so `create` handed MCP an action id that was never on disk
+    /// (the caller then waited out the full confirmation window for a row
+    /// the menu bar could not show) and `claimExecuting` returned a claim
+    /// the file still recorded as `.approved`.
+    private func writeActions(_ actions: [PendingAction]) throws {
+        let dir = fileURL.deletingLastPathComponent()
+        let tempURL = dir.appendingPathComponent(".pending-actions-\(UUID().uuidString).tmp")
         do {
             let data = try encoder.encode(actions)
-            let dir = fileURL.deletingLastPathComponent()
-            let tempURL = dir.appendingPathComponent(".pending-actions-\(UUID().uuidString).tmp")
             try data.write(to: tempURL)
             try FileManager.default.setAttributes(
                 [.posixPermissions: 0o600], ofItemAtPath: tempURL.path
             )
             // Atomic replace via POSIX rename — overwrites destination with no gap
+            var renameErrno: Int32 = 0
             let renamed = tempURL.withUnsafeFileSystemRepresentation { tempPath in
                 fileURL.withUnsafeFileSystemRepresentation { finalPath in
                     guard let tempPath, let finalPath else { return false }
-                    return Darwin.rename(tempPath, finalPath) == 0
+                    guard Darwin.rename(tempPath, finalPath) == 0 else {
+                        renameErrno = errno
+                        return false
+                    }
+                    return true
                 }
             }
-            if !renamed {
-                try? FileManager.default.removeItem(at: tempURL)
+            guard renamed else {
+                throw SharedActionStoreError.writeFailed("rename failed (errno \(renameErrno))")
             }
         } catch {
+            try? FileManager.default.removeItem(at: tempURL)
             FileHandle.standardError.write(
                 Data("SharedActionStore write failed: \(error)\n".utf8)
             )
+            if error is SharedActionStoreError { throw error }
+            throw SharedActionStoreError.writeFailed(String(describing: error))
         }
     }
 
