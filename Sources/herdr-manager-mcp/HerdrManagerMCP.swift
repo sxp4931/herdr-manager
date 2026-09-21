@@ -1438,15 +1438,12 @@ actor MCPServer {
     // MARK: - Write-Gate Helper
 
     /// Returns a tool error dict if writes are disabled, or nil if writes are
-    /// allowed. A fresh process has no protocol reading until its first
-    /// snapshot, so before gating we ensure a live reading exists — otherwise
-    /// the very first write would be wrongly rejected as "protocol unknown".
+    /// allowed. Every gate takes a fresh protocol reading. Re-reading only at
+    /// protocol 0 let a herdr restarted between calls, or while a write sat
+    /// in its confirmation wait, receive the write on the old build's
+    /// reading (`session.spawn` new_workspace never re-read at all).
     private func checkWritesEnabled() async -> [String: Any]? {
-        if adapter.health().protocolVersion == 0 {
-            try? await ensureConnected()
-            _ = try? await adapter.herdSnapshot()
-        }
-        let health = adapter.health()
+        let health = await adapter.refreshHealth()
         if !health.writesEnabled {
             return makeToolError("Writes not enabled: \(health.reason ?? "herdr protocol not verified for writes")")
         }

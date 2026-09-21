@@ -999,6 +999,69 @@ struct ProtocolReadingResetTests {
         #expect(adapter.health().protocolVersion == 0)
         #expect(adapter.health().reason == "protocol unknown")
     }
+
+    @Test("A herdr restarted on an older protocol between calls is caught by the refreshed gate")
+    func restartBetweenCallsIsReRead() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let original = try FakeHerdrServer(path: path, reply: .protocolVersion(17))
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        _ = try await adapter.herdSnapshot()
+        #expect(adapter.health().writesEnabled)
+
+        original.stop()
+        let restarted = try FakeHerdrServer(path: path, reply: .protocolVersion(16))
+        defer { restarted.stop() }
+
+        // No request failed across the restart, so the cached reading is
+        // still the old build's. This is what the MCP write gate used.
+        #expect(adapter.health().protocolVersion == 17)
+
+        let health = await adapter.refreshHealth()
+        #expect(health.protocolVersion == 16)
+        #expect(!health.writesEnabled)
+        #expect(adapter.health().protocolVersion == 16)
+    }
+
+    @Test("A refreshed gate re-enables writes once herdr is back on a verified protocol")
+    func refreshAfterUpgradeEnablesWrites() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(18))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        adapter.setLatestProtocol(16)
+
+        let health = await adapter.refreshHealth()
+        #expect(health.protocolVersion == 18)
+        #expect(health.writesEnabled)
+    }
+
+    @Test("A refresh that herdr answers with an error forgets the old reading")
+    func refreshErrorClearsReading() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .error("snapshot unavailable"))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        adapter.setLatestProtocol(LiveHerdrAdapter.minSupportedProtocolVersion)
+
+        let health = await adapter.refreshHealth()
+        #expect(health.protocolVersion == 0)
+        #expect(!health.writesEnabled)
+        #expect(health.reason?.hasPrefix("protocol unknown") == true)
+        #expect(health.reason?.contains("snapshot unavailable") == true)
+        #expect(adapter.health().protocolVersion == 0)
+    }
+
+    @Test("A refresh with nothing listening leaves writes off and says why")
+    func refreshWithNoHerdrLeavesWritesOff() async {
+        let path = unreachableSocketPath()
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        adapter.setLatestProtocol(LiveHerdrAdapter.minSupportedProtocolVersion)
+
+        let health = await adapter.refreshHealth()
+        #expect(!health.writesEnabled)
+        #expect(health.reason?.contains(path) == true)
+        #expect(adapter.health().reason == "protocol unknown")
+    }
 }
 
 @Suite("Subscription line decode failures")
