@@ -390,6 +390,7 @@ struct DiagnoserDiagnoseThresholdTests {
             id: agentId,
             kind: .claude,
             status: .working,
+            enteredAt: Date().addingTimeInterval(-60),
             lastOutputAt: Date().addingTimeInterval(-10) // 10 seconds ago
         )
         
@@ -423,6 +424,76 @@ struct DiagnoserDiagnoseThresholdTests {
         )
         let verdict = await diagnoser.diagnose(agent: agent, adapter: adapter, silentThreshold: 5)
         #expect(verdict.isSilent)
+    }
+
+    @Test("Output from before the current working episode does not start the silent clock")
+    func priorEpisodeOutputIsNotSilence() async {
+        // Blocked on a prompt for 20 minutes, then approved: the pane has
+        // been working again for 30s, but lastOutputAt still holds the last
+        // heartbeat change from before the prompt. That is not 20m of silence.
+        let agent = Agent(
+            id: AgentID("w1:p1"),
+            kind: .claude,
+            status: .working,
+            enteredAt: Date().addingTimeInterval(-30),
+            lastOutputAt: Date().addingTimeInterval(-20 * 60)
+        )
+        let adapter = MockHerdrAdapter(
+            processInfoResult: ProcessInfoResult(
+                shellPid: 123,
+                foregroundProcesses: [ForegroundProcess(pid: 456, name: "node", argv0: nil, cmdline: nil, cwd: nil)]
+            )
+        )
+        let verdict = await Diagnoser().diagnose(agent: agent, adapter: adapter)
+        #expect(!verdict.isSilent)
+    }
+
+    @Test("Silence in a new working episode is measured from the episode start")
+    func silentSinceIsEpisodeStart() async {
+        let entered = Date().addingTimeInterval(-600)
+        let agent = Agent(
+            id: AgentID("w1:p1"),
+            kind: .claude,
+            status: .working,
+            enteredAt: entered,
+            lastOutputAt: entered.addingTimeInterval(-3600)
+        )
+        let adapter = MockHerdrAdapter(
+            processInfoResult: ProcessInfoResult(
+                shellPid: 123,
+                foregroundProcesses: [ForegroundProcess(pid: 456, name: "node", argv0: nil, cmdline: nil, cwd: nil)]
+            )
+        )
+        let verdict = await Diagnoser().diagnose(agent: agent, adapter: adapter)
+        guard case .silent(let since, _) = verdict else {
+            Issue.record("Expected silent, got \(verdict)")
+            return
+        }
+        #expect(since == entered)
+    }
+
+    @Test("Output inside the current episode still drives the silent clock")
+    func inEpisodeOutputDrivesSilentClock() async {
+        let lastOutput = Date().addingTimeInterval(-400)
+        let agent = Agent(
+            id: AgentID("w1:p1"),
+            kind: .claude,
+            status: .working,
+            enteredAt: Date().addingTimeInterval(-3600),
+            lastOutputAt: lastOutput
+        )
+        let adapter = MockHerdrAdapter(
+            processInfoResult: ProcessInfoResult(
+                shellPid: 123,
+                foregroundProcesses: [ForegroundProcess(pid: 456, name: "node", argv0: nil, cmdline: nil, cwd: nil)]
+            )
+        )
+        let verdict = await Diagnoser().diagnose(agent: agent, adapter: adapter)
+        guard case .silent(let since, _) = verdict else {
+            Issue.record("Expected silent, got \(verdict)")
+            return
+        }
+        #expect(since == lastOutput)
     }
 
     @Test("Blocked is awaiting input, not silent, even with a stale lastOutputAt")
@@ -489,6 +560,7 @@ struct DiagnoserCpuStateTests {
             id: agentId,
             kind: .claude,
             status: .working,
+            enteredAt: Date().addingTimeInterval(-3600),
             lastOutputAt: Date().addingTimeInterval(-400) // 400 seconds ago to trigger silent
         )
         
@@ -517,6 +589,7 @@ struct DiagnoserCpuStateTests {
             id: agentId,
             kind: .claude,
             status: .working,
+            enteredAt: Date().addingTimeInterval(-3600),
             lastOutputAt: Date().addingTimeInterval(-400) // 400 seconds ago to trigger silent
         )
         

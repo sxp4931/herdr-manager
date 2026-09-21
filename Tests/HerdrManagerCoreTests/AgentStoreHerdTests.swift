@@ -613,6 +613,7 @@ struct DiagnoseAllRaceTests {
                 id: id,
                 status: .working,
                 stateChangeSeq: 3,
+                enteredAt: Date().addingTimeInterval(-30 * 60),
                 lastOutputAt: Date().addingTimeInterval(-20 * 60),
                 verdict: .healthy
             )
