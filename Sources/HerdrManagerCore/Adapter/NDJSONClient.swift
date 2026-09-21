@@ -8,7 +8,7 @@ import Glibc
 
 // MARK: - NDJSONClientError
 
-public enum NDJSONClientError: Error, Sendable, CustomStringConvertible {
+public enum NDJSONClientError: Error, Sendable, CustomStringConvertible, LocalizedError {
     case socketCreationFailed(Int32)
     case connectFailed(String, Int32)
     case sendFailed(Int32)
@@ -35,6 +35,11 @@ public enum NDJSONClientError: Error, Sendable, CustomStringConvertible {
             return "socket I/O timed out"
         }
     }
+
+    /// UI and MCP render `localizedDescription`; without this it bridges to
+    /// NSError's generic "The operation couldn't be completed" and drops
+    /// the socket path, errno, and herdr's own message.
+    public var errorDescription: String? { description }
 }
 
 /// Bounded NDJSON framing. A missing newline or a multi-megabyte pane.read

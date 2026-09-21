@@ -26,7 +26,7 @@ struct MCPServerMain {
 
 // MARK: - Revalidation Errors
 
-private enum MCPRevalidationError: Error, CustomStringConvertible {
+private enum MCPRevalidationError: Error, CustomStringConvertible, LocalizedError {
     case paneGone(String)
     case occupantChanged(expected: String, current: String)
     case seqAdvanced(expected: UInt64, current: UInt64)
@@ -47,10 +47,13 @@ private enum MCPRevalidationError: Error, CustomStringConvertible {
             return "Writes not enabled: \(reason)"
         }
     }
+
+    var errorDescription: String? { description }
 }
 
-private struct AgentResolutionError: Error, CustomStringConvertible {
+private struct AgentResolutionError: Error, CustomStringConvertible, LocalizedError {
     let description: String
+    var errorDescription: String? { description }
 }
 
 // MARK: - Rate Limiter

@@ -1221,3 +1221,35 @@ struct NDJSONResponseUnwrapTests {
         #expect(detail != nil)
     }
 }
+
+/// Shepherd and MCP render failures with `error.localizedDescription`.
+/// For an enum that is only CustomStringConvertible that bridges to
+/// "The operation couldn't be completed. (…Error error 4.)", so "Connect
+/// failed:" / "Approve failed:" lost the socket path, errno, and herdr's
+/// own message.
+@Suite("Core errors keep their reason in localizedDescription")
+struct CoreErrorDescriptionTests {
+    @Test("NDJSONClientError carries herdr's message and the socket path")
+    func ndjsonClientError() {
+        let rejected: Error = NDJSONClientError.invalidResponse("pane not found")
+        #expect(rejected.localizedDescription == "invalid response: pane not found")
+
+        let connect: Error = NDJSONClientError.connectFailed("/tmp/herdr.sock", 2)
+        #expect(connect.localizedDescription.contains("/tmp/herdr.sock"))
+        #expect(connect.localizedDescription.contains("errno 2"))
+    }
+
+    @Test("SharedActionStoreError carries the store failure")
+    func sharedActionStoreError() {
+        let error: Error = SharedActionStoreError.writeFailed("rename failed (errno 21)")
+        #expect(error.localizedDescription.contains("rename failed (errno 21)"))
+        let locked: Error = SharedActionStoreError.lockUnavailable("fcntl lock failed")
+        #expect(locked.localizedDescription.contains("fcntl lock failed"))
+    }
+
+    @Test("SettingsStoreError carries the size refusal")
+    func settingsStoreError() {
+        let error: Error = SettingsStoreError.fileTooLarge
+        #expect(error.localizedDescription == SettingsStoreError.fileTooLarge.description)
+    }
+}

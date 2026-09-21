@@ -6,7 +6,7 @@ import Darwin
 /// Thrown when the cross-process advisory lock cannot be acquired. The store
 /// refuses to proceed unlocked — degrading silently to an unguarded
 /// read-modify-write is exactly the corruption risk the lock exists to prevent.
-public enum SharedActionStoreError: Error, CustomStringConvertible {
+public enum SharedActionStoreError: Error, CustomStringConvertible, LocalizedError {
     case lockUnavailable(String)
     /// The on-disk store is larger than `maxFileBytes`. Reads treat it as
     /// empty; writes must throw rather than replace it with a one-row file.
@@ -30,6 +30,9 @@ public enum SharedActionStoreError: Error, CustomStringConvertible {
             return "Pending-action store write failed: \(detail)"
         }
     }
+
+    /// Keeps the reason in `localizedDescription` ("Approve failed: …").
+    public var errorDescription: String? { description }
 }
 
 // MARK: - SharedActionStore

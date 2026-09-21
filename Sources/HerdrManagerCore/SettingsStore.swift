@@ -4,7 +4,7 @@ import Foundation
 
 /// Thrown when a write would replace an oversized settings file with a
 /// freshly encoded default document.
-public enum SettingsStoreError: Error, CustomStringConvertible {
+public enum SettingsStoreError: Error, CustomStringConvertible, LocalizedError {
     /// The on-disk file is larger than `maxFileBytes`.
     case fileTooLarge
     public var description: String {
@@ -13,6 +13,9 @@ public enum SettingsStoreError: Error, CustomStringConvertible {
             return "Settings file exceeds \(SettingsStore.maxFileBytes) bytes; refusing to overwrite"
         }
     }
+
+    /// Keeps the reason in `localizedDescription` ("Settings save failed: …").
+    public var errorDescription: String? { description }
 }
 
 // MARK: - Settings
