@@ -761,14 +761,6 @@ struct PanelView: View {
         AttentionTriage.needsYou(agent)
     }
 
-    /// Worst-first priority for the "Needs you" ranking. Process-gone is
-    /// grouped with blocked (both map to `Brand.blocked` in `Brand.face(for:)`
-    /// — the same "this needs you NOW" urgency), then silent. `done` agents are
-    /// excluded from "Needs you" entirely (a finished agent does not need you).
-    private static func needsYouPriority(_ agent: Agent) -> Int {
-        AttentionTriage.priority(agent)
-    }
-
     /// The filter text, trimmed and case-folded. Callers hoist this out of
     /// their loop and pass it in: normalising the raw field inside the
     /// predicate re-trimmed and re-lowercased the query once per agent, per
@@ -805,19 +797,19 @@ struct PanelView: View {
         let query = searchQuery
         return appModel.store.agents.values
             .filter { Self.needsYou($0) && matchesSearch($0, query: query) }
-            .sorted { a, b in
-                let pa = Self.needsYouPriority(a)
-                let pb = Self.needsYouPriority(b)
-                if pa != pb { return pa < pb }
-                return a.enteredAt < b.enteredAt // longest-waiting first
-            }
+            // Worst first, longest-waiting first, then pane id so equal rows
+            // do not swap on each re-render.
+            .sorted(by: AttentionTriage.ranksBefore)
     }
 
     private var runningAgents: [Agent] {
         let query = searchQuery
         return appModel.store.agents.values
             .filter { $0.status == .working && matchesSearch($0, query: query) }
-            .sorted { $0.enteredAt < $1.enteredAt }
+            .sorted { a, b in
+                if a.enteredAt != b.enteredAt { return a.enteredAt < b.enteredAt }
+                return a.id.raw < b.id.raw
+            }
     }
 
     private var allGroups: [WorkspaceGroup] {

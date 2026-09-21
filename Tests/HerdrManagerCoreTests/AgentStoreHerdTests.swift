@@ -577,10 +577,49 @@ struct AttentionTriageTests {
             verdict: .healthy
         )) == 2)
     }
+
+    @Test("Equal priority and dwell fall back to pane id, whatever the input order")
+    func tieBreaksOnPaneId() {
+        let now = Date()
+        let agents = ["w2:p1", "w1:p3", "w1:p1", "w1:p2"].map {
+            Agent(id: AgentID($0), status: .blocked, enteredAt: now)
+        }
+        let expected = ["w1:p1", "w1:p2", "w1:p3", "w2:p1"]
+        #expect(agents.sorted(by: AttentionTriage.ranksBefore).map(\.id.raw) == expected)
+        #expect(agents.reversed().sorted(by: AttentionTriage.ranksBefore).map(\.id.raw) == expected)
+    }
+
+    @Test("Priority outranks dwell, and dwell outranks pane id")
+    func priorityThenDwellThenId() {
+        let now = Date()
+        let longBlocked = Agent(id: AgentID("w9:p9"), status: .blocked, enteredAt: now.addingTimeInterval(-600))
+        let newBlocked = Agent(id: AgentID("w1:p1"), status: .blocked, enteredAt: now)
+        let oldDone = Agent(id: AgentID("w0:p0"), status: .done, enteredAt: now.addingTimeInterval(-3600))
+        let sorted = [oldDone, newBlocked, longBlocked].sorted(by: AttentionTriage.ranksBefore)
+        #expect(sorted.map(\.id.raw) == ["w9:p9", "w1:p1", "w0:p0"])
+    }
 }
 
 @Suite("AgentStore.attentionAgents")
 struct AttentionAgentsTests {
+    @Test("Equal-priority agents with the same dwell keep a stable pane-id order")
+    @MainActor
+    func stableOrderForTies() {
+        let store = AgentStore()
+        let now = Date()
+        for raw in ["w3:p1", "w1:p2", "w2:p7", "w1:p1"] {
+            store.agents[AgentID(raw)] = Agent(id: AgentID(raw), status: .blocked, enteredAt: now)
+        }
+        let first = store.attentionAgents.map(\.id.raw)
+        #expect(first == ["w1:p1", "w1:p2", "w2:p7", "w3:p1"])
+
+        // Mutating the dictionary (a new pane joins, one leaves) must not
+        // reshuffle the rows that were already tied.
+        store.agents[AgentID("w0:p1")] = Agent(id: AgentID("w0:p1"), status: .working, enteredAt: now)
+        store.agents.removeValue(forKey: AgentID("w2:p7"))
+        #expect(store.attentionAgents.map(\.id.raw) == ["w1:p1", "w1:p2", "w3:p1"])
+    }
+
     @Test("Ranks process-gone before silent and includes done in the glance list")
     @MainActor
     func ranksWorstFirst() {

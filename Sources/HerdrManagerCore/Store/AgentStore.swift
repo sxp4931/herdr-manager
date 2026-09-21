@@ -377,12 +377,7 @@ public final class AgentStore {
     public var attentionAgents: [Agent] {
         agents.values
             .filter { AttentionTriage.attentionWorthy($0) }
-            .sorted { a, b in
-                let pa = AttentionTriage.priority(a)
-                let pb = AttentionTriage.priority(b)
-                if pa != pb { return pa < pb }
-                return a.enteredAt < b.enteredAt
-            }
+            .sorted(by: AttentionTriage.ranksBefore)
     }
 
     public var blockedCount: Int {

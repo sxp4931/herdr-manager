@@ -1637,10 +1637,9 @@ actor MCPServer {
             let wsName = workspaceNames[wsId] ?? wsId
             lines.append("\(wsName) (\(wsId)) — \(wsAgents.count) agent\(wsAgents.count == 1 ? "" : "s")")
 
-            // Sort: blocked first, then done, then silent, then working, then idle
-            let sorted = wsAgents.sorted { a, b in
-                statusPriority(a) < statusPriority(b)
-            }
+            // Worst first (gone/blocked, silent, done, rest), then by pane id
+            // so equal-priority rows keep their order between calls.
+            let sorted = wsAgents.sorted(by: AttentionTriage.ranksBefore)
 
             for agent in sorted {
                 let glyph = statusGlyph(agent)
@@ -1665,7 +1664,7 @@ actor MCPServer {
         lines.append(pad("Status", 8) + " " + pad("Name", 20) + " " + pad("Kind", 10) + " " + pad("Workspace", 12) + " " + pad("Pane", 8) + " Verdict")
         lines.append(String(repeating: "─", count: 90))
 
-        let sorted = agents.sorted { statusPriority($0) < statusPriority($1) }
+        let sorted = agents.sorted(by: AttentionTriage.ranksBefore)
         for agent in sorted {
             let glyph = statusGlyph(agent)
             let kindStr = agentKindString(agent.kind)
@@ -1917,10 +1916,6 @@ actor MCPServer {
         case .idle: return "🟢"
         case .unknown: return "⚪"
         }
-    }
-
-    nonisolated private static func statusPriority(_ agent: Agent) -> Int {
-        AttentionTriage.priority(agent)
     }
 
     nonisolated private static func verdictName(_ verdict: Verdict) -> String {

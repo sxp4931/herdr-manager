@@ -43,6 +43,18 @@ public enum AttentionTriage: Sendable {
         return 3
     }
 
+    /// Worst-first ordering shared by every attention list: priority, then
+    /// longest-waiting, then pane id. The id tie-break keeps equal rows from
+    /// swapping between redraws — the store's herd is a Dictionary (no
+    /// stable order) and `displayAgents` stamps one `now` on every agent.
+    public static func ranksBefore(_ a: Agent, _ b: Agent) -> Bool {
+        let pa = priority(a)
+        let pb = priority(b)
+        if pa != pb { return pa < pb }
+        if a.enteredAt != b.enteredAt { return a.enteredAt < b.enteredAt }
+        return a.id.raw < b.id.raw
+    }
+
     /// Exclusive badge/footer counts. A stale silent verdict on done or idle
     /// is not silence; process-gone on a blocked pane is gone, not blocked.
     public struct Counts: Equatable, Sendable {
