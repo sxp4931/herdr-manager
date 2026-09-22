@@ -33,6 +33,9 @@ import SQLite3
 ///   also crossed a week or month start can count twice. Grok, Cursor, and
 ///   opencode still re-read a changed file whole: Grok's events depend on
 ///   sidecars, the Cursor log is small, and SQLite is not append-only.
+/// - The herd is not a cache input. A Claude transcript's project directory
+///   attributes the events it logged no cwd for when the scan aggregates,
+///   so an agent starting or stopping there does not re-read its logs.
 /// - Cached events older than every finite window are folded into one event
 ///   per (provider, session, model, cwd) by `TokenUsageCompaction`, so the
 ///   cache grows with sessions rather than with every logged turn. The
@@ -113,19 +116,24 @@ public actor LocalTokenMeter {
         }
 
         for project in projectDirectories where isDirectory(project) {
+            // Applied when aggregating, not while parsing: as a parse input
+            // it keyed the cache, so an agent starting or stopping in the
+            // project re-read every transcript there from byte 0, and so did
+            // the first refresh after launch once the herd loaded.
             let projectHint = cwdHints[project.lastPathComponent]
             for file in jsonlFiles(in: project) {
-                aggregator.add(scanClaudeTranscript(file, cwdHint: projectHint))
+                aggregator.add(scanClaudeTranscript(file), unloggedCwd: projectHint)
             }
         }
     }
 
-    private func scanClaudeTranscript(_ file: URL, cwdHint: String?) -> [TokenUsageEvent] {
+    /// Events carry the cwd the transcript logged, or nil before the first
+    /// one; the caller attributes those to the project directory.
+    private func scanClaudeTranscript(_ file: URL) -> [TokenUsageEvent] {
         let sessionID = claudeSessionID(for: file)
         return appendOnlyLogEvents(
             for: file,
-            extra: cwdHint ?? "",
-            initialState: ClaudeTranscriptState(rawCwd: cwdHint, cwd: normalizedPath(cwdHint))
+            initialState: ClaudeTranscriptState()
         ) { state, lineNumber, data in
             let looksLikeUsage = dataContains(data, "\"assistant\"") && dataContains(data, "\"usage\"")
             let looksLikeCwd = dataContains(data, "\"cwd\"") && data.count <= 65_536
@@ -1629,15 +1637,17 @@ struct TokenMeterAggregator {
         self.overall = emptyMap
     }
 
-    mutating func add(_ events: [TokenUsageEvent]) {
+    /// - Parameter unloggedCwd: Attribution cwd for events whose log did not
+    ///   record one (a Claude transcript's project directory).
+    mutating func add(_ events: [TokenUsageEvent], unloggedCwd: String? = nil) {
         for event in events {
-            add(event)
+            add(event, unloggedCwd: unloggedCwd)
         }
     }
 
-    mutating func add(_ event: TokenUsageEvent) {
+    mutating func add(_ event: TokenUsageEvent, unloggedCwd: String? = nil) {
         guard event.date <= now else { return }
-        let attribution = matchingAgent(for: event)
+        let attribution = matchingAgent(provider: event.provider, cwd: event.cwd ?? unloggedCwd)
         if attribution.ambiguous { ambiguous += 1 }
         let sessionKey = "\(event.provider.rawValue):\(event.sessionID)"
         let cost = pricing(for: event).map { $0.cost(for: event.usage) }
@@ -1691,16 +1701,16 @@ struct TokenMeterAggregator {
         return pricing
     }
 
-    private mutating func matchingAgent(for event: TokenUsageEvent) -> Attribution {
-        guard let eventCWD = event.cwd else {
+    private mutating func matchingAgent(provider: TokenMeterProvider, cwd: String?) -> Attribution {
+        guard let eventCWD = cwd else {
             return Attribution(agentID: nil, ambiguous: false)
         }
-        let key = AttributionKey(provider: event.provider, cwd: eventCWD)
+        let key = AttributionKey(provider: provider, cwd: eventCWD)
         if let cached = attributionCache[key] {
             return cached
         }
         let matches = candidates.filter { candidate in
-            (candidate.matchesAnyProvider || candidate.provider == event.provider)
+            (candidate.matchesAnyProvider || candidate.provider == provider)
                 && candidate.cwd == eventCWD
         }
         let attribution: Attribution

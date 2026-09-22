@@ -199,6 +199,43 @@ struct TokenMeterAppendOnlyTests {
             == fresh.agentSummary(for: agent.id, window: .allTime))
     }
 
+    @Test("An agent starting or stopping in a Claude project does not re-read its transcripts")
+    func claudeTranscriptSurvivesHerdChange() async throws {
+        let home = try makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        // No cwd is logged, so attribution relies on the project directory.
+        let file = home
+            .appendingPathComponent(".claude/projects/-repo", isDirectory: true)
+            .appendingPathComponent("session.jsonl")
+        let transcript = lines([
+            #"{"type":"assistant","timestamp":"2026-01-15T11:00:00Z","uuid":"line-1","message":{"id":"message-1","model":"claude-sonnet-4.5","usage":{"input_tokens":10,"output_tokens":4}}}"#,
+        ])
+        try write(transcript, to: file)
+
+        let meter = LocalTokenMeter(homeDirectory: home)
+        // The first refresh after launch runs before the herd has loaded.
+        _ = await snapshot(meter)
+        let launchRead = await meter.lastSnapshotLogBytesRead
+        #expect(launchRead == UInt64(transcript.utf8.count))
+
+        let agent = Agent(
+            id: AgentID("w1:p2"),
+            kind: .claude,
+            enteredAt: date("2026-01-15T10:00:00Z"),
+            cwd: "/repo"
+        )
+        let started = await snapshot(meter, agents: [agent])
+        let startedRead = await meter.lastSnapshotLogBytesRead
+        #expect(startedRead == 0)
+        #expect(started.agentSummary(for: agent.id, window: .day).usage.totalTokens == 14)
+
+        let stopped = await snapshot(meter)
+        let stoppedRead = await meter.lastSnapshotLogBytesRead
+        #expect(stoppedRead == 0)
+        #expect(stopped.agentSummary(for: agent.id, window: .day).hasUsage == false)
+        #expect(stopped.providerSummary(for: .claude, window: .day).usage.totalTokens == 14)
+    }
+
     @Test("The Kimi model logged before a refresh prices usage appended after it")
     func kimiModelCarriesAcrossRefresh() async throws {
         let home = try makeTemporaryHome()
