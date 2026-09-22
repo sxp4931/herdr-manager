@@ -378,28 +378,155 @@ struct DwellTrackerPersistenceTests {
         #expect(tracker.entry(for: AgentID("w1:p1")) == nil)
     }
 
-    @Test("save does not overwrite an oversized dwell-state file")
-    func saveDoesNotWipeOversizedFile() throws {
+    @Test("An oversized dwell-state file is replaced by a compact snapshot of the live herd")
+    func saveReplacesOversizedFile() throws {
+        // load used to disable saving for good once the file passed the
+        // cap, so a file bloated by closed panes stayed that way forever.
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let fileURL = dir.appendingPathComponent("dwell-state.json")
-        let marker = Data(repeating: 0x61, count: DwellTracker.maxFileBytes + 1)
+        try Data(repeating: 0x61, count: DwellTracker.maxFileBytes + 1).write(to: fileURL)
+
+        let id = AgentID("w1:p1")
+        let live = [id: Agent(id: id, kind: .claude, status: .working, stateChangeSeq: 4)]
+        let tracker = DwellTracker(fileURL: fileURL)
+        tracker.sync(liveAgents: live)
+        #expect(tracker.load(currentAgents: live).isEmpty)
+        tracker.save()
+
+        let written = try Data(contentsOf: fileURL)
+        #expect(written.count < DwellTracker.maxFileBytes)
+        let reloaded = DwellTracker(fileURL: fileURL).load(currentAgents: live)
+        #expect(reloaded[id]?.stateChangeSeq == 4)
+        #expect(reloaded[id]?.status == .working)
+    }
+
+    @Test("A snapshot larger than the cap is not written")
+    func saveSkipsOversizedSnapshot() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("dwell-state.json")
+        let marker = Data("{\"entries\":[]}".utf8)
         try marker.write(to: fileURL)
 
+        var herd: [AgentID: Agent] = [:]
+        for index in 0..<3000 {
+            let id = AgentID("w1:p\(index)")
+            herd[id] = Agent(id: id, kind: .custom("agent-\(index)"), status: .working, stateChangeSeq: 1)
+        }
         let tracker = DwellTracker(fileURL: fileURL)
-        _ = tracker.load(currentAgents: [:])
-        tracker.update(
-            agentId: AgentID("w1:p1"),
-            status: .working,
-            enteredAt: Date(),
-            lastOutputAt: nil,
-            occupantFingerprint: "claude",
-            stateChangeSeq: 1
-        )
+        tracker.sync(liveAgents: herd)
         tracker.save()
-        let leftover = try Data(contentsOf: fileURL)
-        #expect(leftover.count == marker.count)
+        #expect(try Data(contentsOf: fileURL) == marker)
+    }
+
+    @Test("sync forgets panes that left the herd, and save drops them from the file")
+    func syncForgetsClosedPanes() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("dwell-state.json")
+
+        let kept = AgentID("w1:p1")
+        let closed = AgentID("w1:p2")
+        let tracker = DwellTracker(fileURL: fileURL)
+        tracker.sync(liveAgents: [
+            kept: Agent(id: kept, kind: .claude, status: .blocked, stateChangeSeq: 3),
+            closed: Agent(id: closed, kind: .codex, status: .working, stateChangeSeq: 7),
+        ])
+        #expect(tracker.allEntries().count == 2)
+
+        tracker.sync(liveAgents: [kept: Agent(id: kept, kind: .claude, status: .blocked, stateChangeSeq: 3)])
+        #expect(tracker.entry(for: closed) == nil)
+        #expect(tracker.entry(for: kept)?.occupantFingerprint == "claude")
+        tracker.save()
+
+        // Even a pane that came back with the same kind and seq is not
+        // restored from the save made after it closed.
+        let reloaded = DwellTracker(fileURL: fileURL).load(currentAgents: [
+            kept: Agent(id: kept, kind: .claude, status: .blocked, stateChangeSeq: 3),
+            closed: Agent(id: closed, kind: .codex, status: .working, stateChangeSeq: 7),
+        ])
+        #expect(Set(reloaded.keys) == [kept])
+    }
+
+    @Test("load drops saved panes with no live match and keeps synced live ones")
+    func loadDropsUnmatchedEntries() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("dwell-state.json")
+
+        let restoredId = AgentID("w1:p1")
+        let goneId = AgentID("w1:p2")
+        let newId = AgentID("w1:p3")
+        let longAgo = Date().addingTimeInterval(-3600)
+        let writer = DwellTracker(fileURL: fileURL)
+        writer.update(agentId: restoredId, status: .blocked, enteredAt: longAgo, lastOutputAt: nil,
+                      occupantFingerprint: "claude", stateChangeSeq: 6)
+        writer.update(agentId: goneId, status: .working, enteredAt: longAgo, lastOutputAt: nil,
+                      occupantFingerprint: "codex", stateChangeSeq: 2)
+        writer.save()
+
+        let live = [
+            restoredId: Agent(id: restoredId, kind: .claude, status: .blocked, stateChangeSeq: 6),
+            newId: Agent(id: newId, kind: .gemini, status: .working, stateChangeSeq: 1),
+        ]
+        let tracker = DwellTracker(fileURL: fileURL)
+        tracker.sync(liveAgents: live)
+        let restored = tracker.load(currentAgents: live)
+
+        #expect(Set(restored.keys) == [restoredId])
+        #expect(Set(tracker.allEntries().keys) == [restoredId, newId])
+        #expect(tracker.entry(for: restoredId)?.enteredAt == restored[restoredId]?.enteredAt)
+    }
+
+    @Test("Restore guard: a seq of 0 never restores")
+    func zeroSeqDoesNotRestore() throws {
+        // After a herdr restart a reused pane id running the same kind
+        // starts again at seq 0; kind alone must not hand it a dead
+        // episode's enteredAt.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("dwell-state.json")
+
+        let id = AgentID("w1:p1")
+        let writer = DwellTracker(fileURL: fileURL)
+        writer.update(agentId: id, status: .working, enteredAt: Date().addingTimeInterval(-86_400),
+                      lastOutputAt: nil, occupantFingerprint: "claude", stateChangeSeq: 0)
+        writer.save()
+
+        let restored = DwellTracker(fileURL: fileURL).load(currentAgents: [
+            id: Agent(id: id, kind: .claude, status: .working, stateChangeSeq: 0)
+        ])
+        #expect(restored.isEmpty)
+    }
+
+    @Test("Restore guard: a status mismatch discards the entry")
+    func statusMismatchDoesNotRestore() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("dwell-state.json")
+
+        let id = AgentID("w1:p1")
+        let writer = DwellTracker(fileURL: fileURL)
+        writer.update(agentId: id, status: .working, enteredAt: Date().addingTimeInterval(-600),
+                      lastOutputAt: nil, occupantFingerprint: "claude", stateChangeSeq: 5)
+        writer.save()
+
+        let restored = DwellTracker(fileURL: fileURL).load(currentAgents: [
+            id: Agent(id: id, kind: .claude, status: .blocked, stateChangeSeq: 5)
+        ])
+        #expect(restored.isEmpty)
     }
 }
