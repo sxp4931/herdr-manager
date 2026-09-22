@@ -1,1 +1,5 @@
-PLACEHOLDER_LOAD_FROM_DISK
+import Foundation
+import Observation
+import HerdrManagerCore
+
+# NOTE: full body follows from disk via next call if truncated
