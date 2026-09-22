@@ -24,6 +24,15 @@ import SQLite3
 ///   menu-bar refresh does not re-read gigabyte logs. It is pruned to files
 ///   seen in the current scan. The All-time usage window needs those
 ///   historical events; dropping them would under-count.
+/// - Claude, Codex, and Kimi logs are append-only. One that grew is read
+///   from its last complete line with the parser state saved there, so a
+///   live transcript costs only its new bytes per refresh. A log that
+///   shrank, or whose 64 bytes before that point changed, is read from the
+///   start. An edit further back in an otherwise growing log is not seen,
+///   and a Claude message whose repeated usage lines straddle a read that
+///   also crossed a week or month start can count twice. Grok, Cursor, and
+///   opencode still re-read a changed file whole: Grok's events depend on
+///   sidecars, the Cursor log is small, and SQLite is not append-only.
 /// - Cached events older than every finite window are folded into one event
 ///   per (provider, session, model, cwd) by `TokenUsageCompaction`, so the
 ///   cache grows with sessions rather than with every logged turn. The
@@ -36,13 +45,17 @@ import SQLite3
 public actor LocalTokenMeter {
     private let homeDirectory: URL
     private let iso8601Formatter: ISO8601DateFormatter
-    /// Parsed usage events for files whose size+mtime have not changed.
-    /// Avoids re-reading multi-gigabyte JSONL/SQLite logs every 30s.
+    /// Parsed usage events per file, and for append-only logs where the next
+    /// read resumes. Avoids re-reading multi-gigabyte JSONL/SQLite logs
+    /// every 30s.
     private var fileEventCache: [String: CachedFileEvents] = [:]
     private var seenCacheKeysThisScan: Set<String> = []
     /// Events before this date only count toward All-time in the current
     /// scan, so the cache may keep them folded.
     private var compactionCutoff: Date = .distantPast
+    /// Bytes of append-only logs the last snapshot read. Internal so tests
+    /// can prove a refresh reads only what was appended.
+    private(set) var lastSnapshotLogBytesRead: UInt64 = 0
 
     public init(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) {
         self.homeDirectory = homeDirectory
@@ -64,6 +77,7 @@ public actor LocalTokenMeter {
         }
 
         seenCacheKeysThisScan.removeAll(keepingCapacity: true)
+        lastSnapshotLogBytesRead = 0
         compactionCutoff = TokenUsageCompaction.cutoff(now: now, calendar: calendar)
         // Fold each file into the window accumulators so a 30s refresh never
         // concatenates every cached event into a second all-provider array.
@@ -101,35 +115,36 @@ public actor LocalTokenMeter {
         for project in projectDirectories where isDirectory(project) {
             let projectHint = cwdHints[project.lastPathComponent]
             for file in jsonlFiles(in: project) {
-                aggregator.add(cachedEvents(for: file, extra: projectHint ?? "") {
-                    scanClaudeTranscript(file, cwdHint: projectHint)
-                })
+                aggregator.add(scanClaudeTranscript(file, cwdHint: projectHint))
             }
         }
     }
 
     private func scanClaudeTranscript(_ file: URL, cwdHint: String?) -> [TokenUsageEvent] {
-        let fallbackDate = modificationDate(of: file)
         let sessionID = claudeSessionID(for: file)
-        var currentCwd = cwdHint
-        var eventsByID: [String: TokenUsageEvent] = [:]
-
-        JSONLLineReader.forEachLine(in: file) { lineNumber, data in
+        return appendOnlyLogEvents(
+            for: file,
+            extra: cwdHint ?? "",
+            initialState: ClaudeTranscriptState(rawCwd: cwdHint, cwd: normalizedPath(cwdHint))
+        ) { state, lineNumber, data in
             let looksLikeUsage = dataContains(data, "\"assistant\"") && dataContains(data, "\"usage\"")
             let looksLikeCwd = dataContains(data, "\"cwd\"") && data.count <= 65_536
-            guard looksLikeUsage || looksLikeCwd else { return }
+            guard looksLikeUsage || looksLikeCwd else { return nil }
 
-            guard let record = jsonObject(from: data) else { return }
+            guard let record = jsonObject(from: data) else { return nil }
 
-            if let cwd = record["cwd"] as? String, !cwd.isEmpty {
-                currentCwd = cwd
+            // Resolved once per change, not once per usage line: the
+            // symlink walk hits the filesystem.
+            if let cwd = record["cwd"] as? String, !cwd.isEmpty, cwd != state.rawCwd {
+                state.rawCwd = cwd
+                state.cwd = normalizedPath(cwd)
             }
             guard looksLikeUsage,
                   record["type"] as? String == "assistant",
                   let message = record["message"] as? [String: Any],
                   let usage = message["usage"] as? [String: Any],
                   integerOptional(usage["output_tokens"]) != nil else {
-                return
+                return nil
             }
 
             let output = integer(usage["output_tokens"])
@@ -140,7 +155,7 @@ public actor LocalTokenMeter {
             let write5m = integer(cacheCreationDetails?["ephemeral_5m_input_tokens"])
             let write1h = integer(cacheCreationDetails?["ephemeral_1h_input_tokens"])
             let effectiveWrite5m = write5m > 0 || write1h > 0 ? write5m : cacheCreation
-            let date = parseDate(record["timestamp"]) ?? fallbackDate
+            let date = parseDate(record["timestamp"]) ?? modificationDate(of: file)
             let model = message["model"] as? String
             let usageID = (message["id"] as? String)
                 ?? (record["uuid"] as? String)
@@ -154,19 +169,19 @@ public actor LocalTokenMeter {
                 outputTokens: output
             )
 
-            eventsByID[usageID] = TokenUsageEvent(
+            // Claude repeats a message's usage on each of its content
+            // lines. The shared id makes the last one replace the others.
+            return TokenUsageEvent(
                 id: "claude:\(sessionID):\(usageID)",
                 sessionID: sessionID,
                 provider: .claude,
                 model: model,
-                cwd: normalizedPath(currentCwd),
+                cwd: state.cwd,
                 date: date,
                 usage: tokenUsage,
                 actions: toolCount
             )
         }
-
-        return eventsByID.values.sorted { $0.date < $1.date }
     }
 
     private func claudeSessionID(for file: URL) -> String {
@@ -182,61 +197,50 @@ public actor LocalTokenMeter {
     private func scanCodex(into aggregator: inout TokenMeterAggregator) {
         let root = homeDirectory.appendingPathComponent(".codex/sessions", isDirectory: true)
         for file in jsonlFiles(in: root) {
-            aggregator.add(cachedEvents(for: file) {
-                scanCodexSession(file)
-            })
+            aggregator.add(scanCodexSession(file))
         }
     }
 
     private func scanCodexSession(_ file: URL) -> [TokenUsageEvent] {
-        var sessionID: String?
-        var cwd: String?
-        var fallbackDate = modificationDate(of: file)
-        var previous: TokenUsage?
-        var currentModel: String?
-        var events: [TokenUsageEvent] = []
-        var accepted = false
-        var sawFirstLine = false
-
-        JSONLLineReader.forEachLine(in: file) { lineNumber, data in
-            if !sawFirstLine {
-                sawFirstLine = true
+        appendOnlyLogEvents(for: file, initialState: CodexSessionState()) { state, lineNumber, data in
+            if !state.sawFirstLine {
+                state.sawFirstLine = true
                 guard let metadata = jsonObject(from: data),
                       metadata["type"] as? String == "session_meta",
                       let metadataPayload = metadata["payload"] as? [String: Any],
                       let parsedCwd = normalizedPath(metadataPayload["cwd"] as? String),
                       !parsedCwd.isEmpty else {
-                    return
+                    return nil
                 }
-                accepted = true
-                cwd = parsedCwd
-                sessionID = (metadataPayload["id"] as? String)
+                state.accepted = true
+                state.cwd = parsedCwd
+                state.sessionID = (metadataPayload["id"] as? String)
                     ?? (metadataPayload["session_id"] as? String)
                     ?? file.deletingPathExtension().lastPathComponent
-                fallbackDate = parseDate(metadata["timestamp"]) ?? fallbackDate
-                return
+                state.metaDate = parseDate(metadata["timestamp"])
+                return nil
             }
-            guard accepted else { return }
+            guard state.accepted else { return nil }
 
             guard dataContains(data, "token_count")
-                    || dataContains(data, "\"model\"") else { return }
+                    || dataContains(data, "\"model\"") else { return nil }
             guard let record = jsonObject(from: data),
                   let payload = record["payload"] as? [String: Any] else {
-                return
+                return nil
             }
 
             if let model = payload["model"] as? String, !model.isEmpty {
-                currentModel = model
+                state.currentModel = model
             } else if let info = payload["info"] as? [String: Any],
                       let model = info["model"] as? String,
                       !model.isEmpty {
-                currentModel = model
+                state.currentModel = model
             }
 
             guard payload["type"] as? String == "token_count",
                   let info = payload["info"] as? [String: Any],
                   let totals = info["total_token_usage"] as? [String: Any] else {
-                return
+                return nil
             }
 
             let current = TokenUsage(
@@ -245,21 +249,22 @@ public actor LocalTokenMeter {
                 cacheWrite5mTokens: integer(totals["cache_write_input_tokens"] ?? totals["cache_creation_input_tokens"]),
                 outputTokens: integer(totals["output_tokens"])
             )
-            let delta = deltaUsage(current, previous: previous)
-            previous = current
-            guard delta.totalTokens > 0, let sessionID, let cwd else { return }
+            let delta = deltaUsage(current, previous: state.previous)
+            state.previous = current
+            guard delta.totalTokens > 0, let sessionID = state.sessionID, let cwd = state.cwd else {
+                return nil
+            }
 
-            events.append(TokenUsageEvent(
+            return TokenUsageEvent(
                 id: "codex:\(sessionID):\(lineNumber)",
                 sessionID: sessionID,
                 provider: .codex,
-                model: currentModel,
+                model: state.currentModel,
                 cwd: cwd,
-                date: parseDate(record["timestamp"]) ?? fallbackDate,
+                date: parseDate(record["timestamp"]) ?? state.metaDate ?? modificationDate(of: file),
                 usage: delta
-            ))
+            )
         }
-        return accepted ? events : []
     }
 
     private func deltaUsage(_ current: TokenUsage, previous: TokenUsage?) -> TokenUsage {
@@ -299,32 +304,31 @@ public actor LocalTokenMeter {
             ) else { continue }
             for agentDirectory in agentDirectories where isDirectory(agentDirectory) {
                 let wire = agentDirectory.appendingPathComponent("wire.jsonl")
-                aggregator.add(cachedEvents(for: wire, extra: session.workDir ?? "") {
-                    scanKimiWire(
-                        wire,
-                        cwd: session.workDir,
-                        sessionID: session.directory.lastPathComponent + ":" + agentDirectory.lastPathComponent
-                    )
-                })
+                aggregator.add(scanKimiWire(
+                    wire,
+                    cwd: session.workDir,
+                    sessionID: session.directory.lastPathComponent + ":" + agentDirectory.lastPathComponent
+                ))
             }
         }
     }
 
     private func scanKimiWire(_ file: URL, cwd: String?, sessionID: String) -> [TokenUsageEvent] {
-        var currentModel: String?
-        var events: [TokenUsageEvent] = []
-        JSONLLineReader.forEachLine(in: file) { lineNumber, data in
+        appendOnlyLogEvents(
+            for: file,
+            extra: cwd ?? "",
+            initialState: KimiWireState()
+        ) { state, lineNumber, data in
             guard dataContains(data, "llm.request")
-                    || dataContains(data, "usage.record") else { return }
-            guard let object = jsonObject(from: data) else { return }
-            let date = epochDate(object["time"], milliseconds: true) ?? modificationDate(of: file)
+                    || dataContains(data, "usage.record") else { return nil }
+            guard let object = jsonObject(from: data) else { return nil }
             let type = object["type"] as? String
             if type == "llm.request" {
-                currentModel = (object["modelAlias"] as? String) ?? (object["model"] as? String)
+                state.currentModel = (object["modelAlias"] as? String) ?? (object["model"] as? String)
             }
             guard type == "usage.record",
                   object["usageScope"] as? String == "turn",
-                  let usage = object["usage"] as? [String: Any] else { return }
+                  let usage = object["usage"] as? [String: Any] else { return nil }
 
             let cacheRead = integer(usage["inputCacheRead"])
             let cacheCreation = integer(usage["inputCacheCreation"])
@@ -336,18 +340,17 @@ public actor LocalTokenMeter {
                 cacheWrite5mTokens: cacheCreation,
                 outputTokens: output
             )
-            guard tokenUsage.totalTokens > 0 else { return }
-            events.append(TokenUsageEvent(
+            guard tokenUsage.totalTokens > 0 else { return nil }
+            return TokenUsageEvent(
                 id: "kimi:\(sessionID):\(lineNumber)",
                 sessionID: sessionID,
                 provider: .kimi,
-                model: currentModel,
+                model: state.currentModel,
                 cwd: cwd,
-                date: date,
+                date: epochDate(object["time"], milliseconds: true) ?? modificationDate(of: file),
                 usage: tokenUsage
-            ))
+            )
         }
-        return events
     }
 
     // MARK: - Grok
@@ -1167,18 +1170,11 @@ public actor LocalTokenMeter {
             fileEventCache.removeValue(forKey: key)
             return []
         }
-        if var cached = fileEventCache[key],
+        if let cached = fileEventCache[key],
            cached.fingerprint == fingerprint,
            cached.extra == extra,
            cached.compactedBefore <= compactionCutoff {
-            // The cutoff only moves forward with the clock. Folding again
-            // keeps a long-lived cache from growing with each new month.
-            if cached.compactedBefore < compactionCutoff {
-                cached.events = TokenUsageCompaction.compact(cached.events, before: compactionCutoff)
-                cached.compactedBefore = compactionCutoff
-                fileEventCache[key] = cached
-            }
-            return cached.events
+            return unchangedEvents(key: key, cached)
         }
         // A cutoff that moved back (clock change, time zone, test `now`)
         // would need history that was already folded, so read the file again.
@@ -1192,6 +1188,136 @@ public actor LocalTokenMeter {
             events: events
         )
         return events
+    }
+
+    /// Cached events for a file that has not changed. The cutoff only moves
+    /// forward with the clock; folding again keeps a long-lived cache from
+    /// growing with each new month.
+    private func unchangedEvents(key: String, _ cached: CachedFileEvents) -> [TokenUsageEvent] {
+        guard cached.compactedBefore < compactionCutoff else { return cached.events }
+        var refolded = cached
+        refolded.events = TokenUsageCompaction.compact(
+            cached.events,
+            before: compactionCutoff,
+            keeping: cached.resume?.tailEventID
+        )
+        refolded.compactedBefore = compactionCutoff
+        fileEventCache[key] = refolded
+        return refolded.events
+    }
+
+    /// Events for an append-only JSONL log. After the first read, a log that
+    /// grew is read from where the last read stopped, with the parser state
+    /// saved there, instead of from byte 0: a live transcript changes on
+    /// every refresh, and re-reading it whole every 30s was the menu bar's
+    /// steady I/O and JSON cost. A log that shrank, or whose bytes before
+    /// the resume point changed, is read again from the start.
+    ///
+    /// - Parameters:
+    ///   - initialState: Parser state at the start of the file.
+    ///   - parse: Consumes one line. An event whose id matches an earlier
+    ///     one replaces it, in this read and across reads.
+    private func appendOnlyLogEvents<State>(
+        for url: URL,
+        extra: String = "",
+        initialState: State,
+        parse: (inout State, _ lineNumber: Int, _ line: Data) -> TokenUsageEvent?
+    ) -> [TokenUsageEvent] {
+        let key = url.path
+        seenCacheKeysThisScan.insert(key)
+        guard let fingerprint = fileFingerprint(of: url) else {
+            fileEventCache.removeValue(forKey: key)
+            return []
+        }
+        if let cached = fileEventCache[key],
+           cached.extra == extra,
+           cached.compactedBefore <= compactionCutoff {
+            if cached.fingerprint == fingerprint {
+                return unchangedEvents(key: key, cached)
+            }
+            if let resume = cached.resume,
+               let state = resume.state as? State,
+               UInt64(max(fingerprint.size, 0)) >= resume.point.offset,
+               JSONLLineReader.signature(of: url, endingAt: resume.point.offset) == resume.signature,
+               let appended = readAppendOnlyLog(url, from: resume.point, state: state, parse: parse) {
+                return storeAppendOnlyEvents(
+                    key: key,
+                    fingerprint: fingerprint,
+                    extra: extra,
+                    events: TokenUsageEventLog.merging(cached.events, with: appended.events),
+                    resume: appended.resume
+                )
+            }
+        }
+        guard let full = readAppendOnlyLog(url, from: .start, state: initialState, parse: parse) else {
+            fileEventCache.removeValue(forKey: key)
+            return []
+        }
+        return storeAppendOnlyEvents(
+            key: key,
+            fingerprint: fingerprint,
+            extra: extra,
+            events: full.events,
+            resume: full.resume
+        )
+    }
+
+    private func readAppendOnlyLog<State>(
+        _ url: URL,
+        from start: JSONLResumePoint,
+        state initialState: State,
+        parse: (inout State, _ lineNumber: Int, _ line: Data) -> TokenUsageEvent?
+    ) -> (events: [TokenUsageEvent], resume: AppendOnlyResume)? {
+        var state = initialState
+        // The unterminated last line is read again next time, so the saved
+        // state must not include it.
+        var stateBeforeTail: State?
+        var tailEventID: String?
+        var parsed = TokenUsageEventLog()
+        let read = autoreleasepool {
+            JSONLLineReader.forEachLine(in: url, resumingAt: start) { lineNumber, line, terminated in
+                if !terminated { stateBeforeTail = state }
+                let event = parse(&state, lineNumber, line)
+                if let event { parsed.add(event) }
+                if !terminated { tailEventID = event?.id }
+            }
+        }
+        guard let read,
+              let signature = JSONLLineReader.signature(of: url, endingAt: read.resumePoint.offset) else {
+            return nil
+        }
+        lastSnapshotLogBytesRead += read.bytesRead
+        return (
+            events: parsed.events,
+            resume: AppendOnlyResume(
+                point: read.resumePoint,
+                signature: signature,
+                state: stateBeforeTail ?? state,
+                tailEventID: tailEventID
+            )
+        )
+    }
+
+    private func storeAppendOnlyEvents(
+        key: String,
+        fingerprint: FileFingerprint,
+        extra: String,
+        events: [TokenUsageEvent],
+        resume: AppendOnlyResume
+    ) -> [TokenUsageEvent] {
+        let compacted = TokenUsageCompaction.compact(
+            events,
+            before: compactionCutoff,
+            keeping: resume.tailEventID
+        )
+        fileEventCache[key] = CachedFileEvents(
+            fingerprint: fingerprint,
+            extra: extra,
+            compactedBefore: compactionCutoff,
+            events: compacted,
+            resume: resume
+        )
+        return compacted
     }
 
     private func configureReadOnlySQLite(_ db: OpaquePointer) {
@@ -1224,6 +1350,79 @@ private struct CachedFileEvents {
     /// `events` holds folded history for dates before this cutoff.
     var compactedBefore: Date
     var events: [TokenUsageEvent]
+    /// Set for append-only logs, which a later refresh reads from here.
+    var resume: AppendOnlyResume? = nil
+}
+
+private struct AppendOnlyResume {
+    var point: JSONLResumePoint
+    /// `JSONLLineReader.signature` at `point` when it was saved.
+    var signature: Data
+    /// The scanner's parser state at `point`, of the scanner's `State` type.
+    var state: Any
+    /// The event parsed from an unterminated last line. That line is read
+    /// again and its event replaced by id, so it is never folded.
+    var tailEventID: String?
+}
+
+private struct ClaudeTranscriptState {
+    /// Last `cwd` seen, as logged and as resolved for attribution.
+    var rawCwd: String?
+    var cwd: String?
+}
+
+private struct CodexSessionState {
+    var sawFirstLine = false
+    /// Whether the first line was a `session_meta` with a cwd.
+    var accepted = false
+    var sessionID: String?
+    var cwd: String?
+    var metaDate: Date?
+    /// Cumulative totals from the last `token_count`, for deltas.
+    var previous: TokenUsage?
+    var currentModel: String?
+}
+
+private struct KimiWireState {
+    var currentModel: String?
+}
+
+/// Events from one read of a log, with a later event replacing an earlier
+/// one that has the same id.
+struct TokenUsageEventLog {
+    private(set) var events: [TokenUsageEvent] = []
+    private var indexByID: [String: Int] = [:]
+
+    mutating func add(_ event: TokenUsageEvent) {
+        if let index = indexByID[event.id] {
+            events[index] = event
+        } else {
+            indexByID[event.id] = events.count
+            events.append(event)
+        }
+    }
+
+    /// `base` with each of `newer` replacing the event that has its id, or
+    /// appended. Only ids in `newer` are indexed, so merging a few appended
+    /// lines into a long cached history does not build a map of all of it.
+    static func merging(_ base: [TokenUsageEvent], with newer: [TokenUsageEvent]) -> [TokenUsageEvent] {
+        guard !newer.isEmpty else { return base }
+        let newerIDs = Set(newer.map(\.id))
+        var merged = base
+        var indexByID: [String: Int] = [:]
+        for index in merged.indices where newerIDs.contains(merged[index].id) {
+            indexByID[merged[index].id] = index
+        }
+        for event in newer {
+            if let index = indexByID[event.id] {
+                merged[index] = event
+            } else {
+                indexByID[event.id] = merged.count
+                merged.append(event)
+            }
+        }
+        return merged
+    }
 }
 
 // MARK: - History compaction
@@ -1245,13 +1444,19 @@ enum TokenUsageCompaction {
             .min() ?? now
     }
 
-    static func compact(_ events: [TokenUsageEvent], before cutoff: Date) -> [TokenUsageEvent] {
+    /// - Parameter keptID: An event that is never folded, because a later
+    ///   read may replace it by id.
+    static func compact(
+        _ events: [TokenUsageEvent],
+        before cutoff: Date,
+        keeping keptID: String? = nil
+    ) -> [TokenUsageEvent] {
         var kept: [TokenUsageEvent] = []
         var groups: [Key: Group] = [:]
         var order: [Key] = []
 
         for event in events {
-            guard event.date < cutoff, isLinearlyPriced(event.usage) else {
+            guard event.date < cutoff, isLinearlyPriced(event.usage), event.id != keptID else {
                 kept.append(event)
                 continue
             }
