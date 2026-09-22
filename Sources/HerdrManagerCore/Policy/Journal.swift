@@ -135,7 +135,7 @@ public actor Journal {
             contents: Data(),
             attributes: [.posixPermissions: 0o600]
         )
-        guard let handle = FileHandle(forWritingTo: tempURL) else {
+        guard let handle = try? FileHandle(forWritingTo: tempURL) else {
             try? FileManager.default.removeItem(at: tempURL)
             throw CocoaError(.fileWriteUnknown)
         }
