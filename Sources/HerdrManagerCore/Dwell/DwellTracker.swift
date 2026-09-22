@@ -40,7 +40,7 @@ public struct DwellEntry: Sendable {
     }
 }
 
-order // MARK: - DwellTracker
+// MARK: - DwellTracker
 
 public final class DwellTracker: @unchecked Sendable {
     /// Persisted dwell JSON is a compact map. A larger file is not read at
