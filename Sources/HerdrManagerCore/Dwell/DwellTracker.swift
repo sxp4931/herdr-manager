@@ -40,18 +40,15 @@ public struct DwellEntry: Sendable {
     }
 }
 
-// MARK: - DwellTracker
+order // MARK: - DwellTracker
 
 public final class DwellTracker: @unchecked Sendable {
-    /// Persisted dwell JSON is a compact map. A multi-megabyte stand-in is
-    /// ignored rather than loaded at launch.
+    /// Persisted dwell JSON is a compact map. A larger file is not read at
+    /// launch, and a snapshot that would encode larger is not written.
     public static let maxFileBytes = 256 * 1024
 
     private let lock = NSLock()
     private var entries: [AgentID: DwellEntry] = [:]
-    /// Set when the on-disk file is larger than `maxFileBytes`. save() must
-    /// not replace that file with a tiny snapshot of whatever is in RAM.
-    private var persistDisabled = false
 
     /// On-disk location for the persisted dwell state. Lazily resolved so
     /// tests can override it via `init(fileURL:)`.
@@ -87,6 +84,25 @@ public final class DwellTracker: @unchecked Sendable {
             occupantFingerprint: occupantFingerprint,
             stateChangeSeq: stateChangeSeq
         )
+    }
+
+    /// Record each live agent's current episode and forget every pane that
+    /// is not in `liveAgents`. Panes that closed or exited used to stay in
+    /// the map, and in every save, for the rest of the run.
+    public func sync(liveAgents: [AgentID: Agent]) {
+        var live: [AgentID: DwellEntry] = [:]
+        for (agentId, agent) in liveAgents {
+            live[agentId] = DwellEntry(
+                status: agent.status,
+                enteredAt: agent.enteredAt,
+                lastOutputAt: agent.lastOutputAt,
+                occupantFingerprint: Self.fingerprint(for: agent),
+                stateChangeSeq: agent.stateChangeSeq
+            )
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        entries = live
     }
 
     public func remove(agentId: AgentID) {
@@ -128,12 +144,13 @@ public final class DwellTracker: @unchecked Sendable {
     /// Creates the parent directory with 0700 if needed and writes the file
     /// atomically with 0600. Errors are swallowed — dwell persistence is
     /// best-effort and must never break the live tracking path.
+    ///
+    /// A snapshot that encodes past `maxFileBytes` is not written (load
+    /// would refuse it); the file on disk stays as it is until a later
+    /// snapshot fits. An oversized file on disk is replaced by the first one
+    /// that does, so persistence recovers once the herd is small again.
     public func save() {
         lock.lock()
-        if persistDisabled {
-            lock.unlock()
-            return
-        }
         let snapshot = entries
         lock.unlock()
 
@@ -143,7 +160,8 @@ public final class DwellTracker: @unchecked Sendable {
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(persisted) else { return }
+        guard let data = try? encoder.encode(persisted),
+              data.count <= Self.maxFileBytes else { return }
 
         let dir = fileURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(
@@ -165,9 +183,19 @@ public final class DwellTracker: @unchecked Sendable {
     /// Restore dwell entries from disk, guarded by occupant identity.
     ///
     /// A stored entry is reinstated ONLY when the current agent at the same
-    /// AgentID has a matching `occupantFingerprint` AND `stateChangeSeq`.
-    /// Mismatches (pane reused, different agent, status episode advanced)
-    /// discard the stale episode so we never carry forward bogus dwell.
+    /// AgentID has a matching `occupantFingerprint`, `status`, AND a
+    /// non-zero `stateChangeSeq`. Mismatches (pane reused, different agent,
+    /// status episode advanced) discard the stale episode so we never carry
+    /// forward bogus dwell. Entries with no live match are dropped, so the
+    /// next save rewrites the file with the live herd only.
+    ///
+    /// A seq of 0 means herdr gave no seq, and a fresh agent starts there:
+    /// after a herdr restart, a reused pane id running the same kind would
+    /// match on kind alone and inherit a dead episode's `enteredAt`. A
+    /// non-zero seq still collides when the reused pane reaches the same
+    /// seq and status; `agent.list` carries no server instance id to rule
+    /// that out, and the cost is one wrong dwell start, which resets at the
+    /// pane's next transition.
     ///
     /// - Parameter currentAgents: The live agent map to validate against.
     ///   Typically `AgentStore.agents` at the time of restore.
@@ -175,45 +203,37 @@ public final class DwellTracker: @unchecked Sendable {
     ///   the persisted dwell timestamps back onto the live agents.
     @discardableResult
     public func load(currentAgents: [AgentID: Agent]) -> [AgentID: DwellEntry] {
-        if fileIsOversized() {
-            lock.lock()
-            persistDisabled = true
-            entries = [:]
-            lock.unlock()
-            return [:]
-        }
-        guard let data = BoundedFileRead.data(from: fileURL, maxBytes: Self.maxFileBytes),
-              let persisted = try? JSONDecoder().decode(PersistedDwellState.self, from: data)
-        else {
-            lock.lock()
-            persistDisabled = false
-            lock.unlock()
-            return [:]
-        }
-
         var restored: [AgentID: DwellEntry] = [:]
-        for item in persisted.entries {
-            let agentId = item.agentId
-            guard let current = currentAgents[agentId] else { continue }
+        // An oversized file is not read. It is not a reason to stop saving:
+        // the next save replaces it with the live herd.
+        if !fileIsOversized(),
+           let data = BoundedFileRead.data(from: fileURL, maxBytes: Self.maxFileBytes),
+           let persisted = try? JSONDecoder().decode(PersistedDwellState.self, from: data) {
+            for item in persisted.entries {
+                let agentId = item.agentId
+                guard let current = currentAgents[agentId] else { continue }
 
-            // Restore guard: fingerprint + stateChangeSeq must match.
-            let currentFingerprint = Self.fingerprint(for: current)
-            guard currentFingerprint == item.occupantFingerprint,
-                  current.stateChangeSeq == item.stateChangeSeq
-            else { continue }
+                // Restore guard: fingerprint, status, and a real seq must match.
+                guard current.stateChangeSeq != 0,
+                      current.stateChangeSeq == item.stateChangeSeq,
+                      current.status == item.status,
+                      Self.fingerprint(for: current) == item.occupantFingerprint
+                else { continue }
 
-            restored[agentId] = DwellEntry(
-                status: item.status,
-                enteredAt: item.enteredAt,
-                lastOutputAt: item.lastOutputAt,
-                occupantFingerprint: item.occupantFingerprint,
-                stateChangeSeq: item.stateChangeSeq
-            )
+                restored[agentId] = DwellEntry(
+                    status: item.status,
+                    enteredAt: item.enteredAt,
+                    lastOutputAt: item.lastOutputAt,
+                    occupantFingerprint: item.occupantFingerprint,
+                    stateChangeSeq: item.stateChangeSeq
+                )
+            }
         }
 
         lock.lock()
-        persistDisabled = false
-        entries = restored
+        entries = entries
+            .filter { currentAgents[$0.key] != nil }
+            .merging(restored) { _, persisted in persisted }
         lock.unlock()
         return restored
     }
