@@ -118,6 +118,8 @@ final class AppModel {
     private let notificationManager = NotificationManager()
     private let diagnoser = Diagnoser()
     private let poller = HeartbeatPoller()
+    /// Silences that have already alerted, so each one alerts once.
+    private var silentAlerts = SilentAlertLedger()
     private var eventTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
     private var diagnosisTask: Task<Void, Never>?
@@ -488,20 +490,14 @@ final class AppModel {
     }
 
     private func runDiagnosisAndNotify() async {
-        // Snapshot previous silent state for notification diff
-        let previousSilentIds = Set(store.agents.values.filter { $0.verdict.isSilent }.map { $0.id })
-
         await store.diagnoseAll(adapter: adapter, diagnoser: diagnoser, settings: settingsStore)
 
-        // Check for newly-silent agents
-        for agent in store.agents.values {
-            if agent.verdict.isSilent && !previousSilentIds.contains(agent.id) {
-                notificationManager.notifySilent(agent: agent)
-            }
-            // Clear silent notification key when agent is no longer silent
-            if !agent.verdict.isSilent && previousSilentIds.contains(agent.id) {
-                notificationManager.clearSilentNotification(for: agent.id)
-            }
+        // One alert per silence, however the last one ended. Diffing against
+        // the verdicts from before this pass re-armed a pane only when a pass
+        // saw it stop being silent; a status change resets the verdict
+        // outside any pass, so that pane never alerted for silence again.
+        for silence in silentAlerts.newSilences(in: store.agents.values) {
+            notificationManager.notifySilent(agent: silence.agent, episodeKey: silence.episodeKey)
         }
 
         // Persist dwell after diagnosis so significant verdict changes are saved.
