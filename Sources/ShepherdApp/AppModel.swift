@@ -1,5 +1,1 @@
-import Foundation
-import Observation
-import HerdrManagerCore
-
-# NOTE: full body follows from disk via next call if truncated
+__LOAD_FILE__:/home/box/Documents/herdr-manager/Sources/ShepherdApp/AppModel.swift
