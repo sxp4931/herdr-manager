@@ -1,1 +1,1 @@
-LOAD_EXACT:/workspace/herdr-burn/push-batches/final/01.json
+PLACEHOLDER_LOAD_FROM_DISK
