@@ -190,6 +190,25 @@ struct SecretRedactorTests {
         #expect(result.redactedText.contains("sk" + "_live_[REDACTED]"))
         #expect(result.redactedText.contains("xox[REDACTED]"))
     }
+
+    @Test("A key after api_key= keeps its own label and counts once")
+    func labeledKeyAfterAssignmentCountsOnce() {
+        let redactor = SecretRedactor()
+        let result = redactor.redact("export XAI_API_KEY=xai-abcdefghijklmnopqrstuvwxyz0123456789")
+        #expect(result.redactedText == "export XAI_API_KEY=xai-[REDACTED]")
+        #expect(result.redactionCount == 1)
+    }
+
+    @Test("Redacting already-redacted text changes and counts nothing")
+    func redactingTwiceIsANoOp() {
+        // MCP redacts a tool's text, then redacts the result again on the way out.
+        let redactor = SecretRedactor()
+        let once = redactor.redact("token=hunter2hunter2 GITHUB_TOKEN=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij")
+        let twice = redactor.redact(once.redactedText)
+        #expect(once.redactedText == "token=[REDACTED] GITHUB_TOKEN=ghp_[REDACTED]")
+        #expect(twice.redactedText == once.redactedText)
+        #expect(twice.redactionCount == 0)
+    }
 }
 
 // MARK: - DwellTracker Tests
