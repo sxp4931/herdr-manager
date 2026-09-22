@@ -620,18 +620,32 @@ final class AppModel {
         sendKeys(agent, keys: ["esc"], actionName: "Deny")
     }
 
+    /// Re-reads herdr before the keys go out: the row may be stale (see
+    /// `PromptAnswerCheck`), and the read also refreshes the protocol
+    /// reading the write gate uses, so a herdr restart since the last poll
+    /// is seen too.
     private func sendKeys(_ agent: Agent, keys: [String], actionName: String) {
         guard !inFlightAgentWrites.contains(agent.id) else { return }
         inFlightAgentWrites.insert(agent.id)
         Task { [weak self] in
             defer { self?.inFlightAgentWrites.remove(agent.id) }
             guard let self else { return }
-            let health = self.adapter.health()
-            guard health.writesEnabled else {
-                self.setLastError("\(actionName) skipped: \(health.reason ?? "writes disabled")")
-                return
-            }
             do {
+                let snapshot = try await self.adapter.herdSnapshot()
+                let health = self.adapter.health()
+                self.setHealth(health)
+                guard health.writesEnabled else {
+                    self.setLastError("\(actionName) skipped: \(health.reason ?? "writes disabled")")
+                    return
+                }
+                if let refusal = PromptAnswerCheck.refusal(answering: agent, in: snapshot) {
+                    // Show what herdr reports now, so the row matches the
+                    // reason and a retry uses the current episode.
+                    self.applyHerd(snapshot)
+                    self.updateDwellForAllAgents()
+                    self.setLastError("\(actionName) skipped: \(refusal.message)")
+                    return
+                }
                 try await self.adapter.sendKeys(paneId: agent.id.raw, keys: keys)
                 self.setLastError(nil)
             } catch {
