@@ -812,3 +812,305 @@ struct ApplyRestoredDwellTests {
         #expect(restored?.lastOutputAt == later)
     }
 }
+
+// MARK: - pane_created
+
+/// Answers every diagnosis call and records which panes were asked about.
+/// `processInfo` reports a bare shell, which the diagnoser reads as
+/// process-gone for any working/blocked/unknown agent.
+private final class RecordingAdapter: HerdrAdapter, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _processInfoPanes: [String] = []
+    var connectionState: HerdrConnectionState = .connected
+
+    var processInfoPanes: [String] {
+        lock.withLock { _processInfoPanes }
+    }
+
+    func snapshot() async throws -> HerdrSnapshot {
+        throw NSError(domain: "Mock", code: 1)
+    }
+
+    func read(paneId: String, source: PaneReadSource, lines: Int?) async throws -> PaneReadResult {
+        throw NSError(domain: "Mock", code: 1)
+    }
+
+    func explain(paneId: String) async throws -> AgentExplainResult {
+        AgentExplainResult(agent: nil, state: nil, matchedRuleId: nil, screenDetectionSkipped: false)
+    }
+
+    func processInfo(paneId: String) async throws -> ProcessInfoResult {
+        lock.withLock { _processInfoPanes.append(paneId) }
+        return ProcessInfoResult(
+            shellPid: 1,
+            foregroundProcesses: [ForegroundProcess(pid: 1, name: "zsh", argv0: nil, cmdline: nil, cwd: nil)]
+        )
+    }
+
+    func focus(paneId: String) async throws {}
+    func events() -> AsyncStream<HerdrEvent> { AsyncStream { $0.finish() } }
+    func sendKeys(paneId: String, keys: [String]) async throws {}
+    func prompt(paneId: String, text: String) async throws {}
+    func closePane(paneId: String) async throws {}
+    func createWorkspace(cwd: String, label: String?) async throws -> WorkspaceCreation {
+        throw NSError(domain: "Mock", code: 1)
+    }
+    func startAgent(paneId: String, kind: String, name: String) async throws {}
+    func waitStatus(paneId: String, until: [String], timeoutMs: Int) async throws -> Bool { true }
+    func reportMetadata(paneId: String, source: String, tokens: [String: String], ttlMs: Int) async throws {}
+}
+
+@Suite("AgentStore.applyEvent(.paneCreated)")
+struct ApplyEventPaneCreatedTests {
+    @Test("pane_created alone adds no agent, no attention row, and nothing to diagnose")
+    @MainActor
+    func paneCreatedAddsNothing() async {
+        // The old `.unknown` placeholder was diagnosed like an agent; its
+        // bare shell read as process-gone and flashed a red "gone".
+        let store = AgentStore()
+        let transition = store.applyEvent(.paneCreated(paneId: "wA:p1", workspaceId: "wA", tabId: "wA:t1"))
+        #expect(transition == nil)
+        #expect(store.agents.isEmpty)
+        #expect(store.attentionAgents.isEmpty)
+
+        let adapter = RecordingAdapter()
+        await store.diagnoseAll(adapter: adapter, diagnoser: Diagnoser())
+        #expect(adapter.processInfoPanes.isEmpty)
+        #expect(store.agents.isEmpty)
+    }
+
+    @Test("pane_updated after pane_created inserts the real agent")
+    @MainActor
+    func paneUpdatedInsertsAgent() {
+        let store = AgentStore()
+        store.applyEvent(.paneCreated(paneId: "wA:p1", workspaceId: "wA", tabId: "wA:t1"))
+        let transition = store.applyEvent(.paneUpdated(
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)
+        ))
+
+        #expect(transition?.from == nil)
+        #expect(transition?.to == .blocked)
+        let agent = store.agents[AgentID("wA:p1")]
+        #expect(agent?.kind == .custom("claude"))
+        #expect(agent?.status == .blocked)
+        #expect(store.blockedCount == 1)
+    }
+
+    @Test("A pane that stays a plain shell never appears")
+    @MainActor
+    func shellPaneNeverAppears() async {
+        let store = AgentStore()
+        store.applyEvent(.paneCreated(paneId: "wA:p1", workspaceId: "wA", tabId: "wA:t1"))
+        #expect(store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agent: nil))) == nil)
+        #expect(store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agent: ""))) == nil)
+        #expect(store.agents.isEmpty)
+        #expect(store.attentionAgents.isEmpty)
+
+        let adapter = RecordingAdapter()
+        await store.diagnoseAll(adapter: adapter, diagnoser: Diagnoser())
+        #expect(adapter.processInfoPanes.isEmpty)
+    }
+}
+
+@Suite("AgentStore.diagnoseAll ordering")
+struct DiagnoseAllOrderingTests {
+    @Test("Agents passed as first are diagnosed before the rest")
+    @MainActor
+    func diagnosesFirstAgentsFirst() async {
+        let store = AgentStore()
+        for index in 1...6 {
+            let id = AgentID("wA:p\(index)")
+            store.agents[id] = Agent(id: id, kind: .claude, status: .working, verdict: .healthy)
+        }
+        store.agents[AgentID("wA:idle")] = Agent(id: AgentID("wA:idle"), kind: .claude, status: .idle)
+
+        let adapter = RecordingAdapter()
+        await store.diagnoseAll(
+            adapter: adapter,
+            diagnoser: Diagnoser(),
+            first: [AgentID("wA:p5"), AgentID("wA:p2")]
+        )
+
+        let order = adapter.processInfoPanes
+        #expect(order.count == 6)
+        #expect(Set(order.prefix(2)) == ["wA:p5", "wA:p2"])
+        #expect(!order.contains("wA:idle"))
+    }
+}
+
+// MARK: - applyHerdSnapshot transitions
+
+private func herd(_ infos: [HerdrAgentInfo]) -> HerdSnapshot {
+    HerdSnapshot(
+        version: "0.7.5", protocol: 17,
+        agents: infos,
+        workspaceNames: ["wA": "Alpha"], tabNames: ["wA:t1": "main"],
+        focusedWorkspaceId: nil, focusedTabId: nil, focusedPaneId: nil
+    )
+}
+
+/// The blocked episodes Shepherd would alert for: it notifies on each
+/// accepted transition to blocked, keyed by `episodeKey`.
+private func blockedAlerts(_ transitions: [AgentStatusTransition?]) -> Set<String> {
+    Set(transitions.compactMap { $0 }.filter { $0.to == .blocked }.map(\.episodeKey))
+}
+
+@Suite("AgentStore.applyHerdSnapshot transitions")
+struct ApplyHerdSnapshotTransitionTests {
+    @Test("Reports each accepted status change and each new pane, and nothing for the first snapshot")
+    @MainActor
+    func reportsAcceptedChanges() {
+        let store = AgentStore()
+        let first = store.applyHerdSnapshot(herd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4),
+            makeAgentInfo(paneId: "wA:p2", agentStatus: "blocked", stateChangeSeq: 2),
+        ]))
+        // The herd as it was at launch is not news.
+        #expect(first.isEmpty)
+
+        let second = store.applyHerdSnapshot(herd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5),
+            makeAgentInfo(paneId: "wA:p2", agentStatus: "blocked", stateChangeSeq: 2),
+            makeAgentInfo(paneId: "wA:p3", agentStatus: "working", stateChangeSeq: 1),
+        ]))
+        let byPane = Dictionary(uniqueKeysWithValues: second.map { ($0.agentId.raw, $0) })
+        #expect(byPane.count == 2)
+        #expect(byPane["wA:p1"]?.from == .working)
+        #expect(byPane["wA:p1"]?.to == .blocked)
+        #expect(byPane["wA:p1"]?.stateChangeSeq == 5)
+        #expect(byPane["wA:p1"]?.enteredAt == store.agents[AgentID("wA:p1")]?.enteredAt)
+        #expect(byPane["wA:p3"]?.from == nil)
+        #expect(byPane["wA:p3"]?.to == .working)
+    }
+
+    @Test("Blocked seen by the poll first and then by its event alerts once")
+    @MainActor
+    func pollThenEventAlertsOnce() {
+        // The poll used to report nothing, and the event then found the
+        // status unchanged: the blocked alert was lost.
+        let store = AgentStore()
+        store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)]))
+
+        let poll = store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)]))
+        let event = store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)))
+
+        #expect(poll.map(\.to) == [.blocked])
+        #expect(event == nil)
+        #expect(blockedAlerts(poll + [event]).count == 1)
+    }
+
+    @Test("Blocked seen by the event first and then the poll alerts once and keeps the episode start")
+    @MainActor
+    func eventThenPollAlertsOnce() {
+        let store = AgentStore()
+        store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)]))
+
+        let event = store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)))
+        let startedAt = store.agents[AgentID("wA:p1")]?.enteredAt
+        let poll = store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)]))
+
+        #expect(event?.to == .blocked)
+        #expect(poll.isEmpty)
+        #expect(blockedAlerts([event] + poll).count == 1)
+        // The seq catching up is not a new episode.
+        #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
+        #expect(store.agents[AgentID("wA:p1")]?.stateChangeSeq == 5)
+    }
+
+    @Test("A poll answered before the blocked event does not roll it back or alert again")
+    @MainActor
+    func stalePollDoesNotRollBack() {
+        // Otherwise: blocked (event) -> working (stale poll) -> blocked
+        // (next poll), a second alert for one prompt.
+        let store = AgentStore()
+        store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)]))
+
+        let event = store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)))
+        let stale = store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)]))
+        #expect(stale.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.status == .blocked)
+
+        let fresh = store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)]))
+        #expect(fresh.isEmpty)
+        #expect(blockedAlerts([event] + stale + fresh).count == 1)
+    }
+
+    @Test("Only one snapshot is taken as stale, so a wrong event is corrected by the next poll")
+    @MainActor
+    func staleGuardLastsOneSnapshot() {
+        // herdr without seqs, or restarted with seqs back at 0, must not
+        // leave a pane stuck on an event's status.
+        let store = AgentStore()
+        store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 0)]))
+        store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)))
+
+        #expect(store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 0)])).isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.status == .blocked)
+
+        let next = store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 0)]))
+        #expect(next.map(\.to) == [.working])
+        #expect(store.agents[AgentID("wA:p1")]?.status == .working)
+    }
+
+    @Test("A poll answered before a pane exited does not bring it back blocked")
+    @MainActor
+    func stalePollDoesNotResurrectExitedPane() {
+        let store = AgentStore()
+        store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)]))
+        store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)]))
+        store.applyEvent(.paneExited(paneId: "wA:p1"))
+
+        let stale = store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)]))
+        #expect(stale.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+
+        #expect(store.applyHerdSnapshot(herd([])).isEmpty)
+        #expect(store.agents.isEmpty)
+    }
+
+    @Test("A poll answered before a new agent's first event does not drop it or alert twice")
+    @MainActor
+    func stalePollKeepsEventInsertedPane() {
+        let store = AgentStore()
+        store.applyHerdSnapshot(herd([]))
+
+        let event = store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)))
+        let startedAt = store.agents[AgentID("wA:p1")]?.enteredAt
+        let stale = store.applyHerdSnapshot(herd([]))
+        #expect(store.agents[AgentID("wA:p1")]?.status == .blocked)
+
+        let fresh = store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 1)]))
+        #expect(fresh.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
+        #expect(blockedAlerts([event] + stale + fresh).count == 1)
+    }
+
+    @Test("A new blocked agent the poll finds before its event alerts once")
+    @MainActor
+    func newBlockedAgentFromPoll() {
+        let store = AgentStore()
+        store.applyHerdSnapshot(herd([]))
+        let poll = store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 1)]))
+        let event = store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)))
+
+        #expect(poll.first?.from == nil)
+        #expect(event == nil)
+        #expect(blockedAlerts(poll + [event]).count == 1)
+    }
+}
+
+@Suite("AgentStore.applyHerdSnapshot stale guard bounds")
+struct ApplyHerdSnapshotStaleBoundTests {
+    @Test("A pane an event added that agent.list never lists is dropped after one poll")
+    @MainActor
+    func unlistedPaneDroppedAfterOnePoll() {
+        let store = AgentStore()
+        store.applyHerdSnapshot(herd([]))
+        store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 0)))
+
+        store.applyHerdSnapshot(herd([]))
+        #expect(store.agents[AgentID("wA:p1")] != nil)
+        store.applyHerdSnapshot(herd([]))
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+    }
+}

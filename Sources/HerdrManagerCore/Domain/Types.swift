@@ -654,42 +654,49 @@ public struct HerdSnapshot: Sendable {
     /// Agents as the CLI and other snapshot clients should display them.
     /// Drops empty pane ids and plain shells; uses `agent.list`'s seq.
     public func displayAgents(now: Date = Date()) -> [Agent] {
-        agents.compactMap { info in
-            guard !info.paneId.isEmpty else { return nil }
-            guard let agentKind = info.agent, !agentKind.isEmpty else { return nil }
-            let kind: AgentKind
-            if let session = info.agentSession {
-                kind = .custom(session.agent)
-            } else {
-                kind = .custom(agentKind)
-            }
-            let name = info.title ?? info.terminalTitleStripped ?? agentKind
-            let status = AgentStatus(rawValue: info.agentStatus) ?? .unknown
-            let verdict: Verdict
-            switch status {
-            case .blocked:
-                verdict = .awaitingInput(BlockClassification(
-                    kind: .unknownBlock, since: now, summary: "blocked"
-                ))
-            case .unknown:
-                verdict = .unclassifiable(reason: "unknown status")
-            default:
-                verdict = .healthy
-            }
-            return Agent(
-                id: AgentID(info.paneId),
-                kind: kind,
-                name: name,
-                displayName: name,
-                status: status,
-                stateChangeSeq: info.stateChangeSeq,
-                enteredAt: now,
-                lastOutputAt: nil,
-                verdict: verdict,
-                workspaceName: workspaceNames[info.workspaceId] ?? info.workspaceId,
-                tabName: tabNames[info.tabId] ?? info.tabId,
-                cwd: info.foregroundCwd ?? info.cwd ?? ""
-            )
+        agents.compactMap { displayAgent(for: $0, now: now) }
+    }
+
+    /// The display row for one `agent.list` entry, labelled from this
+    /// snapshot, or nil for a plain shell or an entry with no pane id.
+    public func displayAgent(for info: HerdrAgentInfo, now: Date = Date()) -> Agent? {
+        guard !info.paneId.isEmpty else { return nil }
+        guard let agentKind = info.agent, !agentKind.isEmpty else { return nil }
+        let kind: AgentKind
+        if let session = info.agentSession {
+            kind = .custom(session.agent)
+        } else {
+            kind = .custom(agentKind)
+        }
+        let name = info.title ?? info.terminalTitleStripped ?? agentKind
+        let status = AgentStatus(rawValue: info.agentStatus) ?? .unknown
+        return Agent(
+            id: AgentID(info.paneId),
+            kind: kind,
+            name: name,
+            displayName: name,
+            status: status,
+            stateChangeSeq: info.stateChangeSeq,
+            enteredAt: now,
+            lastOutputAt: nil,
+            verdict: Self.displayVerdict(for: status, now: now),
+            workspaceName: workspaceNames[info.workspaceId] ?? info.workspaceId,
+            tabName: tabNames[info.tabId] ?? info.tabId,
+            cwd: info.foregroundCwd ?? info.cwd ?? ""
+        )
+    }
+
+    /// The verdict a row shows for `status` before any diagnosis.
+    static func displayVerdict(for status: AgentStatus, now: Date) -> Verdict {
+        switch status {
+        case .blocked:
+            return .awaitingInput(BlockClassification(
+                kind: .unknownBlock, since: now, summary: "blocked"
+            ))
+        case .unknown:
+            return .unclassifiable(reason: "unknown status")
+        case .idle, .working, .done:
+            return .healthy
         }
     }
 }
