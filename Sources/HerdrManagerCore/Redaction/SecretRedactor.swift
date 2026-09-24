@@ -16,7 +16,7 @@ public final class SecretRedactor: Sendable {
 
     // Patterns to detect and redact
     private static let patterns: [(regex: NSRegularExpression, replacement: String)] = {
-        let defs: [(pattern: String, replacement: String)] = [
+        let labeled: [(pattern: String, replacement: String)] = [
             // Anthropic keys (hyphens; generic sk- does not match these)
             ("sk-ant-[A-Za-z0-9_-]{20,}", "sk-ant-[REDACTED]"),
             // OpenAI project keys
@@ -52,8 +52,19 @@ public final class SecretRedactor: Sendable {
             ("Bearer\\s+[A-Za-z0-9\\-._~+/]+=*", "Bearer [REDACTED]"),
             // PEM private keys
             ("-----BEGIN[A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END[A-Z ]*PRIVATE KEY-----", "[REDACTED PRIVATE KEY]"),
+        ]
+        // A whole value that is already a placeholder: `xai-[REDACTED]` from
+        // a pattern above, or a bare `[REDACTED]`. Matching it again dropped
+        // the label and counted one secret twice, and MCP redacts a tool's
+        // already-redacted text a second time on the way out.
+        let labels = labeled
+            .map(\.replacement)
+            .filter { $0.hasSuffix("[REDACTED]") }
+            .map { NSRegularExpression.escapedPattern(for: String($0.dropLast("[REDACTED]".count))) }
+        let placeholder = "(?:\(labels.joined(separator: "|")))?\\[REDACTED\\](?![^\\s'\"&])"
+        let defs = labeled + [
             // Generic API keys (key= or api_key= followed by value)
-            ("(?i)(api[_-]?key|secret|token|password)\\s*[=:]\\s*['\"]?[^\\s'\"&]{8,}", "$1=[REDACTED]"),
+            ("(?i)(api[_-]?key|secret|token|password)\\s*[=:]\\s*['\"]?(?!\(placeholder))[^\\s'\"&]{8,}", "$1=[REDACTED]"),
         ]
 
         var result: [(NSRegularExpression, String)] = []

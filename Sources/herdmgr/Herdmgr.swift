@@ -68,7 +68,7 @@ struct HerdmgrCommand: AsyncParsableCommand {
         // Take initial snapshot from agent.list (authoritative agents + seq)
         // merged with session.snapshot labels — not session.snapshot panes,
         // which omit seq and can include plain shells.
-        let herd: HerdSnapshot
+        var herd: HerdSnapshot
         do {
             herd = try await adapter.herdSnapshot()
         } catch {
@@ -127,9 +127,10 @@ struct HerdmgrCommand: AsyncParsableCommand {
                 // switches tabs.
                 if let refreshed = try? await adapter.herdSnapshot() {
                     agents = refreshed.displayAgents(preserving: agents)
+                    herd = refreshed
                 }
             } else {
-                applyEvent(event, to: &agents)
+                agents = herd.applying(event, to: agents)
             }
             // Clear screen and redraw
             print("\u{001B}[2J\u{001B}[H")
@@ -143,74 +144,6 @@ struct HerdmgrCommand: AsyncParsableCommand {
     private func resolveSocketPath() -> String {
         if let socket { return socket }
         return LiveHerdrAdapter.resolveSocketPath()
-    }
-
-    private func applyEvent(_ event: HerdrEvent, to agents: inout [Agent]) {
-        switch event {
-        case .agentStatusChanged(let paneId, let agentStatus, let seq):
-            if let idx = agents.firstIndex(where: { $0.id.raw == paneId }) {
-                let newStatus = AgentStatus(rawValue: agentStatus) ?? .unknown
-                if let seq, seq < agents[idx].stateChangeSeq { return }
-                if newStatus != agents[idx].status {
-                    agents[idx].enteredAt = Date()
-                }
-                agents[idx].status = newStatus
-                if let seq { agents[idx].stateChangeSeq = seq }
-                agents[idx].verdict = verdict(for: newStatus)
-            }
-        case .paneCreated(let paneId, let workspaceId, let tabId):
-            if !agents.contains(where: { $0.id.raw == paneId }) {
-                agents.append(Agent(
-                    id: AgentID(paneId),
-                    status: .unknown,
-                    workspaceName: workspaceId,
-                    tabName: tabId
-                ))
-            }
-        case .paneClosed(let paneId):
-            agents.removeAll { $0.id.raw == paneId }
-        case .paneMoved(let paneId, let workspaceId, let tabId):
-            if let idx = agents.firstIndex(where: { $0.id.raw == paneId }) {
-                if let ws = workspaceId { agents[idx].workspaceName = ws }
-                if let tab = tabId { agents[idx].tabName = tab }
-            }
-        case .paneUpdated(let info):
-            // Full pane state from the real `pane_updated` event. herdmgr's
-            // status table only tracks the fields buildAgentList/printTable
-            // use, so just keep status/seq in sync for an existing row.
-            guard let idx = agents.firstIndex(where: { $0.id.raw == info.paneId }) else { return }
-            // Same rules as AgentStore: a real seq behind the stored one is a
-            // stale event, and a missing seq (0) keeps the agent.list value.
-            if info.stateChangeSeq != 0, info.stateChangeSeq < agents[idx].stateChangeSeq { return }
-            let newStatus = AgentStatus(rawValue: info.agentStatus) ?? .unknown
-            if newStatus != agents[idx].status {
-                agents[idx].enteredAt = Date()
-            }
-            agents[idx].status = newStatus
-            if info.stateChangeSeq != 0 { agents[idx].stateChangeSeq = info.stateChangeSeq }
-            agents[idx].verdict = verdict(for: newStatus)
-        case .paneFocused:
-            // herdmgr's plain table doesn't track focus — nothing to update.
-            break
-        case .paneExited(let paneId):
-            agents.removeAll { $0.id.raw == paneId }
-        case .workspacesChanged:
-            break
-        case .connected, .disconnected, .ignored:
-            break
-        }
-    }
-
-    private func verdict(for status: AgentStatus) -> Verdict {
-        switch status {
-        case .blocked:
-            return .awaitingInput(BlockClassification(
-                kind: .unknownBlock, since: Date(), summary: "blocked"
-            ))
-        case .idle, .working: return .healthy
-        case .done: return .healthy
-        case .unknown: return .unclassifiable(reason: "unknown status")
-        }
     }
 
     // MARK: - Display

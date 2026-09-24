@@ -4,8 +4,8 @@ import HerdrManagerCore
 
 @MainActor
 final class NotificationManager {
-    /// Tracks blocked episode keys and silent agent keys we've already
-    /// notified for, to avoid duplicates.
+    /// Tracks blocked and silent episode keys we've already notified for,
+    /// to avoid duplicates.
     private var notifiedKeys: Set<String> = []
 
     /// User-controlled master switch. When `false`, no authorization is
@@ -125,10 +125,13 @@ final class NotificationManager {
     }
 
     /// Post a silent-agent notification. Returns true if a notification was posted.
+    /// - Parameter episodeKey: `SilentEpisode.episodeKey` for the silence.
+    ///   Keyed on the pane alone, a pane alerted for its first silence only
+    ///   unless a diagnosis pass happened to see it stop being silent.
     @discardableResult
-    func notifySilent(agent: Agent) -> Bool {
+    func notifySilent(agent: Agent, episodeKey: String) -> Bool {
         guard isEnabled else { return false }
-        let key = "silent:\(agent.id.raw)"
+        let key = "silent:\(episodeKey)"
         guard !notifiedKeys.contains(key) else { return false }
         notifiedKeys.insert(key)
 
@@ -177,10 +180,5 @@ final class NotificationManager {
         }
 
         return true
-    }
-
-    /// Clear the silent notification key for an agent (e.g., when it's no longer silent).
-    func clearSilentNotification(for agentId: AgentID) {
-        notifiedKeys.remove("silent:\(agentId.raw)")
     }
 }

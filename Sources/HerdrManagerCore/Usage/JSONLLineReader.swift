@@ -1,4 +1,25 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
+
+/// Where a later read of an append-only JSONL log picks up.
+struct JSONLResumePoint: Equatable, Sendable {
+    /// Byte offset just past the last newline read.
+    var offset: UInt64
+    /// Line number of the line that starts at `offset`.
+    var lineNumber: Int
+
+    static let start = JSONLResumePoint(offset: 0, lineNumber: 0)
+}
+
+struct JSONLReadResult: Equatable, Sendable {
+    var resumePoint: JSONLResumePoint
+    /// Bytes read from the file, which starts at the resume point.
+    var bytesRead: UInt64
+}
 
 /// Streams JSONL without loading a whole file, and without retaining a
 /// single oversized line.
@@ -9,70 +30,108 @@ import Foundation
 enum JSONLLineReader {
     static let maxLineBytes = 256 * 1024
     static let chunkSize = 64 * 1024
+    /// Bytes before a resume point that must be unchanged to resume there.
+    static let signatureLength = 64
 
     static func forEachLine(in url: URL, body: (Int, Data) -> Void) {
-        guard let stream = InputStream(url: url) else { return }
-        stream.open()
-        defer { stream.close() }
+        forEachLine(in: url, resumingAt: .start) { lineNumber, line, _ in
+            body(lineNumber, line)
+        }
+    }
+
+    /// Stream lines from `start` to the end of the file. `terminated` is
+    /// false only for a last line with no newline yet: a live log's writer
+    /// may still be adding to it, so the returned resume point stays before
+    /// it and the next read delivers it again.
+    ///
+    /// - Returns: Where the next read of this file can resume, or nil when
+    ///   the file cannot be opened, positioned, or read.
+    @discardableResult
+    static func forEachLine(
+        in url: URL,
+        resumingAt start: JSONLResumePoint,
+        body: (_ lineNumber: Int, _ line: Data, _ terminated: Bool) -> Void
+    ) -> JSONLReadResult? {
+        let fd = open(url.path, O_RDONLY)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        if start.offset > 0 {
+            guard start.offset <= UInt64(Int64.max),
+                  lseek(fd, off_t(start.offset), SEEK_SET) >= 0 else {
+                return nil
+            }
+        }
 
         var chunk = [UInt8](repeating: 0, count: chunkSize)
         var pending = Data()
         pending.reserveCapacity(min(chunkSize, maxLineBytes))
-        var start = 0
-        var lineNumber = 0
+        /// File offset of `pending`'s first byte.
+        var pendingOffset = start.offset
+        var cursor = 0
+        var lineNumber = start.lineNumber
         var skipping = false
+        var resume = start
+        var bytesRead: UInt64 = 0
 
         func compact() {
-            guard start > 0 else { return }
-            if start >= pending.count {
+            guard cursor > 0 else { return }
+            pendingOffset += UInt64(cursor)
+            if cursor >= pending.count {
                 pending.removeAll(keepingCapacity: true)
             } else {
-                pending.removeSubrange(0..<start)
+                pending.removeSubrange(0..<cursor)
             }
-            start = 0
+            cursor = 0
         }
 
-        func emitLine(_ raw: Data) {
+        func discardPending() {
+            pendingOffset += UInt64(pending.count)
+            pending.removeAll(keepingCapacity: true)
+            cursor = 0
+        }
+
+        func finishLine(endingAt newline: Int) {
+            cursor = newline + 1
+            lineNumber += 1
+            resume = JSONLResumePoint(
+                offset: pendingOffset + UInt64(cursor),
+                lineNumber: lineNumber
+            )
+        }
+
+        func emitLine(_ raw: Data, terminated: Bool) {
             var line = raw
             if line.last == 0x0D {
                 line.removeLast()
             }
             if !line.isEmpty {
-                body(lineNumber, line)
+                body(lineNumber, line, terminated)
             }
-            lineNumber += 1
         }
 
         func consume(eof: Bool) {
-            while start < pending.count {
+            while cursor < pending.count {
                 if skipping {
-                    if let newline = pending[start...].firstIndex(of: 0x0A) {
-                        start = newline + 1
+                    if let newline = pending[cursor...].firstIndex(of: 0x0A) {
                         skipping = false
-                        lineNumber += 1
+                        finishLine(endingAt: newline)
                         continue
                     }
-                    pending.removeAll(keepingCapacity: true)
-                    start = 0
+                    discardPending()
                     return
                 }
 
-                if let newline = pending[start...].firstIndex(of: 0x0A) {
-                    let length = newline - start
-                    if length > maxLineBytes {
-                        start = newline + 1
-                        lineNumber += 1
-                        continue
+                if let newline = pending[cursor...].firstIndex(of: 0x0A) {
+                    if newline - cursor <= maxLineBytes {
+                        emitLine(pending.subdata(in: cursor..<newline), terminated: true)
                     }
-                    emitLine(pending.subdata(in: start..<newline))
-                    start = newline + 1
+                    finishLine(endingAt: newline)
                     continue
                 }
 
-                if pending.count - start > maxLineBytes {
+                if pending.count - cursor > maxLineBytes {
                     skipping = true
-                    pending.removeAll(keepingCapacity: true)
-                    start = 0
+                    discardPending()
                 }
                 // Out of the loop, not out of the function: a file whose last
                 // line carries no trailing newline still has to emit that line
@@ -80,29 +139,59 @@ enum JSONLLineReader {
                 break
             }
 
-            if eof, !skipping, start < pending.count {
-                let length = pending.count - start
-                if length <= maxLineBytes {
-                    emitLine(pending.subdata(in: start..<pending.count))
-                } else {
-                    lineNumber += 1
+            if eof, !skipping, cursor < pending.count {
+                if pending.count - cursor <= maxLineBytes {
+                    emitLine(pending.subdata(in: cursor..<pending.count), terminated: false)
                 }
-                start = pending.count
+                lineNumber += 1
+                cursor = pending.count
             }
         }
 
         while true {
-            let n = stream.read(&chunk, maxLength: chunkSize)
-            if n < 0 { return }
+            let n = read(fd, &chunk, chunkSize)
+            if n < 0 {
+                if errno == EINTR { continue }
+                return nil
+            }
             if n == 0 {
                 compact()
                 consume(eof: true)
-                return
+                return JSONLReadResult(resumePoint: resume, bytesRead: bytesRead)
             }
+            bytesRead += UInt64(n)
             compact()
             pending.append(contentsOf: chunk[0..<n])
             consume(eof: false)
         }
+    }
+
+    /// Up to `signatureLength` bytes ending at `offset`. A read resumes at
+    /// `offset` only while these bytes are unchanged, so a log that was
+    /// rewritten or replaced in place is read again from the start.
+    static func signature(of url: URL, endingAt offset: UInt64) -> Data? {
+        guard offset > 0 else { return Data() }
+        guard offset <= UInt64(Int64.max) else { return nil }
+        let count = Int(min(UInt64(signatureLength), offset))
+        let fd = open(url.path, O_RDONLY)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var buffer = [UInt8](repeating: 0, count: count)
+        let first = off_t(offset) - off_t(count)
+        var filled = 0
+        while filled < count {
+            let n = buffer.withUnsafeMutableBytes { raw in
+                pread(fd, raw.baseAddress! + filled, count - filled, first + off_t(filled))
+            }
+            if n < 0 {
+                if errno == EINTR { continue }
+                return nil
+            }
+            // Shorter than `offset`: the file shrank.
+            if n == 0 { return nil }
+            filled += n
+        }
+        return Data(buffer)
     }
 }
 

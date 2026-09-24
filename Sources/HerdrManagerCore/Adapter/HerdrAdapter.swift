@@ -820,6 +820,29 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         Self.health(forProtocol: latestProtocol())
     }
 
+    /// Re-read the protocol from herdr and gate on that, not the last reading.
+    ///
+    /// herdr's sockets are one-shot and MCP runs no subscription loop, so a
+    /// herdr restarted between two tool calls (or during a confirmation
+    /// wait) is invisible until a request fails. The next write was gated
+    /// on the previous build's protocol. Any failure to re-read leaves the
+    /// protocol unknown (writes off) with herdr's error in the reason.
+    public func refreshHealth() async -> AdapterHealth {
+        do {
+            let snap = try await snapshot()
+            return Self.health(forProtocol: snap.protocol)
+        } catch {
+            clearProtocolReading()
+            let unknown = Self.health(forProtocol: 0)
+            return AdapterHealth(
+                protocolVersion: unknown.protocolVersion,
+                compatible: unknown.compatible,
+                writesEnabled: unknown.writesEnabled,
+                reason: "\(unknown.reason ?? "protocol unknown"): could not re-read herdr (\(error.localizedDescription))"
+            )
+        }
+    }
+
     /// Capability gate used by the menu bar, CLI, and MCP. Protocol 0 means
     /// no handshake yet. Older than the verified baseline keeps reads and
     /// disables writes. Newer is treated as additive so a routine herdr bump

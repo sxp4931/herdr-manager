@@ -118,6 +118,13 @@ final class AppModel {
     private let notificationManager = NotificationManager()
     private let diagnoser = Diagnoser()
     private let poller = HeartbeatPoller()
+    /// Silences that have already alerted, so each one alerts once.
+    private var silentAlerts = SilentAlertLedger()
+    /// At most one diagnosis pass at a time; requests made during a pass
+    /// fold into one more after it.
+    private let diagnosisRuns = CoalescedRunner()
+    /// Panes whose transition asked for a pass; the next pass does them first.
+    private var diagnoseFirst: Set<AgentID> = []
     private var eventTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
     private var diagnosisTask: Task<Void, Never>?
@@ -202,13 +209,19 @@ final class AppModel {
     /// resync path (initial connect, periodic poll, manual resync, reconnect)
     /// stays in lockstep.
     private func applyHerd(_ snapshot: HerdSnapshot) {
-        store.applyHerdSnapshot(snapshot)
+        let transitions = store.applyHerdSnapshot(snapshot)
         lastHerdAgents = snapshot.agents
         lastTabNames = snapshot.tabNames
         workspaceOptions = snapshot.workspaceNames
             .map { WorkspaceOption(id: $0.key, name: $0.value) }
             .sorted { $0.name < $1.name }
         considerFirstSuccess()
+        // When a poll sees a transition before its event, the event finds
+        // the status unchanged and reports nothing; this is the only place
+        // that transition surfaces. Seen by both, it is reported once.
+        for transition in transitions {
+            notifyAndDiagnoseIfNeeded(transition)
+        }
     }
 
     // MARK: - Lifecycle
@@ -395,7 +408,7 @@ final class AppModel {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
                 guard let self else { return }
-                await self.runDiagnosisAndNotify()
+                self.requestDiagnosis()
             }
         }
     }
@@ -487,25 +500,35 @@ final class AppModel {
         }
     }
 
+    /// Ask for a diagnosis pass. Passes never overlap: one requested while
+    /// another runs is folded into a single pass after it.
+    private func requestDiagnosis(first agentId: AgentID? = nil) {
+        if let agentId { diagnoseFirst.insert(agentId) }
+        diagnosisRuns.request { [weak self] in
+            await self?.runDiagnosisAndNotify()
+        }
+    }
+
     private func runDiagnosisAndNotify() async {
-        // Snapshot previous silent state for notification diff
-        let previousSilentIds = Set(store.agents.values.filter { $0.verdict.isSilent }.map { $0.id })
+        let first = diagnoseFirst
+        diagnoseFirst = []
+        await store.diagnoseAll(adapter: adapter, diagnoser: diagnoser, settings: settingsStore, first: first)
 
-        await store.diagnoseAll(adapter: adapter, diagnoser: diagnoser, settings: settingsStore)
-
-        // Check for newly-silent agents
-        for agent in store.agents.values {
-            if agent.verdict.isSilent && !previousSilentIds.contains(agent.id) {
-                notificationManager.notifySilent(agent: agent)
-            }
-            // Clear silent notification key when agent is no longer silent
-            if !agent.verdict.isSilent && previousSilentIds.contains(agent.id) {
-                notificationManager.clearSilentNotification(for: agent.id)
-            }
+        // One alert per silence, however the last one ended. Diffing against
+        // the verdicts from before this pass re-armed a pane only when a pass
+        // saw it stop being silent; a status change resets the verdict
+        // outside any pass, so that pane never alerted for silence again.
+        for silence in silentAlerts.newSilences(in: store.agents.values) {
+            notificationManager.notifySilent(agent: silence.agent, episodeKey: silence.episodeKey)
         }
 
         // Persist dwell after diagnosis so significant verdict changes are saved.
-        dwellTracker.save()
+        // Not before the first restore: that save would replace the episodes
+        // the restore is about to read with whatever this run has seen so far.
+        if hasRestoredDwell {
+            updateDwellForAllAgents()
+            dwellTracker.save()
+        }
     }
 
     private func runEventLoop() async {
@@ -558,16 +581,13 @@ final class AppModel {
     }
 
     /// Shared "did this agent just become blocked/start working" reaction for
-    /// both event shapes runEventLoop understands.
+    /// both event shapes runEventLoop understands and for herd snapshots.
     private func notifyAndDiagnoseIfNeeded(_ transition: AgentStatusTransition) {
         if transition.to == .blocked, let agent = store.agents[transition.agentId] {
             _ = notificationManager.notifyBlocked(agent: agent, episodeKey: transition.episodeKey)
         }
         if transition.to == .blocked || transition.to == .working {
-            Task { [weak self] in
-                guard let self else { return }
-                await self.runDiagnosisAndNotify()
-            }
+            requestDiagnosis(first: transition.agentId)
         }
     }
 
@@ -620,18 +640,32 @@ final class AppModel {
         sendKeys(agent, keys: ["esc"], actionName: "Deny")
     }
 
+    /// Re-reads herdr before the keys go out: the row may be stale (see
+    /// `PromptAnswerCheck`), and the read also refreshes the protocol
+    /// reading the write gate uses, so a herdr restart since the last poll
+    /// is seen too.
     private func sendKeys(_ agent: Agent, keys: [String], actionName: String) {
         guard !inFlightAgentWrites.contains(agent.id) else { return }
         inFlightAgentWrites.insert(agent.id)
         Task { [weak self] in
             defer { self?.inFlightAgentWrites.remove(agent.id) }
             guard let self else { return }
-            let health = self.adapter.health()
-            guard health.writesEnabled else {
-                self.setLastError("\(actionName) skipped: \(health.reason ?? "writes disabled")")
-                return
-            }
             do {
+                let snapshot = try await self.adapter.herdSnapshot()
+                let health = self.adapter.health()
+                self.setHealth(health)
+                guard health.writesEnabled else {
+                    self.setLastError("\(actionName) skipped: \(health.reason ?? "writes disabled")")
+                    return
+                }
+                if let refusal = PromptAnswerCheck.refusal(answering: agent, in: snapshot) {
+                    // Show what herdr reports now, so the row matches the
+                    // reason and a retry uses the current episode.
+                    self.applyHerd(snapshot)
+                    self.updateDwellForAllAgents()
+                    self.setLastError("\(actionName) skipped: \(refusal.message)")
+                    return
+                }
                 try await self.adapter.sendKeys(paneId: agent.id.raw, keys: keys)
                 self.setLastError(nil)
             } catch {
@@ -882,20 +916,11 @@ final class AppModel {
 
     // MARK: - Dwell tracking
 
-    /// Update the dwell tracker for every known agent. Called after each
-    /// successful snapshot so the persisted dwell state stays in lockstep
-    /// with the live herd.
+    /// Mirror the live herd into the dwell tracker, dropping panes that left
+    /// it. Called after each successful snapshot and before each save so the
+    /// persisted dwell state stays in lockstep with the live herd.
     private func updateDwellForAllAgents() {
-        for agent in store.agents.values {
-            dwellTracker.update(
-                agentId: agent.id,
-                status: agent.status,
-                enteredAt: agent.enteredAt,
-                lastOutputAt: agent.lastOutputAt,
-                occupantFingerprint: Self.fingerprintForAgent(agent),
-                stateChangeSeq: agent.stateChangeSeq
-            )
-        }
+        dwellTracker.sync(liveAgents: store.agents)
     }
 
     /// Derive a stable occupant fingerprint from an Agent. Mirrors

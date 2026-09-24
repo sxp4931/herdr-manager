@@ -3,12 +3,14 @@ import Observation
 
 // MARK: - AgentStatusTransition
 
-/// A status change `AgentStore.applyEvent` accepted. Notifications and
-/// diagnosis react to this, not to the raw event: the store drops stale
-/// and untracked-pane events, and those must not notify either.
+/// A status change `AgentStore.applyEvent` or `applyHerdSnapshot`
+/// accepted. Notifications and diagnosis react to this, not to the raw
+/// event: the store drops stale and untracked-pane events, and those must
+/// not notify either.
 public struct AgentStatusTransition: Equatable, Sendable {
     public let agentId: AgentID
-    /// Nil when the event introduced a pane the store was not tracking.
+    /// Nil when the event or snapshot introduced a pane the store was not
+    /// tracking.
     public let from: AgentStatus?
     public let to: AgentStatus
     public let stateChangeSeq: UInt64
@@ -45,6 +47,24 @@ public final class AgentStore {
     /// resnapshots (those events only carry raw ids, not labels).
     private var workspaceNameCache: [String: String] = [:]
     private var tabNameCache: [String: String] = [:]
+
+    /// Panes whose status or presence an event changed since the last
+    /// `applyHerdSnapshot`, mapped to the lowest `agent.list` seq that can
+    /// reflect that change. A snapshot is applied when its response
+    /// arrives, and herdr may have answered it before sending the event:
+    /// for these panes, a snapshot below that seq is taken as stale and does
+    /// not roll the pane back. Each snapshot clears the map, so a herdr
+    /// restart (seq back to 0) or a wrong event costs at most one poll. A
+    /// pane kept back from a stale snapshot stays marked at 0 (never stale)
+    /// so the snapshot that catches up still continues the event's episode.
+    ///
+    /// Without this, a stale poll undid a blocked event and the next poll
+    /// reported the same prompt as a second blocked transition.
+    private var eventChangedPanes: [AgentID: UInt64] = [:]
+
+    /// Whether a herd snapshot has been applied. The first one describes
+    /// the herd as it already was, so its panes are not reported as new.
+    private var hasAppliedHerd = false
 
     public init() {}
 
@@ -132,31 +152,56 @@ public final class AgentStore {
     /// timers (`enteredAt`) reset only on a genuine state transition instead
     /// of never resetting (the old `panes[]`-based path never carried
     /// `state_change_seq`).
-    public func applyHerdSnapshot(_ snapshot: HerdSnapshot) {
+    ///
+    /// - Returns: The status changes accepted, same shape as `applyEvent`'s.
+    ///   The 3s poll can see a transition before its event arrives; the
+    ///   event then finds the status unchanged and reports nothing, so a
+    ///   blocked alert that listened to events alone was lost. The snapshot
+    ///   that first populates the store reports none.
+    @discardableResult
+    public func applyHerdSnapshot(_ snapshot: HerdSnapshot) -> [AgentStatusTransition] {
         var newAgents: [AgentID: Agent] = [:]
+        var transitions: [AgentStatusTransition] = []
+        var listed: Set<AgentID> = []
+        let eventFloors = eventChangedPanes
+        eventChangedPanes = [:]
 
         for info in snapshot.agents {
+            guard !info.paneId.isEmpty else { continue }
+            let agentId = AgentID(info.paneId)
+            listed.insert(agentId)
+            let existing = agents[agentId]
+
+            // Answered before an event that changed this pane: keep what
+            // the event left (including its removal) until the next poll.
+            let eventFloor = eventFloors[agentId]
+            if let eventFloor, info.stateChangeSeq < eventFloor {
+                if let existing {
+                    newAgents[agentId] = existing
+                    eventChangedPanes[agentId] = 0
+                }
+                continue
+            }
+
             // An entry with no agent is a plain shell, not an agent — never
             // insert it. (agentList()/parseAgentList already filters these
             // out, but a defensive check here keeps this function correct
             // even if called with a hand-built HerdSnapshot.)
-            guard !info.paneId.isEmpty else { continue }
             guard let agentKind = info.agent, !agentKind.isEmpty else { continue }
 
-            let agentId = AgentID(info.paneId)
             let status = AgentStatus(rawValue: info.agentStatus) ?? .unknown
             let wsName = snapshot.workspaceNames[info.workspaceId] ?? info.workspaceId
             let tabName = snapshot.tabNames[info.tabId] ?? info.tabId
 
-            let existing = agents[agentId]
             // stateChangeSeq is the authoritative "did this agent's state
             // genuinely change" signal. Also reset when the status string
             // moved but seq did not (seq of 0 on a pane_updated-shaped
             // snapshot, or a lagging seq): otherwise dwell and verdict
-            // stick to the previous episode.
+            // stick to the previous episode. A snapshot catching up with an
+            // event's status continues the episode that event opened.
             let seqUnchanged = existing?.stateChangeSeq == info.stateChangeSeq
             let statusUnchanged = existing?.status == status
-            let sameEpisode = existing != nil && seqUnchanged && statusUnchanged
+            let sameEpisode = existing != nil && statusUnchanged && (seqUnchanged || eventFloor != nil)
             let enteredAt = sameEpisode ? existing!.enteredAt : Date()
 
             let kind: AgentKind
@@ -175,7 +220,7 @@ public final class AgentStore {
                 verdict = Self.verdict(for: status)
             }
 
-            newAgents[agentId] = Agent(
+            let agent = Agent(
                 id: agentId,
                 kind: kind,
                 name: name,
@@ -189,7 +234,21 @@ public final class AgentStore {
                 tabName: tabName,
                 cwd: info.foregroundCwd ?? info.cwd ?? ""
             )
+            newAgents[agentId] = agent
+            if existing != nil || hasAppliedHerd,
+               let transition = Self.transition(from: existing?.status, to: agent) {
+                transitions.append(transition)
+            }
         }
+
+        // A pane an event added that this snapshot does not list yet.
+        for (agentId, floor) in eventFloors where floor > 0 && !listed.contains(agentId) {
+            if let existing = agents[agentId] {
+                newAgents[agentId] = existing
+                eventChangedPanes[agentId] = 0
+            }
+        }
+        hasAppliedHerd = true
 
         // Cache labels so single-pane `paneUpdated` events (which only carry
         // raw workspace/tab ids) can still resolve human-readable names
@@ -200,6 +259,7 @@ public final class AgentStore {
         if newAgents != agents {
             agents = newAgents
         }
+        return transitions
     }
 
     // MARK: - Events
@@ -224,6 +284,7 @@ public final class AgentStore {
             let newStatus = AgentStatus(rawValue: agentStatus) ?? .unknown
             if newStatus != agent.status {
                 agent.enteredAt = Date()
+                eventChangedPanes[agentId] = seq ?? Self.seq(after: agent.stateChangeSeq)
             }
             agent.status = newStatus
             if let seq { agent.stateChangeSeq = seq }
@@ -231,20 +292,16 @@ public final class AgentStore {
             agents[agentId] = agent
             return Self.transition(from: previousStatus, to: agent)
 
-        case .paneCreated(let paneId, let workspaceId, let tabId):
-            let agentId = AgentID(paneId)
-            if agents[agentId] == nil {
-                agents[agentId] = Agent(
-                    id: agentId,
-                    status: .unknown,
-                    workspaceName: workspaceId,
-                    tabName: tabId
-                )
-            }
+        case .paneCreated:
+            // Every new pane starts as a plain shell. A placeholder row for
+            // it was an `.unknown` agent: counted, listed, and diagnosed, so
+            // a pass in the seconds before the next resync could stamp the
+            // bare shell process-gone and flash a red "gone". The agent
+            // arrives with the `pane_updated` that first names its kind.
+            break
 
         case .paneClosed(let paneId):
-            let agentId = AgentID(paneId)
-            agents.removeValue(forKey: agentId)
+            removeAfterEvent(AgentID(paneId))
 
         case .paneMoved(let paneId, let workspaceId, let tabId):
             let agentId = AgentID(paneId)
@@ -268,10 +325,12 @@ public final class AgentStore {
                 return nil
             }
 
+            let seqIsMeaningful = info.stateChangeSeq != 0
+
             guard let agentKind = info.agent, !agentKind.isEmpty else {
                 // The pane no longer runs an agent (dropped back to a plain
                 // shell) — it is not an agent anymore, so drop it too.
-                agents.removeValue(forKey: agentId)
+                removeAfterEvent(agentId, seq: seqIsMeaningful ? info.stateChangeSeq : nil)
                 return nil
             }
 
@@ -282,13 +341,17 @@ public final class AgentStore {
             // means "not provided here"; fall back to comparing agent_status
             // so a genuine transition still resets `enteredAt` in between
             // periodic `agent.list` resyncs.
-            let seqIsMeaningful = info.stateChangeSeq != 0
             let seqChanged = seqIsMeaningful && existing?.stateChangeSeq != info.stateChangeSeq
             let statusChanged = existing?.status != status
             let isNewState = existing == nil || seqChanged || statusChanged
 
             let enteredAt = isNewState ? Date() : existing!.enteredAt
             let verdict = isNewState ? Self.verdict(for: status) : existing!.verdict
+            if statusChanged {
+                eventChangedPanes[agentId] = seqIsMeaningful
+                    ? info.stateChangeSeq
+                    : Self.seq(after: existing?.stateChangeSeq ?? 0)
+            }
 
             let kind: AgentKind
             if let session = info.agentSession {
@@ -328,7 +391,7 @@ public final class AgentStore {
             break
 
         case .paneExited(let paneId):
-            agents.removeValue(forKey: AgentID(paneId))
+            removeAfterEvent(AgentID(paneId))
 
         case .workspacesChanged:
             // Labels changed; the caller is responsible for triggering a
@@ -340,6 +403,18 @@ public final class AgentStore {
             break
         }
         return nil
+    }
+
+    /// Drop a pane an event removed, and keep a snapshot answered before
+    /// that event from adding it back.
+    private func removeAfterEvent(_ agentId: AgentID, seq: UInt64? = nil) {
+        guard let removed = agents.removeValue(forKey: agentId) else { return }
+        eventChangedPanes[agentId] = seq ?? Self.seq(after: removed.stateChangeSeq)
+    }
+
+    /// The lowest seq herdr can report once it has moved past `seq`.
+    private static func seq(after seq: UInt64) -> UInt64 {
+        seq == .max ? seq : seq + 1
     }
 
     private static func transition(from previous: AgentStatus?, to agent: Agent) -> AgentStatusTransition? {
@@ -401,12 +476,18 @@ public final class AgentStore {
     ///   - settings: Optional SettingsStore for per-agent silent-threshold
     ///     overrides. When nil, each agent falls back to the kind-based
     ///     default (source-compatible with the previous signature).
+    ///   - first: Agents to diagnose before the rest, typically the ones
+    ///     whose transition asked for this pass, so their verdict does not
+    ///     wait on the rest of the herd.
     public func diagnoseAll(
         adapter: HerdrAdapter,
         diagnoser: Diagnoser,
-        settings: SettingsStore? = nil
+        settings: SettingsStore? = nil,
+        first: Set<AgentID> = []
     ) async {
-        let nonIdle = agents.values.filter { $0.status != .idle }
+        let nonIdle = agents.values
+            .filter { $0.status != .idle }
+            .sorted { first.contains($0.id) && !first.contains($1.id) }
 
         // Snapshot per-agent thresholds off the actor before the loop so we
         // don't hop into SettingsStore on every iteration.
