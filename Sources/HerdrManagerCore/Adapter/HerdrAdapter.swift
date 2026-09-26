@@ -95,9 +95,17 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// when it has no serial of its own. `epochBox` receives that epoch
     /// before this call suspends, so a caller that records the protocol
     /// after a success uses the same id.
+    ///
+    /// `writes` checks the gate on this queue, after every transaction
+    /// already enqueued has recorded. A herd read that saw a downgrade or
+    /// a dead socket runs before the mutation and the mutation does not
+    /// start. Checking before the enqueue would still see the protocol
+    /// from before that read. A refusal is not a connect failure: the
+    /// reading stays, and no byte of the request is written.
     private func onIO<T: Sendable>(
         readSerial: UInt64? = nil,
         epochBox: ProtocolEpochBox? = nil,
+        writes: Bool = false,
         _ body: @escaping @Sendable () throws -> T
     ) async throws -> T {
         let box = epochBox ?? ProtocolEpochBox()
@@ -110,8 +118,11 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                 defer { stateLock.unlock() }
                 let epoch = nextProtocolEpochLocked()
                 box.value = epoch
-                ioQueue.async {
+                ioQueue.async { [self] in
                     do {
+                        if writes, let reason = self.writeRefusal() {
+                            throw NDJSONClientError.writesDisabled(reason)
+                        }
                         continuation.resume(returning: try body())
                     } catch {
                         continuation.resume(throwing: error)
@@ -120,12 +131,25 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             }
         } catch let error as NDJSONClientError {
             // herdr is not accepting connections: it stopped or is restarting,
-            // and whatever answers next may be a different build.
+            // and whatever answers next may be a different build. A write
+            // the gate refused never connected, so it must not clear the
+            // reading the refusal just obeyed.
             if case .connectFailed = error {
                 recordProtocol(0, readSerial: readSerial, epoch: box.value)
             }
             throw error
         }
+    }
+
+    /// Nil when the protocol currently on the gate may receive a write.
+    /// Called on `ioQueue`, so a snapshot enqueued earlier has already
+    /// recorded.
+    private func writeRefusal() -> String? {
+        let health = Self.health(forProtocol: latestProtocol())
+        guard health.writesEnabled else {
+            return health.reason ?? "herdr protocol not verified for writes"
+        }
+        return nil
     }
 
     /// Caller holds `stateLock`.
@@ -343,7 +367,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     }
 
     public func focus(paneId: String) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             _ = try reqClient.sendWrite(method: "agent.focus", params: Self.focusParams(paneId: paneId))
         }
     }
@@ -357,7 +381,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     // MARK: - Write Methods
 
     public func sendKeys(paneId: String, keys: [String]) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             let params: [String: Any] = [
                 "target": paneId,
                 "keys": keys
@@ -367,7 +391,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     }
 
     public func prompt(paneId: String, text: String) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             // Keep Nudge as one user action, but send text and Enter as two
             // ordered herdr writes. `agent.prompt` is documented as an atomic
             // submission, yet some live agent TUIs only accepted its paste
@@ -405,13 +429,13 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     }
 
     public func closePane(paneId: String) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             _ = try reqClient.sendWrite(method: "pane.close", params: ["pane_id": paneId])
         }
     }
 
     public func createWorkspace(cwd: String, label: String?) async throws -> WorkspaceCreation {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             var params: [String: Any] = ["cwd": cwd]
             if let label { params["label"] = label }
             let result = try reqClient.sendWrite(method: "workspace.create", params: params)
@@ -437,7 +461,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// source-compatible while allowing MCP session creation to wait for a
     /// freshly-created shell instead of failing on the default short probe.
     public func startAgent(paneId: String, kind: String, name: String, timeoutMs: Int?) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             var params: [String: Any] = [
                 "pane_id": paneId,
                 "kind": kind,
@@ -495,7 +519,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     }
 
     public func reportMetadata(paneId: String, source: String, tokens: [String: String], ttlMs: Int) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             let params: [String: Any] = [
                 "pane_id": paneId,
                 "source": source,
@@ -565,7 +589,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         label: String?,
         focus: Bool
     ) async throws -> (tabId: String, rootPaneId: String) {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             var params: [String: Any] = ["focus": focus]
             if let workspaceId { params["workspace_id"] = workspaceId }
             if let cwd { params["cwd"] = cwd }
@@ -586,7 +610,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// Split beside an existing pane in the same tab and return the new shell
     /// pane. `agent.start` can then launch into that interactive shell.
     public func splitPane(targetPaneId: String, cwd: String?) async throws -> String {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             let params = LiveHerdrAdapter.splitPaneParams(targetPaneId: targetPaneId, cwd: cwd)
             let result = try reqClient.sendWrite(method: "pane.split", params: params)
             return try LiveHerdrAdapter.parsePaneInfoID(result)
@@ -613,14 +637,14 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     /// `workspace.focus` -> `{workspace_id}` (schema `WorkspaceTarget`).
     public func focusWorkspace(_ workspaceId: String) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             _ = try reqClient.sendWrite(method: "workspace.focus", params: ["workspace_id": workspaceId])
         }
     }
 
     /// `tab.focus` -> `{tab_id}` (schema `TabTarget`).
     public func focusTab(_ tabId: String) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             _ = try reqClient.sendWrite(method: "tab.focus", params: ["tab_id": tabId])
         }
     }
@@ -629,7 +653,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// `agent.focus`, which takes `{target}` and additionally routes agent
     /// attention; this is a plain pane focus.
     public func focusPane(_ paneId: String) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             _ = try reqClient.sendWrite(method: "pane.focus", params: ["pane_id": paneId])
         }
     }

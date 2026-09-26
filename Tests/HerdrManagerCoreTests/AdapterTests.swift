@@ -1429,6 +1429,177 @@ struct ProtocolReadingResetTests {
     }
 }
 
+@Suite("Mutations obey the write gate on the I/O queue")
+struct WriteGateOnIOQueueTests {
+    private func unreachableSocketPath() -> String {
+        "/tmp/herdr-missing-\(UUID().uuidString.prefix(8)).sock"
+    }
+
+    /// A closed gate must refuse before connect. `connectFailed` means the
+    /// call got past the gate and tried the socket.
+    private func expectRefused(
+        _ name: String,
+        reasonContains: String,
+        _ operation: () async throws -> Void
+    ) async {
+        do {
+            try await operation()
+            Issue.record("\(name): expected the write to be refused")
+        } catch let error as NDJSONClientError {
+            guard case .writesDisabled(let reason) = error else {
+                Issue.record("\(name): expected writesDisabled, got \(error)")
+                return
+            }
+            #expect(reason.contains(reasonContains))
+            if !reason.contains(reasonContains) {
+                Issue.record("\(name): \(reason)")
+            }
+        } catch {
+            Issue.record("\(name): unexpected error \(error)")
+        }
+    }
+
+    @Test("An older protocol refuses every mutation and leaves that reading in place")
+    func olderProtocolRefusesMutations() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        adapter.setLatestProtocol(16)
+        #expect(!adapter.health().writesEnabled)
+
+        await expectRefused("sendKeys", reasonContains: "16") {
+            try await adapter.sendKeys(paneId: "w1:p1", keys: ["enter"])
+        }
+        await expectRefused("prompt", reasonContains: "16") {
+            try await adapter.prompt(paneId: "w1:p1", text: "hello")
+        }
+        await expectRefused("closePane", reasonContains: "16") {
+            try await adapter.closePane(paneId: "w1:p1")
+        }
+        await expectRefused("focus", reasonContains: "16") {
+            try await adapter.focus(paneId: "w1:p1")
+        }
+        await expectRefused("focusWorkspace", reasonContains: "16") {
+            try await adapter.focusWorkspace("w1")
+        }
+        await expectRefused("focusTab", reasonContains: "16") {
+            try await adapter.focusTab("w1:t1")
+        }
+        await expectRefused("focusPane", reasonContains: "16") {
+            try await adapter.focusPane("w1:p1")
+        }
+        await expectRefused("createWorkspace", reasonContains: "16") {
+            _ = try await adapter.createWorkspace(cwd: "/tmp", label: "scratch")
+        }
+        await expectRefused("createTab", reasonContains: "16") {
+            _ = try await adapter.createTab(workspaceId: "w1", cwd: nil, label: nil, focus: true)
+        }
+        await expectRefused("splitPane", reasonContains: "16") {
+            _ = try await adapter.splitPane(targetPaneId: "w1:p1", cwd: nil)
+        }
+        await expectRefused("startAgent", reasonContains: "16") {
+            try await adapter.startAgent(paneId: "w1:p1", kind: "claude", name: "claude")
+        }
+        await expectRefused("reportMetadata", reasonContains: "16") {
+            try await adapter.reportMetadata(
+                paneId: "w1:p1",
+                source: "shepherd",
+                tokens: ["stuck_for": "1m"],
+                ttlMs: 1000
+            )
+        }
+
+        // A refusal never connects, so the connect-failure path must not
+        // clear the older reading.
+        #expect(adapter.health().protocolVersion == 16)
+        #expect(!adapter.health().writesEnabled)
+    }
+
+    @Test("An unknown protocol refuses a write and does not pretend to have connected")
+    func unknownProtocolRefusesWrite() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        await expectRefused("prompt", reasonContains: "unknown") {
+            try await adapter.prompt(paneId: "w1:p1", text: "hello")
+        }
+        #expect(adapter.health().protocolVersion == 0)
+        #expect(adapter.health().reason == "protocol unknown")
+    }
+
+    @Test("A herd read that records an older protocol blocks the write that follows it")
+    func downgradeRecordedByHerdReadBlocksTheNextWrite() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(16))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        // The gate still says the previous build. This is the reading a
+        // confirm-time refresh stored before revalidation's herd read.
+        adapter.setLatestProtocol(17)
+        #expect(adapter.health().writesEnabled)
+
+        let herd = try await adapter.herdSnapshot()
+        #expect(herd.protocol == 16)
+        #expect(adapter.health().protocolVersion == 16)
+
+        // The fake answers any method with success. A write that reached
+        // the socket would return, not throw.
+        await expectRefused("sendKeys", reasonContains: "16") {
+            try await adapter.sendKeys(paneId: "w1:p1", keys: ["enter"])
+        }
+        #expect(adapter.health().protocolVersion == 16)
+        #expect(!adapter.health().writesEnabled)
+    }
+
+    @Test("A verified protocol still sends the write")
+    func verifiedProtocolSendsTheWrite() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(17))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        adapter.setLatestProtocol(17)
+
+        try await adapter.sendKeys(paneId: "w1:p1", keys: ["enter"])
+        try await adapter.prompt(paneId: "w1:p1", text: "hello")
+        try await adapter.closePane(paneId: "w1:p1")
+        // The write does not record a protocol. The verified reading stays.
+        #expect(adapter.health().protocolVersion == 17)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("A verified write that cannot connect still clears the reading")
+    func verifiedWriteConnectFailureClearsReading() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        adapter.setLatestProtocol(17)
+        #expect(adapter.health().writesEnabled)
+
+        do {
+            try await adapter.closePane(paneId: "w1:p1")
+            Issue.record("Expected connect to fail with no herdr listening")
+        } catch let error as NDJSONClientError {
+            guard case .connectFailed = error else {
+                Issue.record("Expected connectFailed, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Unexpected error \(error)")
+        }
+
+        #expect(adapter.health().protocolVersion == 0)
+        #expect(!adapter.health().writesEnabled)
+    }
+
+    @Test("A read is still attempted when writes are off")
+    func readIsNotGated() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(16))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        adapter.setLatestProtocol(16)
+
+        let herd = try await adapter.herdSnapshot()
+        #expect(herd.protocol == 16)
+        let snap = try await adapter.snapshot()
+        #expect(snap.protocol == 16)
+    }
+}
+
 @Suite("Subscription line decode failures")
 struct SubscriptionLineDecodeTests {
     @Test("Valid pane_updated line yields an event")
@@ -1708,6 +1879,10 @@ struct CoreErrorDescriptionTests {
         let connect: Error = NDJSONClientError.connectFailed("/tmp/herdr.sock", 2)
         #expect(connect.localizedDescription.contains("/tmp/herdr.sock"))
         #expect(connect.localizedDescription.contains("errno 2"))
+
+        let gated: Error = NDJSONClientError.writesDisabled("herdr protocol 16 is older than the minimum verified 17; writes disabled")
+        #expect(gated.localizedDescription.contains("writes disabled"))
+        #expect(gated.localizedDescription.contains("protocol 16"))
     }
 
     @Test("SharedActionStoreError carries the store failure")

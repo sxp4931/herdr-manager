@@ -1326,6 +1326,9 @@ actor MCPServer {
                 guard freshHerd.workspaceNames[workspaceId] != nil else {
                     throw AgentResolutionError(description: "workspace disappeared before execution")
                 }
+                // The placement read may have recorded a downgrade the
+                // claim-time gate did not see.
+                try throwIfWritesDisabled()
                 let creation = try await adapter.createTab(
                     workspaceId: workspaceId,
                     cwd: cwdHint,
@@ -1355,6 +1358,12 @@ actor MCPServer {
             guard shellReady else {
                 throw AgentResolutionError(description: "agent target pane \(paneId) did not become an available shell")
             }
+            // A not-ready pane fails the shell read. A connect failure in
+            // that retry clears the gate, and a later read can still see
+            // the shell. Re-read before launching, or the start is refused
+            // on a gate herdr has already come back from. A restart onto
+            // an older protocol stays closed.
+            try await requireFreshWrites()
             try await adapter.startAgent(
                 paneId: paneId,
                 kind: agentKind,
@@ -1371,6 +1380,7 @@ actor MCPServer {
                 guard ready else {
                     throw AgentResolutionError(description: "agent \(paneId) did not become ready before the brief timeout")
                 }
+                try await requireFreshWrites()
                 try await adapter.prompt(paneId: paneId, text: brief)
             }
 
@@ -1628,6 +1638,35 @@ actor MCPServer {
             throw MCPRevalidationError.statusChanged(
                 expected: expectedStatus,
                 current: paneInfo.agentStatus
+            )
+        }
+
+        // The herd read is a newer protocol observation than the refresh
+        // that opened the gate. A downgrade it just recorded must fail
+        // here, before prompt / keys / close, with no input sent.
+        try throwIfWritesDisabled()
+    }
+
+    /// The protocol currently on the gate. Call after the read that should
+    /// have recorded it. Does not take another snapshot.
+    private func throwIfWritesDisabled() throws {
+        let health = adapter.health()
+        if !health.writesEnabled {
+            throw MCPRevalidationError.writesDisabled(
+                health.reason ?? "herdr protocol not verified for writes"
+            )
+        }
+    }
+
+    /// Snapshot the protocol and refuse when that reading cannot take a
+    /// write. Used where the previous read does not report a protocol
+    /// (`waitForShell`, `agent.wait`) and may have cleared the gate.
+    private func requireFreshWrites() async throws {
+        let readSerial = captureHerdReadSerial()
+        let health = await adapter.refreshHealth(readSerial: readSerial)
+        if !health.writesEnabled {
+            throw MCPRevalidationError.writesDisabled(
+                health.reason ?? "herdr protocol not verified for writes"
             )
         }
     }

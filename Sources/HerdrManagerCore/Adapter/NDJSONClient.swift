@@ -16,6 +16,9 @@ public enum NDJSONClientError: Error, Sendable, CustomStringConvertible, Localiz
     case connectionClosed
     case invalidResponse(String)
     case timeout
+    /// The protocol on the write gate does not allow a mutation. Thrown
+    /// before any byte of that request is written.
+    case writesDisabled(String)
 
     public var description: String {
         switch self {
@@ -33,6 +36,8 @@ public enum NDJSONClientError: Error, Sendable, CustomStringConvertible, Localiz
             return "invalid response: \(detail)"
         case .timeout:
             return "socket I/O timed out"
+        case .writesDisabled(let reason):
+            return "writes disabled: \(reason)"
         }
     }
 
