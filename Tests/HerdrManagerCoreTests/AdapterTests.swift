@@ -1188,6 +1188,120 @@ struct ProtocolReadingResetTests {
         #expect(health.reason?.contains(path) == true)
         #expect(adapter.health().reason == "protocol unknown")
     }
+
+    @Test("A connect failure on an earlier herd-read serial leaves a newer protocol in place")
+    func earlierConnectFailureDoesNotClearNewerProtocol() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        adapter.setLatestProtocol(18, readSerial: 5)
+        #expect(adapter.health().writesEnabled)
+
+        do {
+            _ = try await adapter.herdSnapshot(readSerial: 4)
+            Issue.record("Expected the snapshot to fail with no herdr listening")
+        } catch {
+            #expect(error is NDJSONClientError)
+        }
+
+        // Captured before the reading already on the gate, so the failed
+        // connect must not wipe it.
+        #expect(adapter.health().protocolVersion == 18)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("An earlier herd snapshot does not put an older protocol back")
+    func earlierHerdSnapshotDoesNotClobberProtocol() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(16))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        adapter.setLatestProtocol(18, readSerial: 5)
+
+        let herd = try await adapter.herdSnapshot(readSerial: 4)
+        #expect(herd.protocol == 16)
+        #expect(adapter.health().protocolVersion == 18)
+        #expect(adapter.health().writesEnabled)
+
+        _ = try await adapter.herdSnapshot(readSerial: 6)
+        #expect(adapter.health().protocolVersion == 16)
+        #expect(!adapter.health().writesEnabled)
+    }
+
+    @Test("An earlier snapshot does not put an older protocol back")
+    func earlierSnapshotDoesNotClobberProtocol() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(16))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        adapter.setLatestProtocol(18, readSerial: 5)
+
+        let snap = try await adapter.snapshot(readSerial: 4)
+        #expect(snap.protocol == 16)
+        #expect(adapter.health().protocolVersion == 18)
+
+        _ = try await adapter.snapshot(readSerial: 6)
+        #expect(adapter.health().protocolVersion == 16)
+
+        // A caller that does not pass a serial still records, which is the
+        // CLI and any one-shot reader that is alone on the adapter.
+        adapter.setLatestProtocol(18, readSerial: 7)
+        _ = try await adapter.snapshot()
+        #expect(adapter.health().protocolVersion == 16)
+    }
+
+    @Test("An earlier refresh failure does not clear a newer protocol")
+    func earlierRefreshFailureDoesNotClearNewerProtocol() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        adapter.setLatestProtocol(18, readSerial: 5)
+
+        let health = await adapter.refreshHealth(readSerial: 4)
+        #expect(!health.writesEnabled)
+        #expect(health.reason?.contains("protocol unknown") == true)
+        #expect(adapter.health().protocolVersion == 18)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("A newer refresh that cannot reach herdr forgets the old protocol")
+    func newerRefreshFailureClearsProtocol() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        adapter.setLatestProtocol(18, readSerial: 5)
+
+        let health = await adapter.refreshHealth(readSerial: 6)
+        #expect(!health.writesEnabled)
+        #expect(adapter.health().protocolVersion == 0)
+        #expect(!adapter.health().writesEnabled)
+    }
+
+    @Test("An earlier refresh that herdr answers with an error leaves a newer protocol in place")
+    func earlierRefreshErrorDoesNotClearNewerProtocol() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .error("snapshot unavailable"))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        adapter.setLatestProtocol(18, readSerial: 5)
+
+        let health = await adapter.refreshHealth(readSerial: 4)
+        #expect(!health.writesEnabled)
+        #expect(health.reason?.contains("snapshot unavailable") == true)
+        #expect(adapter.health().protocolVersion == 18)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("A refresh that loses the serial race returns the newer gate, not its own protocol")
+    func staleRefreshReturnsTheNewerGate() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(18))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        // A later read already saw the downgrade. This refresh still gets
+        // a snapshot — protocol 18, writes on — and must not hand that to
+        // the caller.
+        adapter.setLatestProtocol(16, readSerial: 5)
+
+        let health = await adapter.refreshHealth(readSerial: 4)
+        #expect(health.protocolVersion == 16)
+        #expect(!health.writesEnabled)
+        #expect(adapter.health().protocolVersion == 16)
+    }
 }
 
 @Suite("Subscription line decode failures")

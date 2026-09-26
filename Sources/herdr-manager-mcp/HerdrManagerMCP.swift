@@ -118,8 +118,9 @@ actor MCPServer {
     private let actionStore = ActionStore()
     private let sharedActionStore = SharedActionStore()
 
-    /// Capture ids for `agent.answer` herd reads. Taken before the read
-    /// starts, so a slower earlier read keeps the lower id.
+    /// Capture ids for herd reads and write-gate refreshes. Taken before
+    /// the read starts, so a slower earlier read keeps the lower id and
+    /// cannot move the protocol gate.
     private var nextHerdReadSerial: UInt64 = 0
 
     // nonisolated(unsafe): only accessed from nonisolated writeResponse/writeRaw
@@ -391,7 +392,7 @@ actor MCPServer {
     private func handleHerdOverview() async -> [String: Any] {
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
+            let herd = try await readHerd()
             var agents = buildAgents(from: herd)
 
             // Diagnose non-idle agents
@@ -419,7 +420,7 @@ actor MCPServer {
     private func handleAgentList(arguments: [String: Any]) async -> [String: Any] {
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
+            let herd = try await readHerd()
             var agents = buildAgents(from: herd)
 
             // Diagnose non-idle agents
@@ -476,7 +477,7 @@ actor MCPServer {
     private func handleAgentInspect(arguments: [String: Any]) async -> [String: Any] {
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
+            let herd = try await readHerd()
             let info: HerdrAgentInfo
             switch resolveAgent(arguments: arguments, herd: herd) {
             case .success(let resolved):
@@ -565,7 +566,7 @@ actor MCPServer {
 
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
+            let herd = try await readHerd()
             let info: HerdrAgentInfo
             switch resolveAgent(arguments: arguments, herd: herd) {
             case .success(let resolved):
@@ -609,7 +610,7 @@ actor MCPServer {
     private func handleAgentDiagnose(arguments: [String: Any]) async -> [String: Any] {
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
+            let herd = try await readHerd()
             let info: HerdrAgentInfo
             switch resolveAgent(arguments: arguments, herd: herd) {
             case .success(let resolved):
@@ -802,7 +803,7 @@ actor MCPServer {
 
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
+            let herd = try await readHerd()
             let paneId = agentIdStr
 
             guard let paneInfo = herd.agents.first(where: { $0.paneId == paneId }) else {
@@ -959,7 +960,7 @@ actor MCPServer {
 
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
+            let herd = try await readHerd()
             let paneId = agentIdStr
 
             guard let paneInfo = herd.agents.first(where: { $0.paneId == paneId }) else {
@@ -1060,7 +1061,7 @@ actor MCPServer {
 
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
+            let herd = try await readHerd()
             let paneId = agentIdStr
 
             guard let paneInfo = herd.agents.first(where: { $0.paneId == paneId }) else {
@@ -1216,7 +1217,7 @@ actor MCPServer {
         } else {
             do {
                 try await ensureConnected()
-                let herd = try await adapter.herdSnapshot()
+                let herd = try await readHerd()
 
                 if placement == "new_tab" {
                     guard let requestedWorkspace = workspaceId, !requestedWorkspace.isEmpty else {
@@ -1321,7 +1322,7 @@ actor MCPServer {
                 guard let workspaceId else {
                     throw AgentResolutionError(description: "workspace ID missing")
                 }
-                let freshHerd = try await adapter.herdSnapshot()
+                let freshHerd = try await readHerd()
                 guard freshHerd.workspaceNames[workspaceId] != nil else {
                     throw AgentResolutionError(description: "workspace disappeared before execution")
                 }
@@ -1467,15 +1468,27 @@ actor MCPServer {
         return nextHerdReadSerial
     }
 
+    /// One herd read, ordered against every other MCP herd read and against
+    /// `checkWritesEnabled`. The serial is captured here, with no await
+    /// before the request. `agent.answer` captures its own serials because
+    /// the answer cap records the same id.
+    private func readHerd() async throws -> HerdSnapshot {
+        let readSerial = captureHerdReadSerial()
+        return try await adapter.herdSnapshot(readSerial: readSerial)
+    }
+
     // MARK: - Write-Gate Helper
 
     /// Returns a tool error dict if writes are disabled, or nil if writes are
     /// allowed. Every gate takes a fresh protocol reading. Re-reading only at
     /// protocol 0 let a herdr restarted between calls, or while a write sat
     /// in its confirmation wait, receive the write on the old build's
-    /// reading (`session.spawn` new_workspace never re-read at all).
+    /// reading (`session.spawn` new_workspace never re-read at all). The
+    /// refresh carries a herd-read serial so a slow earlier gate cannot put
+    /// the protocol back after a later read has recorded a newer one.
     private func checkWritesEnabled() async -> [String: Any]? {
-        let health = await adapter.refreshHealth()
+        let readSerial = captureHerdReadSerial()
+        let health = await adapter.refreshHealth(readSerial: readSerial)
         if !health.writesEnabled {
             return makeToolError("Writes not enabled: \(health.reason ?? "herdr protocol not verified for writes")")
         }
@@ -1580,7 +1593,7 @@ actor MCPServer {
     /// as when the action was created. Throws if mismatch.
     /// Reads fingerprint info from action.params["_fp_*"] keys.
     private func revalidate(action: PendingAction, paneId: String) async throws {
-        let herd = try await adapter.herdSnapshot()
+        let herd = try await readHerd()
 
         guard let paneInfo = herd.agents.first(where: { $0.paneId == paneId }) else {
             throw MCPRevalidationError.paneGone(paneId)

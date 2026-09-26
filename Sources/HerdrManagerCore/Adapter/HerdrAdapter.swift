@@ -74,7 +74,13 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// a `Sendable` result so no non-Sendable value (e.g. `[String: Any]`)
     /// crosses the thread boundary. Combined with the socket-level timeouts, a
     /// hung herdr surfaces as `.timeout` rather than blocking indefinitely.
+    ///
+    /// `readSerial` is the capture id of the herd read this transaction
+    /// belongs to. A connect failure clears the protocol under that serial,
+    /// so an earlier read whose continuation runs last cannot wipe a later
+    /// reading. Callers that omit it still clear unconditionally.
     private func onIO<T: Sendable>(
+        readSerial: UInt64? = nil,
         _ body: @escaping @Sendable () throws -> T
     ) async throws -> T {
         do {
@@ -91,7 +97,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             // herdr is not accepting connections: it stopped or is restarting,
             // and whatever answers next may be a different build.
             if case .connectFailed = error {
-                clearProtocolReading()
+                setLatestProtocol(0, readSerial: readSerial)
             }
             throw error
         }
@@ -113,10 +119,11 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// without a live herdr.
     ///
     /// `readSerial` orders overlapping herd reads. A serial behind one
-    /// already recorded is ignored. Callers that omit it always record
-    /// (the CLI, one-shot MCP reads, `snapshot()`, and a failed connect
-    /// clearing the reading). `agent.answer` passes the serial captured
-    /// before each of its two herd reads.
+    /// already recorded is ignored. Callers that omit it always record:
+    /// the CLI, a connect failure on a request that is not part of the
+    /// ordering, and the subscription loop forgetting the reading when
+    /// the event stream drops. Shepherd, MCP herd reads, and MCP's
+    /// write-gate refresh pass the serial captured before the request.
     func setLatestProtocol(_ version: Int, readSerial: UInt64? = nil) {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -151,11 +158,20 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     }
 
     public func snapshot() async throws -> HerdrSnapshot {
-        let snap = try await onIO { [reqClient] in
+        try await snapshot(readSerial: nil)
+    }
+
+    /// `session.snapshot`, recording the protocol under `readSerial`.
+    ///
+    /// The zero-argument form is the `HerdrAdapter` requirement and always
+    /// records. A serial behind one already recorded still returns this
+    /// snapshot and leaves the write gate on the newer reading.
+    public func snapshot(readSerial: UInt64?) async throws -> HerdrSnapshot {
+        let snap = try await onIO(readSerial: readSerial) { [reqClient] in
             let result = try reqClient.sendRead(method: "session.snapshot", params: [:])
             return try LiveHerdrAdapter.parseSnapshot(result)
         }
-        setLatestProtocol(snap.protocol)
+        setLatestProtocol(snap.protocol, readSerial: readSerial)
         return snap
     }
 
@@ -437,45 +453,35 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// `agent.list` merged with `session.snapshot`'s workspace/tab labels and
     /// focus pointers — the one-stop call sites should use going forward.
     ///
-    /// `readSerial` is the capture id from `AgentStore.captureHerdRequest()`,
-    /// taken before this call. Overlapping menu-bar reads pass it so a slow
-    /// earlier read cannot put the write gate back on an older protocol
-    /// after a later read — including one that followed a herdr restart —
-    /// has already been recorded. Omit it when there is only one reader.
+    /// `readSerial` is the capture id from `AgentStore.captureHerdRequest()`
+    /// or the MCP server's herd-read counter, taken before this call.
+    /// Overlapping reads pass it so a slow earlier read cannot put the
+    /// write gate back on an older protocol after a later read — including
+    /// one that followed a herdr restart — has already been recorded. The
+    /// same serial covers a connect failure: `onIO` clears the reading
+    /// under it, and a serial behind one already recorded leaves the later
+    /// reading in place. Omit it when there is only one reader.
     public func herdSnapshot(readSerial: UInt64? = nil) async throws -> HerdSnapshot {
-        let result: HerdSnapshot
-        do {
-            result = try await onIO { [reqClient] in
-                let agentsResult = try reqClient.sendRead(method: "agent.list", params: [:])
-                let agents = LiveHerdrAdapter.parseAgentList(agentsResult)
+        let result = try await onIO(readSerial: readSerial) { [reqClient] in
+            let agentsResult = try reqClient.sendRead(method: "agent.list", params: [:])
+            let agents = LiveHerdrAdapter.parseAgentList(agentsResult)
 
-                let snapResult = try reqClient.sendRead(method: "session.snapshot", params: [:])
-                let snap = try LiveHerdrAdapter.parseSnapshot(snapResult)
+            let snapResult = try reqClient.sendRead(method: "session.snapshot", params: [:])
+            let snap = try LiveHerdrAdapter.parseSnapshot(snapResult)
 
-                let workspaceNames = snap.workspaceNameMap
-                let tabNames = snap.tabNameMap
+            let workspaceNames = snap.workspaceNameMap
+            let tabNames = snap.tabNameMap
 
-                return HerdSnapshot(
-                    version: snap.version,
-                    protocol: snap.protocol,
-                    agents: agents,
-                    workspaceNames: workspaceNames,
-                    tabNames: tabNames,
-                    focusedWorkspaceId: snap.focusedWorkspaceId,
-                    focusedTabId: snap.focusedTabId,
-                    focusedPaneId: snap.focusedPaneId
-                )
-            }
-        } catch let error as NDJSONClientError {
-            // `onIO` clears the reading when the connect itself fails, with
-            // no serial. An earlier read whose continuation has not run yet
-            // can then publish the protocol it saw. Recording protocol 0
-            // under this read's serial puts the clear back. A serial behind
-            // one already recorded leaves a later success in place.
-            if case .connectFailed = error, let readSerial {
-                setLatestProtocol(0, readSerial: readSerial)
-            }
-            throw error
+            return HerdSnapshot(
+                version: snap.version,
+                protocol: snap.protocol,
+                agents: agents,
+                workspaceNames: workspaceNames,
+                tabNames: tabNames,
+                focusedWorkspaceId: snap.focusedWorkspaceId,
+                focusedTabId: snap.focusedTabId,
+                focusedPaneId: snap.focusedPaneId
+            )
         }
         setLatestProtocol(result.protocol, readSerial: readSerial)
         return result
@@ -878,14 +884,19 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// herdr's sockets are one-shot and MCP runs no subscription loop, so a
     /// herdr restarted between two tool calls (or during a confirmation
     /// wait) is invisible until a request fails. The next write was gated
-    /// on the previous build's protocol. Any failure to re-read leaves the
-    /// protocol unknown (writes off) with herdr's error in the reason.
-    public func refreshHealth() async -> AdapterHealth {
+    /// on the previous build's protocol. Any failure to re-read leaves this
+    /// caller with the protocol unknown (writes off) and herdr's error in
+    /// the reason. `readSerial` orders the reading with overlapping herd
+    /// snapshots. A serial behind one already recorded does not move the
+    /// stored gate, and a success returns that gate rather than the protocol
+    /// this response happened to carry: a slower earlier refresh must not
+    /// enable writes after a later read saw a downgrade or a dead socket.
+    public func refreshHealth(readSerial: UInt64? = nil) async -> AdapterHealth {
         do {
-            let snap = try await snapshot()
-            return Self.health(forProtocol: snap.protocol)
+            _ = try await snapshot(readSerial: readSerial)
+            return health()
         } catch {
-            clearProtocolReading()
+            setLatestProtocol(0, readSerial: readSerial)
             let unknown = Self.health(forProtocol: 0)
             return AdapterHealth(
                 protocolVersion: unknown.protocolVersion,
