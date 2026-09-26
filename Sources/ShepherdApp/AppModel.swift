@@ -209,12 +209,18 @@ final class AppModel {
     /// resync path (initial connect, periodic poll, manual resync, reconnect)
     /// stays in lockstep.
     ///
-    /// `requestedAtEpoch` is `store.currentHerdEpoch` from before the request.
-    /// A poll and a resync can both be in flight when a status event lands;
-    /// each response stays stale for that event instead of the second one
-    /// painting the pre-event row back.
-    private func applyHerd(_ snapshot: HerdSnapshot, requestedAtEpoch: UInt64) {
-        let transitions = store.applyHerdSnapshot(snapshot, requestedAtEpoch: requestedAtEpoch)
+    /// `requestedAt` was captured before the request. A poll and a resync
+    /// can both be in flight; a response from the earlier capture must not
+    /// paint the pre-event row back, and must not replace a read that was
+    /// captured later even when no event landed between them. The new-agent
+    /// caches follow the store: a dropped snapshot leaves them alone.
+    private func applyHerd(_ snapshot: HerdSnapshot, requestedAt: HerdRequestStamp) {
+        let transitions = store.applyHerdSnapshot(
+            snapshot,
+            requestedAtEpoch: requestedAt.epoch,
+            requestedAtSerial: requestedAt.serial
+        )
+        guard store.lastAppliedHerdRequestSerial == requestedAt.serial else { return }
         lastHerdAgents = snapshot.agents
         lastTabNames = snapshot.tabNames
         workspaceOptions = snapshot.workspaceNames
@@ -229,13 +235,14 @@ final class AppModel {
         }
     }
 
-    /// Read the herd, remembering how many events had landed before the
-    /// request left. `applyHerd` uses that epoch so a response already in
-    /// flight cannot roll a later event back.
-    private func herdSnapshotForApply() async throws -> (snapshot: HerdSnapshot, requestedAtEpoch: UInt64) {
-        let requestedAtEpoch = store.currentHerdEpoch
-        let snapshot = try await adapter.herdSnapshot()
-        return (snapshot, requestedAtEpoch)
+    /// Read the herd, remembering the event count and the capture order
+    /// from before the request left. `applyHerd` uses both so a response
+    /// already in flight cannot roll a later event or a later read back.
+    /// The serial also keeps the adapter's protocol reading on the later read.
+    private func herdSnapshotForApply() async throws -> (snapshot: HerdSnapshot, requestedAt: HerdRequestStamp) {
+        let requestedAt = store.captureHerdRequest()
+        let snapshot = try await adapter.herdSnapshot(readSerial: requestedAt.serial)
+        return (snapshot, requestedAt)
     }
 
     // MARK: - Lifecycle
@@ -334,9 +341,9 @@ final class AppModel {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 guard let self else { return }
                 do {
-                    let (snapshot, requestedAtEpoch) = try await self.herdSnapshotForApply()
+                    let (snapshot, requestedAt) = try await self.herdSnapshotForApply()
                     // Probe succeeded -> we are (back) online.
-                    self.applyHerd(snapshot, requestedAtEpoch: requestedAtEpoch)
+                    self.applyHerd(snapshot, requestedAt: requestedAt)
                     self.setConnection(.connected)
                     self.setHealth(self.adapter.health())
                     self.updateDwellForAllAgents()
@@ -370,8 +377,8 @@ final class AppModel {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let (snapshot, requestedAtEpoch) = try await self.herdSnapshotForApply()
-                self.applyHerd(snapshot, requestedAtEpoch: requestedAtEpoch)
+                let (snapshot, requestedAt) = try await self.herdSnapshotForApply()
+                self.applyHerd(snapshot, requestedAt: requestedAt)
                 self.setConnection(.connected)
                 self.setHealth(self.adapter.health())
                 self.updateDwellForAllAgents()
@@ -393,8 +400,8 @@ final class AppModel {
         setConnection(.connecting)
         do {
             try await adapter.connect()
-            let (snapshot, requestedAtEpoch) = try await herdSnapshotForApply()
-            applyHerd(snapshot, requestedAtEpoch: requestedAtEpoch)
+            let (snapshot, requestedAt) = try await herdSnapshotForApply()
+            applyHerd(snapshot, requestedAt: requestedAt)
             setConnection(.connected)
             setHealth(adapter.health())
             updateDwellForAllAgents()
@@ -561,8 +568,8 @@ final class AppModel {
                 Task { [weak self] in
                     guard let self else { return }
                     do {
-                        let (snapshot, requestedAtEpoch) = try await self.herdSnapshotForApply()
-                        self.applyHerd(snapshot, requestedAtEpoch: requestedAtEpoch)
+                        let (snapshot, requestedAt) = try await self.herdSnapshotForApply()
+                        self.applyHerd(snapshot, requestedAt: requestedAt)
                         self.setConnection(.connected)
                         self.setHealth(self.adapter.health())
                         self.updateDwellForAllAgents()
@@ -665,9 +672,16 @@ final class AppModel {
             defer { self?.inFlightAgentWrites.remove(agent.id) }
             guard let self else { return }
             do {
-                let (snapshot, requestedAtEpoch) = try await self.herdSnapshotForApply()
+                let (snapshot, requestedAt) = try await self.herdSnapshotForApply()
                 let health = self.adapter.health()
                 self.setHealth(health)
+                // A poll captured after this read can already be on screen.
+                // Sending Enter from the older read would answer a prompt
+                // the panel no longer shows.
+                guard self.store.lastAppliedHerdRequestSerial <= requestedAt.serial else {
+                    self.setLastError("\(actionName) skipped: a newer read of the herd landed first")
+                    return
+                }
                 guard health.writesEnabled else {
                     self.setLastError("\(actionName) skipped: \(health.reason ?? "writes disabled")")
                     return
@@ -675,7 +689,7 @@ final class AppModel {
                 if let refusal = PromptAnswerCheck.refusal(answering: agent, in: snapshot) {
                     // Show what herdr reports now, so the row matches the
                     // reason and a retry uses the current episode.
-                    self.applyHerd(snapshot, requestedAtEpoch: requestedAtEpoch)
+                    self.applyHerd(snapshot, requestedAt: requestedAt)
                     self.updateDwellForAllAgents()
                     self.setLastError("\(actionName) skipped: \(refusal.message)")
                     return

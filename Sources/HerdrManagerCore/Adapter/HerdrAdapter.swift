@@ -47,6 +47,10 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     private let stateLock = NSLock()
     private var _connectionState: HerdrConnectionState = .disconnected
     private var _latestProtocolVersion: Int = 0
+    /// Highest herd-read serial whose protocol was recorded. A later poll
+    /// can finish before an earlier one; the earlier result must not put
+    /// the write gate back on the protocol it saw.
+    private var _herdReadSerialFloor: UInt64 = 0
     private var eventContinuation: AsyncStream<HerdrEvent>.Continuation?
     private let eventStream: AsyncStream<HerdrEvent>
     private var eventLoopTask: Task<Void, Never>?
@@ -107,10 +111,20 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     /// Internal (not private) so `@testable` tests can seed a reading
     /// without a live herdr.
-    func setLatestProtocol(_ version: Int) {
+    ///
+    /// `readSerial` orders overlapping herd reads. A serial behind one
+    /// already recorded is ignored. Callers that omit it (CLI, MCP,
+    /// `snapshot()`, a failed connect clearing the reading) always record.
+    func setLatestProtocol(_ version: Int, readSerial: UInt64? = nil) {
         stateLock.lock()
+        defer { stateLock.unlock() }
+        if let readSerial, readSerial < _herdReadSerialFloor {
+            return
+        }
+        if let readSerial {
+            _herdReadSerialFloor = readSerial
+        }
         _latestProtocolVersion = version
-        stateLock.unlock()
     }
 
     private func latestProtocol() -> Int {
@@ -420,29 +434,48 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     /// `agent.list` merged with `session.snapshot`'s workspace/tab labels and
     /// focus pointers — the one-stop call sites should use going forward.
-    public func herdSnapshot() async throws -> HerdSnapshot {
-        let result: HerdSnapshot = try await onIO { [reqClient] in
-            let agentsResult = try reqClient.sendRead(method: "agent.list", params: [:])
-            let agents = LiveHerdrAdapter.parseAgentList(agentsResult)
+    ///
+    /// `readSerial` is the capture id from `AgentStore.captureHerdRequest()`,
+    /// taken before this call. Overlapping menu-bar reads pass it so a slow
+    /// earlier read cannot put the write gate back on an older protocol
+    /// after a later read — including one that followed a herdr restart —
+    /// has already been recorded. Omit it when there is only one reader.
+    public func herdSnapshot(readSerial: UInt64? = nil) async throws -> HerdSnapshot {
+        let result: HerdSnapshot
+        do {
+            result = try await onIO { [reqClient] in
+                let agentsResult = try reqClient.sendRead(method: "agent.list", params: [:])
+                let agents = LiveHerdrAdapter.parseAgentList(agentsResult)
 
-            let snapResult = try reqClient.sendRead(method: "session.snapshot", params: [:])
-            let snap = try LiveHerdrAdapter.parseSnapshot(snapResult)
+                let snapResult = try reqClient.sendRead(method: "session.snapshot", params: [:])
+                let snap = try LiveHerdrAdapter.parseSnapshot(snapResult)
 
-            let workspaceNames = snap.workspaceNameMap
-            let tabNames = snap.tabNameMap
+                let workspaceNames = snap.workspaceNameMap
+                let tabNames = snap.tabNameMap
 
-            return HerdSnapshot(
-                version: snap.version,
-                protocol: snap.protocol,
-                agents: agents,
-                workspaceNames: workspaceNames,
-                tabNames: tabNames,
-                focusedWorkspaceId: snap.focusedWorkspaceId,
-                focusedTabId: snap.focusedTabId,
-                focusedPaneId: snap.focusedPaneId
-            )
+                return HerdSnapshot(
+                    version: snap.version,
+                    protocol: snap.protocol,
+                    agents: agents,
+                    workspaceNames: workspaceNames,
+                    tabNames: tabNames,
+                    focusedWorkspaceId: snap.focusedWorkspaceId,
+                    focusedTabId: snap.focusedTabId,
+                    focusedPaneId: snap.focusedPaneId
+                )
+            }
+        } catch let error as NDJSONClientError {
+            // `onIO` clears the reading when the connect itself fails, with
+            // no serial. An earlier read whose continuation has not run yet
+            // can then publish the protocol it saw. Recording protocol 0
+            // under this read's serial puts the clear back. A serial behind
+            // one already recorded leaves a later success in place.
+            if case .connectFailed = error, let readSerial {
+                setLatestProtocol(0, readSerial: readSerial)
+            }
+            throw error
         }
-        setLatestProtocol(result.protocol)
+        setLatestProtocol(result.protocol, readSerial: readSerial)
         return result
     }
 

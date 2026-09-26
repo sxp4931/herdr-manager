@@ -966,6 +966,35 @@ struct ProtocolReadingResetTests {
         "/tmp/herdr-missing-\(UUID().uuidString.prefix(8)).sock"
     }
 
+    @Test("An earlier herd-read serial cannot put an older protocol back")
+    func earlierReadSerialDoesNotClobberProtocol() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        adapter.setLatestProtocol(18, readSerial: 2)
+        adapter.setLatestProtocol(17, readSerial: 1)
+        #expect(adapter.health().protocolVersion == 18)
+
+        adapter.setLatestProtocol(19, readSerial: 3)
+        #expect(adapter.health().protocolVersion == 19)
+
+        // A connect failure clears the reading. The serial it carries has
+        // to outrank the earlier success, and that success must not return.
+        do {
+            _ = try await adapter.herdSnapshot(readSerial: 4)
+            Issue.record("Expected the snapshot to fail with no herdr listening")
+        } catch {
+            #expect(error is NDJSONClientError)
+        }
+        #expect(adapter.health().protocolVersion == 0)
+        adapter.setLatestProtocol(19, readSerial: 3)
+        #expect(adapter.health().protocolVersion == 0)
+
+        // The next read, and any caller that does not pass a serial, records.
+        adapter.setLatestProtocol(17)
+        #expect(adapter.health().protocolVersion == 17)
+        adapter.setLatestProtocol(18, readSerial: 5)
+        #expect(adapter.health().protocolVersion == 18)
+    }
+
     @Test("A request that cannot reach herdr forgets the old protocol reading")
     func connectFailureClearsReading() async {
         let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())

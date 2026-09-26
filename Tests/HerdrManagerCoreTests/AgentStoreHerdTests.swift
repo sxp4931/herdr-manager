@@ -949,10 +949,17 @@ private func herd(_ infos: [HerdrAgentInfo]) -> HerdSnapshot {
     )
 }
 
+/// One optional transition as a list, so it concatenates with the arrays
+/// `applyHerdSnapshot` returns.
+private func present(_ transition: AgentStatusTransition?) -> [AgentStatusTransition] {
+    guard let transition else { return [] }
+    return [transition]
+}
+
 /// The blocked episodes Shepherd would alert for: it notifies on each
 /// accepted transition to blocked, keyed by `episodeKey`.
-private func blockedAlerts(_ transitions: [AgentStatusTransition?]) -> Set<String> {
-    Set(transitions.compactMap { $0 }.filter { $0.to == .blocked }.map(\.episodeKey))
+private func blockedAlerts(_ transitions: [AgentStatusTransition]) -> Set<String> {
+    Set(transitions.filter { $0.to == .blocked }.map(\.episodeKey))
 }
 
 @Suite("AgentStore.applyHerdSnapshot transitions")
@@ -996,7 +1003,7 @@ struct ApplyHerdSnapshotTransitionTests {
 
         #expect(poll.map(\.to) == [.blocked])
         #expect(event == nil)
-        #expect(blockedAlerts(poll + [event]).count == 1)
+        #expect(blockedAlerts(poll + present(event)).count == 1)
     }
 
     @Test("Blocked seen by the event first and then the poll alerts once and keeps the episode start")
@@ -1011,7 +1018,7 @@ struct ApplyHerdSnapshotTransitionTests {
 
         #expect(event?.to == .blocked)
         #expect(poll.isEmpty)
-        #expect(blockedAlerts([event] + poll).count == 1)
+        #expect(blockedAlerts(present(event) + poll).count == 1)
         // The seq catching up is not a new episode.
         #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
         #expect(store.agents[AgentID("wA:p1")]?.stateChangeSeq == 5)
@@ -1032,7 +1039,7 @@ struct ApplyHerdSnapshotTransitionTests {
 
         let fresh = store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)]))
         #expect(fresh.isEmpty)
-        #expect(blockedAlerts([event] + stale + fresh).count == 1)
+        #expect(blockedAlerts(present(event) + stale + fresh).count == 1)
     }
 
     @Test("Only one snapshot is taken as stale, so a wrong event is corrected by the next poll")
@@ -1082,7 +1089,7 @@ struct ApplyHerdSnapshotTransitionTests {
         let fresh = store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 1)]))
         #expect(fresh.isEmpty)
         #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
-        #expect(blockedAlerts([event] + stale + fresh).count == 1)
+        #expect(blockedAlerts(present(event) + stale + fresh).count == 1)
     }
 
     @Test("A new blocked agent the poll finds before its event alerts once")
@@ -1095,7 +1102,7 @@ struct ApplyHerdSnapshotTransitionTests {
 
         #expect(poll.first?.from == nil)
         #expect(event == nil)
-        #expect(blockedAlerts(poll + [event]).count == 1)
+        #expect(blockedAlerts(poll + present(event)).count == 1)
     }
 }
 
@@ -1152,7 +1159,7 @@ struct ApplyHerdSnapshotStaleBoundTests {
         #expect(fresh.isEmpty)
         #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
         #expect(store.agents[AgentID("wA:p1")]?.stateChangeSeq == 5)
-        #expect(blockedAlerts([event] + fresh).count == 1)
+        #expect(blockedAlerts(present(event) + fresh).count == 1)
 
         // The poll that was in flight before the event can return last.
         let late = store.applyHerdSnapshot(
@@ -1162,7 +1169,7 @@ struct ApplyHerdSnapshotStaleBoundTests {
         #expect(late.isEmpty)
         #expect(store.agents[AgentID("wA:p1")]?.status == .blocked)
         #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
-        #expect(blockedAlerts([event] + fresh + late).count == 1)
+        #expect(blockedAlerts(present(event) + fresh + late).count == 1)
     }
 
     @Test("A slow pre-event snapshot does not replace a newer seq already applied")
@@ -1194,7 +1201,7 @@ struct ApplyHerdSnapshotStaleBoundTests {
         #expect(late.isEmpty)
         #expect(store.agents[AgentID("wA:p1")]?.status == .working)
         #expect(store.agents[AgentID("wA:p1")]?.stateChangeSeq == 6)
-        #expect(blockedAlerts([event] + movedOn + late).count == 1)
+        #expect(blockedAlerts(present(event) + movedOn + late).count == 1)
     }
 
     @Test("A snapshot requested after the event corrects a seq-less wrong status")
@@ -1284,7 +1291,7 @@ struct ApplyHerdSnapshotStaleBoundTests {
         )
         #expect(fresh.isEmpty)
         #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
-        #expect(blockedAlerts([event] + fresh).count == 1)
+        #expect(blockedAlerts(present(event) + fresh).count == 1)
 
         // A later poll that started after the insert and still does not
         // list the pane drops it. The pre-insert list, returning last,
@@ -1353,6 +1360,183 @@ struct ApplyHerdSnapshotStaleBoundTests {
         #expect(bumped.isEmpty)
         #expect(store.agents[AgentID("wA:p1")]?.stateChangeSeq == 6)
         #expect(store.agents[AgentID("wA:p1")]?.enteredAt != pinned)
-        #expect(blockedAlerts([event] + catchUp + bumped).count == 1)
+        #expect(blockedAlerts(present(event) + catchUp + bumped).count == 1)
+    }
+
+    @Test("Request serials do not retire the event guard when the reads finish in order")
+    @MainActor
+    func serialsKeepTheEventGuard() {
+        // Production passes a serial on every read. The epoch guard has to
+        // keep working for those, not only for callers that omit it.
+        let store = AgentStore()
+        let seed = store.captureHerdRequest()
+        store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)]),
+            requestedAtEpoch: seed.epoch,
+            requestedAtSerial: seed.serial
+        )
+        let inFlight = store.captureHerdRequest()
+        let event = store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)))
+        let startedAt = store.agents[AgentID("wA:p1")]?.enteredAt
+        let after = store.captureHerdRequest()
+        #expect(inFlight.epoch < after.epoch)
+        #expect(inFlight.serial < after.serial)
+
+        let stale = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)]),
+            requestedAtEpoch: inFlight.epoch,
+            requestedAtSerial: inFlight.serial
+        )
+        #expect(stale.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.status == .blocked)
+        #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
+
+        let fresh = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)]),
+            requestedAtEpoch: after.epoch,
+            requestedAtSerial: after.serial
+        )
+        #expect(fresh.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.stateChangeSeq == 5)
+        #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
+        #expect(blockedAlerts(present(event) + fresh).count == 1)
+    }
+
+    @Test("Two reads that share an epoch apply in capture order, not return order")
+    @MainActor
+    func sameEpochSnapshotAppliesInCaptureOrder() {
+        // No event lands between the captures, so the epoch cannot order
+        // them. The read that started second has the higher seq and can
+        // return first; the slower one must not turn blocked back into
+        // working, or the next poll alerts again.
+        let store = AgentStore()
+        store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4, title: "Before")]))
+        let epochBefore = store.currentHerdEpoch
+        let first = store.captureHerdRequest()
+        let second = store.captureHerdRequest()
+        #expect(first.epoch == epochBefore)
+        #expect(second.epoch == first.epoch)
+        #expect(second.serial == first.serial + 1)
+
+        let newer = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, title: "After")]),
+            requestedAtEpoch: second.epoch,
+            requestedAtSerial: second.serial
+        )
+        let startedAt = store.agents[AgentID("wA:p1")]?.enteredAt
+        #expect(newer.map(\.to) == [.blocked])
+
+        let older = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4, title: "Before")]),
+            requestedAtEpoch: first.epoch,
+            requestedAtSerial: first.serial
+        )
+        #expect(older.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.status == .blocked)
+        #expect(store.agents[AgentID("wA:p1")]?.stateChangeSeq == 5)
+        #expect(store.agents[AgentID("wA:p1")]?.name == "After")
+        #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
+        #expect(store.lastAppliedHerdRequestSerial == second.serial)
+        #expect(blockedAlerts(newer + older).count == 1)
+    }
+
+    @Test("A later read with a lower seq still wins when it returns last")
+    @MainActor
+    func laterReadAppliesRestartedSeq() {
+        // A herdr restart resets state_change_seq. Ordering reads by seq
+        // would keep the dead process's row. Capture order lets the later
+        // read through.
+        let store = AgentStore()
+        store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 8)]))
+        let beforeRestart = store.captureHerdRequest()
+        let afterRestart = store.captureHerdRequest()
+
+        let older = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 9)]),
+            requestedAtEpoch: beforeRestart.epoch,
+            requestedAtSerial: beforeRestart.serial
+        )
+        #expect(older.map(\.to) == [.working])
+
+        let restarted = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "idle", stateChangeSeq: 1)]),
+            requestedAtEpoch: afterRestart.epoch,
+            requestedAtSerial: afterRestart.serial
+        )
+        #expect(restarted.map(\.to) == [.idle])
+        #expect(store.agents[AgentID("wA:p1")]?.stateChangeSeq == 1)
+        #expect(store.lastAppliedHerdRequestSerial == afterRestart.serial)
+    }
+
+    @Test("A pre-restart read that returns last cannot restore the old seq")
+    @MainActor
+    func earlyReadCannotRestoreSeqAfterRestart() {
+        let store = AgentStore()
+        store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 10)]))
+        let beforeRestart = store.captureHerdRequest()
+        let afterRestart = store.captureHerdRequest()
+
+        let restarted = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "idle", stateChangeSeq: 1)]),
+            requestedAtEpoch: afterRestart.epoch,
+            requestedAtSerial: afterRestart.serial
+        )
+        #expect(restarted.map(\.to) == [.idle])
+        let startedAt = store.agents[AgentID("wA:p1")]?.enteredAt
+
+        let late = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 10)]),
+            requestedAtEpoch: beforeRestart.epoch,
+            requestedAtSerial: beforeRestart.serial
+        )
+        #expect(late.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.status == .idle)
+        #expect(store.agents[AgentID("wA:p1")]?.stateChangeSeq == 1)
+        #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
+        #expect(store.lastAppliedHerdRequestSerial == afterRestart.serial)
+    }
+
+    @Test("An earlier read cannot resurrect a pane a later read dropped")
+    @MainActor
+    func earlyReadCannotResurrectDroppedPane() {
+        let store = AgentStore()
+        store.applyHerdSnapshot(herd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4),
+            makeAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 2),
+        ]))
+        let first = store.captureHerdRequest()
+        let second = store.captureHerdRequest()
+
+        store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)]),
+            requestedAtEpoch: second.epoch,
+            requestedAtSerial: second.serial
+        )
+        #expect(store.agents[AgentID("wA:p2")] == nil)
+
+        let late = store.applyHerdSnapshot(
+            herd([
+                makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4),
+                makeAgentInfo(paneId: "wA:p2", agentStatus: "blocked", stateChangeSeq: 3),
+            ]),
+            requestedAtEpoch: first.epoch,
+            requestedAtSerial: first.serial
+        )
+        #expect(late.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.status == .working)
+        #expect(store.agents[AgentID("wA:p2")] == nil)
+    }
+
+    @Test("A snapshot with no request serial can still apply a lower seq")
+    @MainActor
+    func nilSerialStillAppliesLowerSeq() {
+        // Callers that do not opt in keep completion order, including a
+        // restart whose seq reset arrives as the next snapshot.
+        let store = AgentStore()
+        store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 10)]))
+        let restarted = store.applyHerdSnapshot(herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "idle", stateChangeSeq: 1)]))
+        #expect(restarted.map(\.to) == [.idle])
+        #expect(store.agents[AgentID("wA:p1")]?.stateChangeSeq == 1)
+        #expect(store.lastAppliedHerdRequestSerial == 0)
     }
 }

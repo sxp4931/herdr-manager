@@ -32,6 +32,21 @@ public struct AgentStatusTransition: Equatable, Sendable {
     }
 }
 
+/// Epoch and request serial captured together immediately before a herd
+/// snapshot is requested. `epoch` is `AgentStore.currentHerdEpoch`. `serial`
+/// increases on every capture, so two reads that share an epoch — nothing
+/// happened between them — still have an order. The earlier capture must not
+/// paint over the later one when it returns last.
+public struct HerdRequestStamp: Sendable, Equatable {
+    public let epoch: UInt64
+    public let serial: UInt64
+
+    public init(epoch: UInt64, serial: UInt64) {
+        self.epoch = epoch
+        self.serial = serial
+    }
+}
+
 // MARK: - AgentStore
 
 @MainActor
@@ -76,13 +91,43 @@ public final class AgentStore {
     ///
     /// Callers that omit the request epoch retire `seqFloor` to 0 after one
     /// stale snapshot, which is the older one-poll behaviour.
+    ///
+    /// A snapshot whose request serial is older than one already adopted is
+    /// dropped before any of this runs. Two reads can share an epoch, and
+    /// the one captured earlier must not win just because it returned last.
+    /// A later serial still applies a lower seq, so a herdr restart is not
+    /// stuck behind the previous process's counter. Callers that omit the
+    /// serial keep completion order.
     @ObservationIgnored
     private var paneBasis: [AgentID: PaneBasis] = [:]
 
+    /// Monotonic id of `captureHerdRequest()` calls. Not an event count:
+    /// two polls with no event between them still get distinct serials.
+    @ObservationIgnored
+    private var herdRequestSerial: UInt64 = 0
+
+    /// Serial of the newest snapshot `applyHerdSnapshot` adopted. Zero until
+    /// a caller passes `requestedAtSerial`. Omitted serials do not change it.
+    @ObservationIgnored
+    private var lastAppliedRequestSerial: UInt64 = 0
+
     /// Monotonic count of status and presence events applied here. Capture
     /// it immediately before requesting a herd snapshot and pass it to
-    /// `applyHerdSnapshot(_:requestedAtEpoch:)`.
+    /// `applyHerdSnapshot(_:requestedAtEpoch:requestedAtSerial:)`.
     public var currentHerdEpoch: UInt64 { herdEpoch }
+
+    /// Serial of the last snapshot `applyHerdSnapshot` adopted. Zero before
+    /// any serial-tagged snapshot. The caller compares this with the serial
+    /// it passed to tell an adopted snapshot from one dropped because an
+    /// earlier capture returned late.
+    public var lastAppliedHerdRequestSerial: UInt64 { lastAppliedRequestSerial }
+
+    /// Capture `currentHerdEpoch` and a new request serial together, before
+    /// the snapshot request is sent. The two cannot drift: nothing here awaits.
+    public func captureHerdRequest() -> HerdRequestStamp {
+        herdRequestSerial += 1
+        return HerdRequestStamp(epoch: herdEpoch, serial: herdRequestSerial)
+    }
 
     /// Whether a herd snapshot has been applied. The first one describes
     /// the herd as it already was, so its panes are not reported as new.
@@ -186,11 +231,24 @@ public final class AgentStore {
     ///   stale for panes an event changed after the capture, however many of
     ///   them return and in whatever order. Omit to retire each guard after
     ///   a single stale snapshot.
+    /// - Parameter requestedAtSerial: `HerdRequestStamp.serial` from that
+    ///   same capture. Once a later capture has been adopted, this snapshot
+    ///   is ignored in full — a higher seq included, which is a pre-restart
+    ///   read arriving after the restarted herd. Omit to keep completion
+    ///   order, where a lower seq still applies.
     @discardableResult
     public func applyHerdSnapshot(
         _ snapshot: HerdSnapshot,
-        requestedAtEpoch: UInt64? = nil
+        requestedAtEpoch: UInt64? = nil,
+        requestedAtSerial: UInt64? = nil
     ) -> [AgentStatusTransition] {
+        if let requestedAtSerial, requestedAtSerial < lastAppliedRequestSerial {
+            return []
+        }
+        if let requestedAtSerial {
+            lastAppliedRequestSerial = requestedAtSerial
+        }
+
         var newAgents: [AgentID: Agent] = [:]
         var transitions: [AgentStatusTransition] = []
         var listed: Set<AgentID> = []
