@@ -594,6 +594,20 @@ public struct HerdrAgentInfo: Sendable, Equatable {
         self.launchPending = launchPending
     }
 
+    /// Who is in this pane, for write revalidation. Prefers herdr's
+    /// agent-session id (`source|agent|kind|value`) so two agents of the
+    /// same kind in the same pane still differ. Falls back to kind and
+    /// title only when no session id is present. The string is the value
+    /// stored on pending actions as `_fp_occupant`.
+    public var occupantFingerprint: String {
+        if let session = agentSession {
+            return "session|\(session.source)|\(session.agent)|\(session.kind)|\(session.value)|\(paneId)"
+        }
+        let kind = agent ?? "unknown"
+        let label = title ?? name ?? terminalTitleStripped ?? kind
+        return "fallback|\(kind)|\(label)|\(paneId)"
+    }
+
     public static func == (lhs: HerdrAgentInfo, rhs: HerdrAgentInfo) -> Bool {
         lhs.paneId == rhs.paneId
             && lhs.workspaceId == rhs.workspaceId

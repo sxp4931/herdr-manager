@@ -118,6 +118,10 @@ actor MCPServer {
     private let actionStore = ActionStore()
     private let sharedActionStore = SharedActionStore()
 
+    /// Capture ids for `agent.answer` herd reads. Taken before the read
+    /// starts, so a slower earlier read keeps the lower id.
+    private var nextHerdReadSerial: UInt64 = 0
+
     // nonisolated(unsafe): only accessed from nonisolated writeResponse/writeRaw
     // which serialize via the lock.
     nonisolated(unsafe) private var stdoutLock = NSLock()
@@ -686,7 +690,10 @@ actor MCPServer {
 
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
+            // Before the await, so two answers in flight keep capture order
+            // even when the slower read returns last.
+            let readSerial = captureHerdReadSerial()
+            let herd = try await adapter.herdSnapshot(readSerial: readSerial)
             let paneId = agentIdStr
 
             guard let paneInfo = herd.agents.first(where: { $0.paneId == paneId }) else {
@@ -703,11 +710,17 @@ actor MCPServer {
                 return makeToolError("Stale state_change_seq: provided \(providedSeq), current \(currentSeq). Re-diagnose and retry.")
             }
 
-            // Record the observed status sequence so the consecutive-answer
-            // protection RESETS when the agent's status episode actually
-            // advances. Without this, three answers would permanently block
-            // further answers for this agent for the process lifetime.
-            await policy.recordStatusChange(agentId: agentIdStr, newSeq: currentSeq)
+            // Record the observed episode so the consecutive-answer cap
+            // resets when it actually changes. A newer read whose seq went
+            // backwards is a herdr restart: that resets too, or the cap
+            // stays stuck on this pane id for the life of the process.
+            // An older in-flight read cannot clear it.
+            await policy.recordStatusChange(
+                agentId: agentIdStr,
+                newSeq: currentSeq,
+                observationSerial: readSerial,
+                occupantFingerprint: paneInfo.occupantFingerprint
+            )
 
             // Check policy
             let policyResult = await policy.checkWriteAllowed(agentId: agentIdStr, tier: .gated)
@@ -726,6 +739,20 @@ actor MCPServer {
             }
 
             if let error = await checkWritesEnabled() { return error }
+
+            // explain and the protocol re-read are awaits. The prompt we
+            // checked can be answered or replaced before the keys go out.
+            let confirmSerial = captureHerdReadSerial()
+            let confirmed = try await adapter.herdSnapshot(readSerial: confirmSerial)
+            if let refusal = AnswerSendCheck.refusal(sendingTo: paneInfo, in: confirmed) {
+                return refusedAnswer(refusal, agentId: agentIdStr, providedSeq: providedSeq)
+            }
+            // The confirm read is the protocol reading too. A downgrade it
+            // just recorded has writes off; don't send on the earlier gate.
+            let health = adapter.health()
+            if !health.writesEnabled {
+                return makeToolError("Writes not enabled: \(health.reason ?? "herdr protocol not verified for writes")")
+            }
             try await adapter.sendKeys(paneId: paneId, keys: resolvedKeys)
 
             await policy.recordWrite(agentId: agentIdStr)
@@ -1435,6 +1462,11 @@ actor MCPServer {
         }
     }
 
+    private func captureHerdReadSerial() -> UInt64 {
+        nextHerdReadSerial += 1
+        return nextHerdReadSerial
+    }
+
     // MARK: - Write-Gate Helper
 
     /// Returns a tool error dict if writes are disabled, or nil if writes are
@@ -1522,18 +1554,26 @@ actor MCPServer {
 
     // MARK: - Occupant Fingerprint & Revalidation
 
-    /// Compute a stable fingerprint for the current occupant of a pane, keyed
-    /// on the NATIVE herdr agent-session identity (source|agent|kind|value) so
-    /// that replacing an occupant with another agent of the same kind/name in
-    /// the same pane is still detected as a change. Falls back to a
-    /// kind|name|paneId form only when no agent-session identity is present.
+    /// Same identity `AnswerSendCheck` compares and pending actions store.
     private func occupantFingerprint(from info: HerdrAgentInfo) -> String {
-        if let session = info.agentSession {
-            return "session|\(session.source)|\(session.agent)|\(session.kind)|\(session.value)|\(info.paneId)"
+        info.occupantFingerprint
+    }
+
+    private func refusedAnswer(
+        _ refusal: AnswerSendCheck.Refusal,
+        agentId: String,
+        providedSeq: UInt64
+    ) -> [String: Any] {
+        switch refusal {
+        case .agentGone:
+            return makeToolError("Agent not found: \(agentId)")
+        case .notBlocked(let now):
+            return makeToolError("Agent \(agentId) is not blocked (status: \(now)). agent.answer requires status=blocked.")
+        case .promptChanged(let currentSeq):
+            return makeToolError("Stale state_change_seq: provided \(providedSeq), current \(currentSeq). Re-diagnose and retry.")
+        case .occupantChanged:
+            return makeToolError("Pane occupant changed before send. Re-diagnose and retry.")
         }
-        let kind = info.agent ?? "unknown"
-        let name = info.title ?? info.name ?? info.terminalTitleStripped ?? kind
-        return "fallback|\(kind)|\(name)|\(info.paneId)"
     }
 
     /// Revalidate that the pane still has the same occupant and status episode

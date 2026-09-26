@@ -113,8 +113,10 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// without a live herdr.
     ///
     /// `readSerial` orders overlapping herd reads. A serial behind one
-    /// already recorded is ignored. Callers that omit it (CLI, MCP,
-    /// `snapshot()`, a failed connect clearing the reading) always record.
+    /// already recorded is ignored. Callers that omit it always record
+    /// (the CLI, one-shot MCP reads, `snapshot()`, and a failed connect
+    /// clearing the reading). `agent.answer` passes the serial captured
+    /// before each of its two herd reads.
     func setLatestProtocol(_ version: Int, readSerial: UInt64? = nil) {
         stateLock.lock()
         defer { stateLock.unlock() }

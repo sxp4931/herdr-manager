@@ -31,6 +31,9 @@ public actor PolicyEngine {
     private var globalWriteTimestamps: [Date] = []
     private var consecutiveAnswers: [String: Int] = [:]
     private var lastKnownSeq: [String: UInt64] = [:]
+    /// Highest herd-read serial recorded for this agent.
+    private var lastObservationSerial: [String: UInt64] = [:]
+    private var lastOccupant: [String: String] = [:]
 
     private let perAgentCooldown: TimeInterval = 10
     private let globalLimitPerMinute = 6
@@ -97,12 +100,54 @@ public actor PolicyEngine {
         consecutiveAnswers[agentId, default: 0] += 1
     }
 
-    /// Record a status change — resets the consecutive answer counter.
-    public func recordStatusChange(agentId: String, newSeq: UInt64) {
+    /// Record the status episode observed for an agent.
+    ///
+    /// Without `observationSerial`, only a strictly greater `newSeq`
+    /// resets the consecutive-answer cap. An equal or lower seq is a
+    /// stale observation and does not clear it.
+    ///
+    /// `observationSerial` orders overlapping reads of the same pane. A
+    /// serial that is not strictly newer than the one already recorded is
+    /// ignored, seq and occupant included. A newer serial whose seq went
+    /// backwards, or whose occupant fingerprint changed, is a herdr
+    /// restart or a reused pane id: the cap resets instead of sticking
+    /// for the life of the process. The same seq and occupant on a newer
+    /// read is still the episode the cap is counting.
+    public func recordStatusChange(
+        agentId: String,
+        newSeq: UInt64,
+        observationSerial: UInt64? = nil,
+        occupantFingerprint: String? = nil
+    ) {
+        if let observationSerial {
+            if let seen = lastObservationSerial[agentId], observationSerial <= seen {
+                return
+            }
+            lastObservationSerial[agentId] = observationSerial
+
+            let previousOccupant = lastOccupant[agentId]
+            if let occupantFingerprint {
+                lastOccupant[agentId] = occupantFingerprint
+            }
+            let occupantReplaced = occupantFingerprint != nil
+                && previousOccupant != nil
+                && occupantFingerprint != previousOccupant
+
+            if let oldSeq = lastKnownSeq[agentId], newSeq == oldSeq, !occupantReplaced {
+                return
+            }
+            lastKnownSeq[agentId] = newSeq
+            consecutiveAnswers[agentId] = 0
+            return
+        }
+
         if let oldSeq = lastKnownSeq[agentId], newSeq <= oldSeq {
             return // stale sequence, ignore
         }
         lastKnownSeq[agentId] = newSeq
         consecutiveAnswers[agentId] = 0
+        if let occupantFingerprint {
+            lastOccupant[agentId] = occupantFingerprint
+        }
     }
 }

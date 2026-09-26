@@ -1031,6 +1031,94 @@ struct PolicyEngineTests {
         let reset = await engine.checkWriteAllowed(agentId: "w1:p1", tier: .gated)
         #expect(reset.allowed)
     }
+
+    @Test("A newer read with a lower seq is a herdr restart and resets the cap")
+    func restartedSeqResetsCap() async {
+        let engine = PolicyEngine()
+        await engine.recordStatusChange(agentId: "w1:p1", newSeq: 9, observationSerial: 1)
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordAnswer(agentId: "w1:p1")
+
+        await engine.recordStatusChange(agentId: "w1:p1", newSeq: 1, observationSerial: 2)
+        let reset = await engine.checkWriteAllowed(agentId: "w1:p1", tier: .gated)
+        #expect(reset.allowed)
+    }
+
+    @Test("An older or repeated read does not reset the cap or move the stored episode")
+    func olderObservationDoesNotResetCap() async {
+        let engine = PolicyEngine()
+        await engine.recordStatusChange(agentId: "w1:p1", newSeq: 5, observationSerial: 2)
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordAnswer(agentId: "w1:p1")
+
+        // Serial 1 was captured before the seq-5 read. Serial 2 is that
+        // read repeated with a higher seq. Neither may move the episode
+        // a later seq 5 is compared with.
+        await engine.recordStatusChange(agentId: "w1:p1", newSeq: 4, observationSerial: 1)
+        await engine.recordStatusChange(agentId: "w1:p1", newSeq: 8, observationSerial: 2)
+        let stillBlocked = await engine.checkWriteAllowed(agentId: "w1:p1", tier: .gated)
+        #expect(!stillBlocked.allowed)
+
+        await engine.recordStatusChange(agentId: "w1:p1", newSeq: 5, observationSerial: 3)
+        let stillSameEpisode = await engine.checkWriteAllowed(agentId: "w1:p1", tier: .gated)
+        #expect(!stillSameEpisode.allowed)
+    }
+
+    @Test("The same episode on a newer read does not reset the cap")
+    func sameEpisodeKeepsCap() async {
+        let engine = PolicyEngine()
+        await engine.recordStatusChange(
+            agentId: "w1:p1", newSeq: 5, observationSerial: 1,
+            occupantFingerprint: "session|a"
+        )
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordStatusChange(
+            agentId: "w1:p1", newSeq: 5, observationSerial: 2,
+            occupantFingerprint: "session|a"
+        )
+        let stillBlocked = await engine.checkWriteAllowed(agentId: "w1:p1", tier: .gated)
+        #expect(!stillBlocked.allowed)
+    }
+
+    @Test("A reused pane with a new occupant resets the cap even when seq matches")
+    func replacedOccupantResetsCap() async {
+        let engine = PolicyEngine()
+        await engine.recordStatusChange(
+            agentId: "w1:p1", newSeq: 5, observationSerial: 1,
+            occupantFingerprint: "session|a"
+        )
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordStatusChange(
+            agentId: "w1:p1", newSeq: 5, observationSerial: 2,
+            occupantFingerprint: "session|b"
+        )
+        let reset = await engine.checkWriteAllowed(agentId: "w1:p1", tier: .gated)
+        #expect(reset.allowed)
+    }
+
+    @Test("A stale read of a new occupant does not reset the cap")
+    func staleOccupantDoesNotResetCap() async {
+        let engine = PolicyEngine()
+        await engine.recordStatusChange(
+            agentId: "w1:p1", newSeq: 5, observationSerial: 2,
+            occupantFingerprint: "session|current"
+        )
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordStatusChange(
+            agentId: "w1:p1", newSeq: 1, observationSerial: 1,
+            occupantFingerprint: "session|stale"
+        )
+        let stillBlocked = await engine.checkWriteAllowed(agentId: "w1:p1", tier: .gated)
+        #expect(!stillBlocked.allowed)
+    }
 }
 
 // MARK: - SharedActionStore concurrency (single process / actor serialization)

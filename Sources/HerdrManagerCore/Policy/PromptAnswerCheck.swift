@@ -63,3 +63,44 @@ public enum PromptAnswerCheck: Sendable {
         return nil
     }
 }
+
+// MARK: - AnswerSendCheck
+
+/// MCP `agent.answer` proves the prompt, then awaits `agent.explain` and a
+/// fresh protocol reading before `sendKeys`. The pane can be answered,
+/// replaced, or restarted in that gap. This is the re-read immediately
+/// before the keys: same pane, still blocked, same `state_change_seq`,
+/// same occupant as the read that authorized the answer.
+public enum AnswerSendCheck: Sendable {
+
+    public enum Refusal: Equatable, Sendable {
+        case agentGone
+        case notBlocked(now: String)
+        /// Still blocked, but on a different status episode than the one
+        /// the answer was checked against. `currentSeq` may be lower: a
+        /// herdr restart starts the counter over.
+        case promptChanged(currentSeq: UInt64)
+        case occupantChanged
+    }
+
+    /// Nil when `snapshot` still shows `observed`'s pane blocked on the
+    /// same status episode and occupant.
+    public static func refusal(
+        sendingTo observed: HerdrAgentInfo,
+        in snapshot: HerdSnapshot
+    ) -> Refusal? {
+        guard let current = snapshot.agents.first(where: { $0.paneId == observed.paneId }) else {
+            return .agentGone
+        }
+        guard current.agentStatus == "blocked" else {
+            return .notBlocked(now: current.agentStatus)
+        }
+        guard current.stateChangeSeq == observed.stateChangeSeq else {
+            return .promptChanged(currentSeq: current.stateChangeSeq)
+        }
+        guard current.occupantFingerprint == observed.occupantFingerprint else {
+            return .occupantChanged
+        }
+        return nil
+    }
+}
