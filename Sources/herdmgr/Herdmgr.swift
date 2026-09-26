@@ -68,7 +68,7 @@ struct HerdmgrCommand: AsyncParsableCommand {
         // Take initial snapshot from agent.list (authoritative agents + seq)
         // merged with session.snapshot labels — not session.snapshot panes,
         // which omit seq and can include plain shells.
-        var herd: HerdSnapshot
+        let herd: HerdSnapshot
         do {
             herd = try await adapter.herdSnapshot()
         } catch {
@@ -82,10 +82,10 @@ struct HerdmgrCommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data("\(protocolLine)\n".utf8))
         }
 
-        var agents = herd.displayAgents()
+        var live = HerdLiveTable(herd: herd, agents: herd.displayAgents())
 
         if json {
-            let output = agents.map { agent in
+            let output = live.agents.map { agent in
                 [
                     "id": agent.id.raw,
                     "status": agent.status.rawValue,
@@ -106,7 +106,7 @@ struct HerdmgrCommand: AsyncParsableCommand {
         }
 
         // Live table mode
-        printTable(agents, showAll: showAll)
+        printTable(live.agents, showAll: showAll)
 
         // Set up signal handling for graceful exit
         signal(SIGINT, SIG_IGN)
@@ -121,20 +121,18 @@ struct HerdmgrCommand: AsyncParsableCommand {
         let eventStream = adapter.events()
         for await event in eventStream {
             if case .workspacesChanged = event {
-                // Label/layout churn (tab_focused, layout_updated, ...) says
-                // nothing about the agents. Keep each pane's enteredAt so the
-                // dwell column does not reset to 0s every time the user
-                // switches tabs.
-                if let refreshed = try? await adapter.herdSnapshot() {
-                    agents = refreshed.displayAgents(preserving: agents)
-                    herd = refreshed
-                }
+                // Label churn (tab focus, rename) refetches so names stay
+                // current, and same-id episodes keep their dwell. A move
+                // also arrives as one of these events, before pane.moved
+                // and already under the new pane id. Remembering the
+                // pre-refetch rows lets that move put the dwell back.
+                live.noteLayoutRefresh(try? await adapter.herdSnapshot())
             } else {
-                agents = herd.applying(event, to: agents)
+                live.apply(event)
             }
             // Clear screen and redraw
             print("\u{001B}[2J\u{001B}[H")
-            printTable(agents, showAll: showAll)
+            printTable(live.agents, showAll: showAll)
         }
         FileHandle.standardError.write(
             Data("Event stream ended. \(LiveHerdrAdapter.socketHint(resolvedPath: socketPath))\n".utf8)
