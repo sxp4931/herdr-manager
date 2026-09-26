@@ -81,11 +81,58 @@ struct SilentAlertLedgerTests {
         #expect(ledger.trackedCount == 0)
     }
 
+    @Test("A moved pane does not alert again for the silence it already announced")
+    func movedPaneKeepsTheAlert() {
+        var ledger = SilentAlertLedger()
+        let moved = AgentID("wB:p4")
+        #expect(ledger.newSilences(in: [silent(since: at(100))]).count == 1)
+
+        ledger.retarget(from: pane, to: moved)
+
+        let quietThere = silent(since: at(100), id: moved)
+        #expect(ledger.newSilences(in: [quietThere]).isEmpty)
+        #expect(ledger.trackedCount == 1)
+        // The old id is free. A later occupant there is a different silence.
+        #expect(ledger.newSilences(in: [quietThere, silent(since: at(100))]).map(\.agent.id) == [pane])
+    }
+
+    @Test("A move before the first alert still alerts once, on the new id")
+    func retargetBeforeFirstAlertDoesNotSuppress() {
+        var ledger = SilentAlertLedger()
+        let moved = AgentID("wB:p4")
+        ledger.retarget(from: pane, to: moved)
+        #expect(ledger.trackedCount == 0)
+
+        let quietThere = silent(since: at(100), id: moved)
+        #expect(ledger.newSilences(in: [quietThere]).map(\.agent.id) == [moved])
+        #expect(ledger.newSilences(in: [quietThere]).isEmpty)
+    }
+
+    @Test("A same-id retarget does not drop the alert")
+    func retargetSameIdIsIgnored() {
+        var ledger = SilentAlertLedger()
+        #expect(ledger.newSilences(in: [silent(since: at(100))]).count == 1)
+        ledger.retarget(from: pane, to: pane)
+        #expect(ledger.newSilences(in: [silent(since: at(100))]).isEmpty)
+        #expect(ledger.trackedCount == 1)
+    }
+
+    @Test("The moved silence can still alert when it actually starts over")
+    func movedPaneAlertsForANewSilence() {
+        var ledger = SilentAlertLedger()
+        let moved = AgentID("wB:p4")
+        #expect(ledger.newSilences(in: [silent(since: at(100))]).count == 1)
+        ledger.retarget(from: pane, to: moved)
+
+        let again = silent(since: at(900), id: moved)
+        #expect(ledger.newSilences(in: [again]).map(\.since) == [at(900)])
+    }
+
     // MARK: - Fixtures
 
-    private func silent(since: Date, cpu: CPUState? = nil) -> Agent {
+    private func silent(since: Date, id: AgentID? = nil, cpu: CPUState? = nil) -> Agent {
         Agent(
-            id: pane,
+            id: id ?? pane,
             kind: .claude,
             status: .working,
             enteredAt: at(0),

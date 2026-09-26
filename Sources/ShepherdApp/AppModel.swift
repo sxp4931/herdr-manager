@@ -599,7 +599,13 @@ final class AppModel {
             // pre-event status used to notify for events the store dropped
             // (stale seq, untracked pane), so a blocked alert could fire for a
             // pane the panel still showed as working.
-            if let transition = store.applyEvent(event) {
+            let transition = store.applyEvent(event)
+            // After the store re-keys. A move it ignored leaves no row, so
+            // the alert stays on the old id and the next pass drops it. A
+            // move that keeps the quiet row would otherwise look like a new
+            // pane and alert again for the same silence.
+            retargetSilentAlert(for: event)
+            if let transition {
                 notifyAndDiagnoseIfNeeded(transition)
             }
         }
@@ -612,6 +618,21 @@ final class AppModel {
         let newId = AgentID(info.paneId)
         guard previous != newId, selectedAgentId == previous, store.agents[previous] != nil else { return }
         selectedAgentId = newId
+    }
+
+    /// Carry a silence already announced onto the id a move just published.
+    /// Same-id moves, moves that leave no row, and moves that are no longer
+    /// that silence are left alone. A status change starts a new episode;
+    /// pinning the old `since` on it would swallow the next quiet.
+    private func retargetSilentAlert(for event: HerdrEvent) {
+        guard case .paneMoved(let previousPaneId, let info, _, _) = event else { return }
+        guard !info.paneId.isEmpty else { return }
+        let previous = AgentID(previousPaneId.isEmpty ? info.paneId : previousPaneId)
+        let newId = AgentID(info.paneId)
+        guard previous != newId,
+              let agent = store.agents[newId],
+              AttentionTriage.isActionablySilent(agent) else { return }
+        silentAlerts.retarget(from: previous, to: newId)
     }
 
     /// Shared "did this agent just become blocked/start working" reaction for

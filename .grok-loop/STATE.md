@@ -198,9 +198,29 @@ Self-review:
 - The epoch of a refused write is issued and not recorded. A later snapshot's higher epoch can still store a protocol. A write enqueued before the snapshot that discovers a downgrade still runs: the queue is serial, and that write was ahead of the only observation that knew. Holding it would mean waiting for a read that had not started.
 - Not compiled and not run. No Swift toolchain on this box.
 
+### Pass 10 — a moved silence is not announced again
+
+Passes 3 and 6 re-key a cross-workspace move and keep the episode, so a blocked agent does not alert twice. A silence is not a status transition. `SilentAlertLedger` keys the alert by pane id. The move drops the old id, the next diagnosis pass (the 15s loop, or a pass already in flight) sees the new id with the same `since`, and the quiet the user was already told about is posted again. Blocked alerts did not have this hole: a same-status move returns no transition, so `notifyBlocked` does not run.
+
+`retarget(from:to:)` carries the recorded `since` onto the new id and forgets the old one. A later occupant of the old id can alert. A move that has not alerted yet does not invent a suppression, so the first pass still announces that silence once, on the new id. A later `since` still alerts. Shepherd does this after the store accepts the move, and only when the row now at the new id is still actionably silent. A move the store ignored has no row there, so the alert stays on the old id and the next pass drops it. A move that changes status leaves a new episode; pinning the old `since` on it would swallow the next quiet.
+
+Why this one: backlog items 1–11 stay deferred (below). This is the same "needs you" signal the earlier passes protected, on the path those passes did not touch. The menu bar is the only caller.
+
+Files:
+- `Sources/HerdrManagerCore/Diagnosis/SilentAlertLedger.swift`
+- `Sources/ShepherdApp/AppModel.swift`
+- `Tests/HerdrManagerCoreTests/SilentAlertLedgerTests.swift`
+
+Self-review:
+- Swift 6: `retarget` mutates the ledger struct. It lives on `@MainActor` `AppModel` next to the store, and the call is synchronous after `applyEvent`, before `notifyAndDiagnoseIfNeeded` schedules a pass. No new type, isolation, macOS API, or signature an existing caller must adopt. `newSilences` is unchanged.
+- A silence already announced at `w1:p1` is not announced for `wB:p4` at the same `since`. The old id is no longer tracked, so an agent there with that `since` alerts. A retarget before any alert does not mark the new id, and the first pass alerts once. Retargeting an id onto itself keeps the alert. A new `since` on the new id alerts.
+- The app carries the alert only when `AttentionTriage.isActionablySilent` is still true for the new id. A same-status move keeps the silent verdict, which is that case. A status change replaces the verdict, the ledger is not retargeted, and the old id disappears on the next pass. A seq-less move of a pane the store does not have leaves no row, so nothing is carried.
+- The notification already on screen still names the old workspace. It is not posted again. herdmgr does not use the ledger.
+- Not compiled and not run. No Swift toolchain on this box.
+
 ## Backlog / ideas
 
-Pass 9 re-checked items 1–7, 9, and 10. They stay deferred for the reasons on each line. Item 11 is the window pass 9 did not close.
+Pass 10 re-checked items 1–11. They stay deferred for the reasons on each line. Item 12 is the meter hole this pass did not close.
 
 1. A seq-less `pane_updated` that arrives after a poll already applied a newer status still flips the pane. The event carries no seq, so it cannot be told apart from a genuine second prompt. Deferred again: any rule that drops a seq-less status change also drops the live update the subscription exists to deliver. A non-zero seq is already ignored when it is behind the stored one.
 2. Dwell restore still matches a reused pane on kind + non-zero seq + status. `agent_session.value` is parsed onto `HerdrAgentInfo` and not kept on `Agent`. Putting it in the occupant fingerprint would also change Settings override keys (`DwellTracker.fingerprint` and `AppModel.fingerprintForAgent` must stay identical). Deferred: needs a second identity stored on `Agent` and in the dwell file, with old files still matching, and it is a separate change from the answer-send check. The MCP write path compares session value; the panel Approve/Deny check and the dwell file still do not.
@@ -213,6 +233,7 @@ Pass 9 re-checked items 1–7, 9, and 10. They stay deferred for the reasons on 
 9. A seq-less `pane_moved` does not adopt a status that appears only on that payload. Deferred: `PaneInfo` has no seq, so a live status and a replayed one are the same bytes. Applying the payload status is what made a protocol-17 buffer replay reopen a blocked episode. `pane.updated` and Shepherd's poll still carry status. herdmgr misses a status change that arrived only inside the move until the next `pane_updated`.
 10. A seq-less `pane_moved` with no agent still drops a row whose id matches. A replayed same-id move-to-shell can remove an agent that started in that pane later. Deferred: a live move to a shell has the same shape, and leaving the row would stick in herdmgr. Shepherd's next poll inserts the agent again.
 11. A mutation already queued ahead of the snapshot that records a downgrade still runs. Deferred: the I/O queue is serial, and that write started when the gate was still open. Waiting for a read that has not been enqueued would stall every keystroke on a snapshot nobody requested. Pass 9 refuses the write once the downgrade's transaction is ahead of it.
+12. A Claude message whose repeated usage lines are folded at a week or month boundary, then appended again, can count twice in All-time. Compaction rewrites a multi-event group's id, so the next line's original id does not replace it. Deferred: it is the usage total, not the menu bar, and only when a message is still streaming across that boundary in a session that already has older history. Keeping the last event id out of the fold would preserve the replacement. An in-place edit behind the resume signature is the other accepted miss.
 
 ## Notes
 
