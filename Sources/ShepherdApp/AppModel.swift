@@ -208,8 +208,13 @@ final class AppModel {
     /// flow needs. The one place `HerdSnapshot` -> UI state happens, so every
     /// resync path (initial connect, periodic poll, manual resync, reconnect)
     /// stays in lockstep.
-    private func applyHerd(_ snapshot: HerdSnapshot) {
-        let transitions = store.applyHerdSnapshot(snapshot)
+    ///
+    /// `requestedAtEpoch` is `store.currentHerdEpoch` from before the request.
+    /// A poll and a resync can both be in flight when a status event lands;
+    /// each response stays stale for that event instead of the second one
+    /// painting the pre-event row back.
+    private func applyHerd(_ snapshot: HerdSnapshot, requestedAtEpoch: UInt64) {
+        let transitions = store.applyHerdSnapshot(snapshot, requestedAtEpoch: requestedAtEpoch)
         lastHerdAgents = snapshot.agents
         lastTabNames = snapshot.tabNames
         workspaceOptions = snapshot.workspaceNames
@@ -222,6 +227,15 @@ final class AppModel {
         for transition in transitions {
             notifyAndDiagnoseIfNeeded(transition)
         }
+    }
+
+    /// Read the herd, remembering how many events had landed before the
+    /// request left. `applyHerd` uses that epoch so a response already in
+    /// flight cannot roll a later event back.
+    private func herdSnapshotForApply() async throws -> (snapshot: HerdSnapshot, requestedAtEpoch: UInt64) {
+        let requestedAtEpoch = store.currentHerdEpoch
+        let snapshot = try await adapter.herdSnapshot()
+        return (snapshot, requestedAtEpoch)
     }
 
     // MARK: - Lifecycle
@@ -320,9 +334,9 @@ final class AppModel {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 guard let self else { return }
                 do {
-                    let snapshot = try await self.adapter.herdSnapshot()
+                    let (snapshot, requestedAtEpoch) = try await self.herdSnapshotForApply()
                     // Probe succeeded -> we are (back) online.
-                    self.applyHerd(snapshot)
+                    self.applyHerd(snapshot, requestedAtEpoch: requestedAtEpoch)
                     self.setConnection(.connected)
                     self.setHealth(self.adapter.health())
                     self.updateDwellForAllAgents()
@@ -356,8 +370,8 @@ final class AppModel {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let snapshot = try await self.adapter.herdSnapshot()
-                self.applyHerd(snapshot)
+                let (snapshot, requestedAtEpoch) = try await self.herdSnapshotForApply()
+                self.applyHerd(snapshot, requestedAtEpoch: requestedAtEpoch)
                 self.setConnection(.connected)
                 self.setHealth(self.adapter.health())
                 self.updateDwellForAllAgents()
@@ -379,8 +393,8 @@ final class AppModel {
         setConnection(.connecting)
         do {
             try await adapter.connect()
-            let snapshot = try await adapter.herdSnapshot()
-            applyHerd(snapshot)
+            let (snapshot, requestedAtEpoch) = try await herdSnapshotForApply()
+            applyHerd(snapshot, requestedAtEpoch: requestedAtEpoch)
             setConnection(.connected)
             setHealth(adapter.health())
             updateDwellForAllAgents()
@@ -547,8 +561,8 @@ final class AppModel {
                 Task { [weak self] in
                     guard let self else { return }
                     do {
-                        let snapshot = try await self.adapter.herdSnapshot()
-                        self.applyHerd(snapshot)
+                        let (snapshot, requestedAtEpoch) = try await self.herdSnapshotForApply()
+                        self.applyHerd(snapshot, requestedAtEpoch: requestedAtEpoch)
                         self.setConnection(.connected)
                         self.setHealth(self.adapter.health())
                         self.updateDwellForAllAgents()
@@ -651,7 +665,7 @@ final class AppModel {
             defer { self?.inFlightAgentWrites.remove(agent.id) }
             guard let self else { return }
             do {
-                let snapshot = try await self.adapter.herdSnapshot()
+                let (snapshot, requestedAtEpoch) = try await self.herdSnapshotForApply()
                 let health = self.adapter.health()
                 self.setHealth(health)
                 guard health.writesEnabled else {
@@ -661,7 +675,7 @@ final class AppModel {
                 if let refusal = PromptAnswerCheck.refusal(answering: agent, in: snapshot) {
                     // Show what herdr reports now, so the row matches the
                     // reason and a retry uses the current episode.
-                    self.applyHerd(snapshot)
+                    self.applyHerd(snapshot, requestedAtEpoch: requestedAtEpoch)
                     self.updateDwellForAllAgents()
                     self.setLastError("\(actionName) skipped: \(refusal.message)")
                     return

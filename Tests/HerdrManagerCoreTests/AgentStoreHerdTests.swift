@@ -1113,4 +1113,246 @@ struct ApplyHerdSnapshotStaleBoundTests {
         store.applyHerdSnapshot(herd([]))
         #expect(store.agents[AgentID("wA:p1")] == nil)
     }
+
+    @Test("Two snapshots requested before a blocked event do not roll it back or alert again")
+    @MainActor
+    func twoInFlightSnapshotsDoNotRollBack() {
+        // The 3s poll and a resync (or an Approve/Deny re-read) can both
+        // have been sent before the event. Ignoring only the first one
+        // turned blocked back into working, and the next poll alerted again.
+        let store = AgentStore()
+        let before = store.currentHerdEpoch
+        store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)]),
+            requestedAtEpoch: before
+        )
+
+        let event = store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)))
+        let after = store.currentHerdEpoch
+        let startedAt = store.agents[AgentID("wA:p1")]?.enteredAt
+        #expect(after > before)
+
+        let first = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)]),
+            requestedAtEpoch: before
+        )
+        let second = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)]),
+            requestedAtEpoch: before
+        )
+        #expect(first.isEmpty)
+        #expect(second.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.status == .blocked)
+        #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
+
+        let fresh = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)]),
+            requestedAtEpoch: after
+        )
+        #expect(fresh.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
+        #expect(store.agents[AgentID("wA:p1")]?.stateChangeSeq == 5)
+        #expect(blockedAlerts([event] + fresh).count == 1)
+
+        // The poll that was in flight before the event can return last.
+        let late = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)]),
+            requestedAtEpoch: before
+        )
+        #expect(late.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.status == .blocked)
+        #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
+        #expect(blockedAlerts([event] + fresh + late).count == 1)
+    }
+
+    @Test("A slow pre-event snapshot does not replace a newer seq already applied")
+    @MainActor
+    func lateSnapshotDoesNotReplaceNewerSeq() {
+        // The poll that started after the block can move on to working
+        // (seq 6) before the poll that was in flight before the block
+        // returns the intermediate blocked row (seq 5). That late row
+        // must not alert a second time.
+        let store = AgentStore()
+        let before = store.currentHerdEpoch
+        store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)]),
+            requestedAtEpoch: before
+        )
+        let event = store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)))
+        let after = store.currentHerdEpoch
+
+        let movedOn = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 6)]),
+            requestedAtEpoch: after
+        )
+        #expect(movedOn.map(\.to) == [.working])
+
+        let late = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)]),
+            requestedAtEpoch: before
+        )
+        #expect(late.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.status == .working)
+        #expect(store.agents[AgentID("wA:p1")]?.stateChangeSeq == 6)
+        #expect(blockedAlerts([event] + movedOn + late).count == 1)
+    }
+
+    @Test("A snapshot requested after the event corrects a seq-less wrong status")
+    @MainActor
+    func postEventSnapshotCorrectsWrongEvent() {
+        // herdr without seqs, or restarted back at 0, must not leave the
+        // pane stuck on the event. The poll that started after the event
+        // is the one that counts; an earlier in-flight poll does not.
+        let store = AgentStore()
+        let before = store.currentHerdEpoch
+        store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 0)]),
+            requestedAtEpoch: before
+        )
+        store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)))
+        let after = store.currentHerdEpoch
+
+        #expect(store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 0)]),
+            requestedAtEpoch: before
+        ).isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.status == .blocked)
+
+        let corrected = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 0)]),
+            requestedAtEpoch: after
+        )
+        #expect(corrected.map(\.to) == [.working])
+        #expect(store.agents[AgentID("wA:p1")]?.status == .working)
+    }
+
+    @Test("Two snapshots requested before a pane exit do not bring it back")
+    @MainActor
+    func twoInFlightSnapshotsDoNotResurrect() {
+        let store = AgentStore()
+        let before = store.currentHerdEpoch
+        store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)]),
+            requestedAtEpoch: before
+        )
+        store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)]),
+            requestedAtEpoch: before
+        )
+        store.applyEvent(.paneExited(paneId: "wA:p1"))
+        let after = store.currentHerdEpoch
+
+        let first = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)]),
+            requestedAtEpoch: before
+        )
+        let second = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)]),
+            requestedAtEpoch: before
+        )
+        #expect(first.isEmpty)
+        #expect(second.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+
+        #expect(store.applyHerdSnapshot(herd([]), requestedAtEpoch: after).isEmpty)
+        let late = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)]),
+            requestedAtEpoch: before
+        )
+        #expect(late.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+    }
+
+    @Test("Snapshots requested before an insert keep the agent; one requested after can drop it")
+    @MainActor
+    func inFlightEmptySnapshotsKeepInsertedAgent() {
+        let store = AgentStore()
+        let before = store.currentHerdEpoch
+        store.applyHerdSnapshot(herd([]), requestedAtEpoch: before)
+        let event = store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)))
+        let after = store.currentHerdEpoch
+        let startedAt = store.agents[AgentID("wA:p1")]?.enteredAt
+
+        #expect(store.applyHerdSnapshot(herd([]), requestedAtEpoch: before).isEmpty)
+        #expect(store.applyHerdSnapshot(herd([]), requestedAtEpoch: before).isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.status == .blocked)
+        #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
+
+        let fresh = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 1)]),
+            requestedAtEpoch: after
+        )
+        #expect(fresh.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
+        #expect(blockedAlerts([event] + fresh).count == 1)
+
+        // A later poll that started after the insert and still does not
+        // list the pane drops it. The pre-insert list, returning last,
+        // does not put it back.
+        #expect(store.applyHerdSnapshot(herd([]), requestedAtEpoch: after).isEmpty)
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+        let late = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)]),
+            requestedAtEpoch: before
+        )
+        #expect(late.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+    }
+
+    @Test("An event on one pane does not freeze another pane's snapshot row")
+    @MainActor
+    func eventOnOnePaneDoesNotFreezeAnother() {
+        let store = AgentStore()
+        let before = store.currentHerdEpoch
+        store.applyHerdSnapshot(herd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4),
+            makeAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 2),
+        ]), requestedAtEpoch: before)
+        store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)))
+
+        let transitions = store.applyHerdSnapshot(herd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4),
+            makeAgentInfo(paneId: "wA:p2", agentStatus: "blocked", stateChangeSeq: 3),
+        ]), requestedAtEpoch: before)
+
+        #expect(store.agents[AgentID("wA:p1")]?.status == .blocked)
+        #expect(store.agents[AgentID("wA:p2")]?.status == .blocked)
+        #expect(transitions.map(\.agentId.raw) == ["wA:p2"])
+        #expect(transitions.first?.from == .working)
+    }
+
+    @Test("Once the event's snapshot has landed, a later seq bump starts a new dwell without a second alert")
+    @MainActor
+    func seqBumpAfterCatchUpStartsNewDwell() throws {
+        let store = AgentStore()
+        let before = store.currentHerdEpoch
+        store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)]),
+            requestedAtEpoch: before
+        )
+        let event = store.applyEvent(.paneUpdated(makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0)))
+        let startedAt = store.agents[AgentID("wA:p1")]?.enteredAt
+        let after = store.currentHerdEpoch
+
+        let catchUp = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)]),
+            requestedAtEpoch: after
+        )
+        #expect(catchUp.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.enteredAt == startedAt)
+
+        var agent = try #require(store.agents[AgentID("wA:p1")])
+        let pinned = Date(timeIntervalSince1970: 1_700_000_000)
+        agent.enteredAt = pinned
+        store.agents[AgentID("wA:p1")] = agent
+
+        let bumped = store.applyHerdSnapshot(
+            herd([makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 6)]),
+            requestedAtEpoch: after
+        )
+        #expect(bumped.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")]?.stateChangeSeq == 6)
+        #expect(store.agents[AgentID("wA:p1")]?.enteredAt != pinned)
+        #expect(blockedAlerts([event] + catchUp + bumped).count == 1)
+    }
 }

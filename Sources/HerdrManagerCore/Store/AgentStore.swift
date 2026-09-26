@@ -48,19 +48,41 @@ public final class AgentStore {
     private var workspaceNameCache: [String: String] = [:]
     private var tabNameCache: [String: String] = [:]
 
-    /// Panes whose status or presence an event changed since the last
-    /// `applyHerdSnapshot`, mapped to the lowest `agent.list` seq that can
-    /// reflect that change. A snapshot is applied when its response
-    /// arrives, and herdr may have answered it before sending the event:
-    /// for these panes, a snapshot below that seq is taken as stale and does
-    /// not roll the pane back. Each snapshot clears the map, so a herdr
-    /// restart (seq back to 0) or a wrong event costs at most one poll. A
-    /// pane kept back from a stale snapshot stays marked at 0 (never stale)
-    /// so the snapshot that catches up still continues the event's episode.
+    /// One status or presence event. `seqFloor` is the lowest `agent.list`
+    /// seq that can reflect the event. `epoch` is `herdEpoch` when the event
+    /// landed. `continuesEpisode` is set so the next snapshot that actually
+    /// applies to the pane keeps the event's `enteredAt` when the seq catches
+    /// up, then clears — a later seq bump with the same status is a new dwell.
+    private struct PaneBasis {
+        var epoch: UInt64
+        var seqFloor: UInt64
+        var continuesEpisode: Bool
+    }
+
+    /// Counts status and presence events. Not UI state: snapshots capture it
+    /// around a request, and tracking it would redraw the panel on every event
+    /// the store is about to publish through `agents` anyway.
+    @ObservationIgnored
+    private var herdEpoch: UInt64 = 0
+
+    /// Panes an event changed. A snapshot requested before `epoch` whose seq
+    /// is still below `seqFloor` was answered from pre-event state and does
+    /// not roll the pane back. The basis stays after that snapshot, so a
+    /// second response that was already in flight — including one that
+    /// returns after a newer poll — cannot roll it back either. A snapshot
+    /// requested at or after `epoch` is authoritative: a herdr restart or a
+    /// wrong seq-less event is corrected by the next poll that started after
+    /// the event, and a seq that has caught up still applies.
     ///
-    /// Without this, a stale poll undid a blocked event and the next poll
-    /// reported the same prompt as a second blocked transition.
-    private var eventChangedPanes: [AgentID: UInt64] = [:]
+    /// Callers that omit the request epoch retire `seqFloor` to 0 after one
+    /// stale snapshot, which is the older one-poll behaviour.
+    @ObservationIgnored
+    private var paneBasis: [AgentID: PaneBasis] = [:]
+
+    /// Monotonic count of status and presence events applied here. Capture
+    /// it immediately before requesting a herd snapshot and pass it to
+    /// `applyHerdSnapshot(_:requestedAtEpoch:)`.
+    public var currentHerdEpoch: UInt64 { herdEpoch }
 
     /// Whether a herd snapshot has been applied. The first one describes
     /// the herd as it already was, so its panes are not reported as new.
@@ -158,36 +180,63 @@ public final class AgentStore {
     ///   event then finds the status unchanged and reports nothing, so a
     ///   blocked alert that listened to events alone was lost. The snapshot
     ///   that first populates the store reports none.
+    ///
+    /// - Parameter requestedAtEpoch: `currentHerdEpoch` from immediately
+    ///   before this snapshot was requested. Responses captured earlier stay
+    ///   stale for panes an event changed after the capture, however many of
+    ///   them return and in whatever order. Omit to retire each guard after
+    ///   a single stale snapshot.
     @discardableResult
-    public func applyHerdSnapshot(_ snapshot: HerdSnapshot) -> [AgentStatusTransition] {
+    public func applyHerdSnapshot(
+        _ snapshot: HerdSnapshot,
+        requestedAtEpoch: UInt64? = nil
+    ) -> [AgentStatusTransition] {
         var newAgents: [AgentID: Agent] = [:]
         var transitions: [AgentStatusTransition] = []
         var listed: Set<AgentID> = []
-        let eventFloors = eventChangedPanes
-        eventChangedPanes = [:]
+        let basesAtStart = paneBasis
 
         for info in snapshot.agents {
             guard !info.paneId.isEmpty else { continue }
             let agentId = AgentID(info.paneId)
             listed.insert(agentId)
             let existing = agents[agentId]
+            let priorBasis = basesAtStart[agentId]
 
             // Answered before an event that changed this pane: keep what
-            // the event left (including its removal) until the next poll.
-            let eventFloor = eventFloors[agentId]
-            if let eventFloor, info.stateChangeSeq < eventFloor {
-                if let existing {
-                    newAgents[agentId] = existing
-                    eventChangedPanes[agentId] = 0
+            // the event left (including its removal). The floor stays when
+            // the caller threaded the request epoch, so another in-flight
+            // response from before the event cannot undo it later — even
+            // one that returns after a newer poll and carries a seq past
+            // the event's floor but behind the seq already applied.
+            if let priorBasis {
+                let predates = requestedAtEpoch.map { $0 < priorBasis.epoch } ?? true
+                let behindFloor = info.stateChangeSeq < priorBasis.seqFloor
+                let behindStored = requestedAtEpoch != nil
+                    && info.stateChangeSeq < (existing?.stateChangeSeq ?? 0)
+                if predates && (behindFloor || behindStored) {
+                    if let existing {
+                        newAgents[agentId] = existing
+                    }
+                    if requestedAtEpoch == nil {
+                        paneBasis[agentId] = PaneBasis(
+                            epoch: priorBasis.epoch,
+                            seqFloor: 0,
+                            continuesEpisode: priorBasis.continuesEpisode
+                        )
+                    }
+                    continue
                 }
-                continue
             }
 
             // An entry with no agent is a plain shell, not an agent — never
             // insert it. (agentList()/parseAgentList already filters these
             // out, but a defensive check here keeps this function correct
             // even if called with a hand-built HerdSnapshot.)
-            guard let agentKind = info.agent, !agentKind.isEmpty else { continue }
+            guard let agentKind = info.agent, !agentKind.isEmpty else {
+                consumeEpisodeContinuation(agentId)
+                continue
+            }
 
             let status = AgentStatus(rawValue: info.agentStatus) ?? .unknown
             let wsName = snapshot.workspaceNames[info.workspaceId] ?? info.workspaceId
@@ -198,10 +247,12 @@ public final class AgentStore {
             // moved but seq did not (seq of 0 on a pane_updated-shaped
             // snapshot, or a lagging seq): otherwise dwell and verdict
             // stick to the previous episode. A snapshot catching up with an
-            // event's status continues the episode that event opened.
+            // event's status continues the episode that event opened; once
+            // that snapshot has landed, a later seq bump is a new dwell.
             let seqUnchanged = existing?.stateChangeSeq == info.stateChangeSeq
             let statusUnchanged = existing?.status == status
-            let sameEpisode = existing != nil && statusUnchanged && (seqUnchanged || eventFloor != nil)
+            let sameEpisode = existing != nil && statusUnchanged
+                && (seqUnchanged || priorBasis?.continuesEpisode == true)
             let enteredAt = sameEpisode ? existing!.enteredAt : Date()
 
             let kind: AgentKind
@@ -235,17 +286,31 @@ public final class AgentStore {
                 cwd: info.foregroundCwd ?? info.cwd ?? ""
             )
             newAgents[agentId] = agent
+            consumeEpisodeContinuation(agentId)
             if existing != nil || hasAppliedHerd,
                let transition = Self.transition(from: existing?.status, to: agent) {
                 transitions.append(transition)
             }
         }
 
-        // A pane an event added that this snapshot does not list yet.
-        for (agentId, floor) in eventFloors where floor > 0 && !listed.contains(agentId) {
-            if let existing = agents[agentId] {
-                newAgents[agentId] = existing
-                eventChangedPanes[agentId] = 0
+        // A pane an event added or removed that this snapshot does not list.
+        // A request from before the event keeps the event's row (or its
+        // absence). A request from after the event is the herd as it is.
+        for (agentId, priorBasis) in basesAtStart where priorBasis.seqFloor > 0 && !listed.contains(agentId) {
+            let predates = requestedAtEpoch.map { $0 < priorBasis.epoch } ?? true
+            if predates {
+                if let existing = agents[agentId] {
+                    newAgents[agentId] = existing
+                }
+                if requestedAtEpoch == nil {
+                    paneBasis[agentId] = PaneBasis(
+                        epoch: priorBasis.epoch,
+                        seqFloor: 0,
+                        continuesEpisode: priorBasis.continuesEpisode
+                    )
+                }
+            } else {
+                consumeEpisodeContinuation(agentId)
             }
         }
         hasAppliedHerd = true
@@ -284,7 +349,7 @@ public final class AgentStore {
             let newStatus = AgentStatus(rawValue: agentStatus) ?? .unknown
             if newStatus != agent.status {
                 agent.enteredAt = Date()
-                eventChangedPanes[agentId] = seq ?? Self.seq(after: agent.stateChangeSeq)
+                noteEventChange(for: agentId, seqFloor: seq ?? Self.seq(after: agent.stateChangeSeq))
             }
             agent.status = newStatus
             if let seq { agent.stateChangeSeq = seq }
@@ -348,9 +413,12 @@ public final class AgentStore {
             let enteredAt = isNewState ? Date() : existing!.enteredAt
             let verdict = isNewState ? Self.verdict(for: status) : existing!.verdict
             if statusChanged {
-                eventChangedPanes[agentId] = seqIsMeaningful
-                    ? info.stateChangeSeq
-                    : Self.seq(after: existing?.stateChangeSeq ?? 0)
+                noteEventChange(
+                    for: agentId,
+                    seqFloor: seqIsMeaningful
+                        ? info.stateChangeSeq
+                        : Self.seq(after: existing?.stateChangeSeq ?? 0)
+                )
             }
 
             let kind: AgentKind
@@ -409,7 +477,23 @@ public final class AgentStore {
     /// that event from adding it back.
     private func removeAfterEvent(_ agentId: AgentID, seq: UInt64? = nil) {
         guard let removed = agents.removeValue(forKey: agentId) else { return }
-        eventChangedPanes[agentId] = seq ?? Self.seq(after: removed.stateChangeSeq)
+        noteEventChange(for: agentId, seqFloor: seq ?? Self.seq(after: removed.stateChangeSeq))
+    }
+
+    /// Record that an event moved this pane, and that a snapshot requested
+    /// earlier must not paint over it.
+    private func noteEventChange(for agentId: AgentID, seqFloor: UInt64) {
+        herdEpoch += 1
+        paneBasis[agentId] = PaneBasis(epoch: herdEpoch, seqFloor: seqFloor, continuesEpisode: true)
+    }
+
+    /// The event's dwell has been adopted or replaced by a snapshot that
+    /// applied. The seq floor stays, so a response requested before the
+    /// event is still rejected if it arrives later.
+    private func consumeEpisodeContinuation(_ agentId: AgentID) {
+        guard var basis = paneBasis[agentId], basis.continuesEpisode else { return }
+        basis.continuesEpisode = false
+        paneBasis[agentId] = basis
     }
 
     /// The lowest seq herdr can report once it has moved past `seq`.
