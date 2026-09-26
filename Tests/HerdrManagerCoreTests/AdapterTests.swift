@@ -530,6 +530,103 @@ struct ParseEventTests {
         }
     }
 
+    @Test("pane_moved carries the previous id, the new pane, and a created workspace label")
+    func paneMovedRealWireFormat() throws {
+        let jsonString = """
+        {
+            "event": "pane_moved",
+            "data": {
+                "type": "pane_moved",
+                "previous_pane_id": "wA:p1",
+                "previous_workspace_id": "wA",
+                "previous_tab_id": "wA:t1",
+                "pane": {
+                    "pane_id": "wB:p4",
+                    "workspace_id": "wB",
+                    "tab_id": "wB:t1",
+                    "agent": "claude",
+                    "agent_status": "blocked",
+                    "state_change_seq": 9,
+                    "title": "Claude"
+                },
+                "created_workspace": {
+                    "workspace_id": "wB",
+                    "label": "proj",
+                    "focused": true,
+                    "pane_count": 1,
+                    "tab_count": 1,
+                    "number": 2,
+                    "active_tab_id": "wB:t1",
+                    "agent_status": "blocked"
+                },
+                "created_tab": {
+                    "tab_id": "wB:t1",
+                    "workspace_id": "wB",
+                    "label": "main"
+                }
+            }
+        }
+        """
+        let data = jsonString.data(using: .utf8)!
+        let dict = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let event = LiveHerdrAdapter.parseEvent(dict)
+        if case .paneMoved(let previous, let info, let workspace, let tab) = event {
+            #expect(previous == "wA:p1")
+            #expect(info.paneId == "wB:p4")
+            #expect(info.workspaceId == "wB")
+            #expect(info.tabId == "wB:t1")
+            #expect(info.agent == "claude")
+            #expect(info.agentStatus == "blocked")
+            #expect(info.stateChangeSeq == 9)
+            #expect(workspace == "proj")
+            #expect(tab == "main")
+        } else {
+            Issue.record("Expected .paneMoved, got \(event)")
+        }
+    }
+
+    @Test("A flat pane.moved with no previous id is the same pane")
+    func flatPaneMovedKeepsTheOnlyId() {
+        let event = LiveHerdrAdapter.parseEvent([
+            "event": "pane.moved",
+            "data": [
+                "pane_id": "w1:p1",
+                "workspace_id": "w1",
+                "tab_id": "w1:t2",
+                "agent": "codex",
+                "agent_status": "working",
+                "state_change_seq": 3
+            ] as [String: Any]
+        ])
+        if case .paneMoved(let previous, let info, let workspace, let tab) = event {
+            #expect(previous.isEmpty)
+            #expect(info.paneId == "w1:p1")
+            #expect(info.tabId == "w1:t2")
+            #expect(info.agentStatus == "working")
+            #expect(info.stateChangeSeq == 3)
+            #expect(workspace == nil)
+            #expect(tab == nil)
+        } else {
+            Issue.record("Expected .paneMoved for flat pane.moved, got \(event)")
+        }
+    }
+
+    @Test("pane_moved with an empty new pane id is ignored")
+    func emptyMovedPaneIdIsIgnored() {
+        let event = LiveHerdrAdapter.parseEvent([
+            "event": "pane_moved",
+            "data": [
+                "previous_pane_id": "wA:p1",
+                "pane": ["pane_id": ""]
+            ] as [String: Any]
+        ])
+        if case .ignored = event {
+            // pass
+        } else {
+            Issue.record("Expected .ignored for empty moved pane id, got \(event)")
+        }
+    }
+
     @Test("Genuinely unknown underscored event name still maps to .ignored")
     func unknownUnderscoredEventIsIgnored() {
         let dict: [String: Any] = [

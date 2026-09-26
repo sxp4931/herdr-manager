@@ -707,7 +707,18 @@ public enum HerdrEvent: Sendable {
     case agentStatusChanged(paneId: String, agentStatus: String, stateChangeSeq: UInt64?)
     case paneCreated(paneId: String, workspaceId: String, tabId: String)
     case paneClosed(paneId: String)
-    case paneMoved(paneId: String, workspaceId: String?, tabId: String?)
+    /// A pane changed tabs or workspaces. Cross-workspace moves assign a new
+    /// public id (`pane.paneId`) and do not emit close or create.
+    /// `previousPaneId` is the id the row had; it is empty or equal to the
+    /// new id when the id did not change. The created labels name a
+    /// workspace or tab this move just made, which the last snapshot
+    /// cannot know yet.
+    case paneMoved(
+        previousPaneId: String,
+        pane: HerdrAgentInfo,
+        createdWorkspaceLabel: String?,
+        createdTabLabel: String?
+    )
     /// The full state of one pane, as delivered by the real `pane_updated`
     /// event. Carries strictly more information than `agentStatusChanged`
     /// (the old, never-actually-fired, per-pane status subscription) and is

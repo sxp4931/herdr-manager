@@ -1540,3 +1540,241 @@ struct ApplyHerdSnapshotStaleBoundTests {
         #expect(store.lastAppliedHerdRequestSerial == 0)
     }
 }
+
+private func labeledHerd(_ infos: [HerdrAgentInfo]) -> HerdSnapshot {
+    HerdSnapshot(
+        version: "0.7.5", protocol: 17,
+        agents: infos,
+        workspaceNames: ["wA": "Alpha", "wB": "Beta"],
+        tabNames: ["wA:t1": "main", "wA:t9": "tests", "wB:t2": "logs"],
+        focusedWorkspaceId: nil, focusedTabId: nil, focusedPaneId: nil
+    )
+}
+
+@Suite("AgentStore pane moves")
+struct AgentStorePaneMoveTests {
+
+    @Test("A cross-workspace move re-keys the blocked row and a pre-move list cannot alert again")
+    @MainActor
+    func crossWorkspaceMoveKeepsEpisode() throws {
+        let store = AgentStore()
+        let seed = store.captureHerdRequest()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4),
+            makeAgentInfo(paneId: "wA:p2", agentStatus: "idle", stateChangeSeq: 1),
+        ]), requestedAtEpoch: seed.epoch, requestedAtSerial: seed.serial)
+
+        let blocked = store.applyEvent(.paneUpdated(makeAgentInfo(
+            paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0
+        )))
+        let startedAt = try #require(store.agents[AgentID("wA:p1")]?.enteredAt)
+        var pinned = try #require(store.agents[AgentID("wA:p1")])
+        let output = Date(timeIntervalSince1970: 1_700_000_100)
+        pinned.lastOutputAt = output
+        pinned.verdict = .silent(since: startedAt, cpu: .deadlocked)
+        store.agents[AgentID("wA:p1")] = pinned
+
+        let first = store.captureHerdRequest()
+        let second = store.captureHerdRequest()
+        let move = store.applyEvent(.paneMoved(
+            previousPaneId: "wA:p1",
+            pane: makeAgentInfo(
+                paneId: "wB:p4",
+                workspaceId: "wB",
+                tabId: "wB:t2",
+                agentStatus: "blocked",
+                stateChangeSeq: 5,
+                title: "Still Claude"
+            ),
+            createdWorkspaceLabel: nil,
+            createdTabLabel: nil
+        ))
+        let after = store.captureHerdRequest()
+
+        #expect(move == nil)
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+        let moved = try #require(store.agents[AgentID("wB:p4")])
+        #expect(moved.status == .blocked)
+        #expect(moved.enteredAt == startedAt)
+        #expect(moved.lastOutputAt == output)
+        #expect(moved.verdict.isSilent)
+        #expect(moved.workspaceName == "Beta")
+        #expect(moved.tabName == "logs")
+        #expect(moved.stateChangeSeq == 5)
+        #expect(moved.name == "Still Claude")
+        #expect(store.agents[AgentID("wA:p2")]?.status == .idle)
+
+        let preMove = labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4),
+            makeAgentInfo(paneId: "wA:p2", agentStatus: "idle", stateChangeSeq: 1),
+        ])
+        let stale = store.applyHerdSnapshot(
+            preMove, requestedAtEpoch: first.epoch, requestedAtSerial: first.serial
+        )
+        let staleAgain = store.applyHerdSnapshot(
+            preMove, requestedAtEpoch: second.epoch, requestedAtSerial: second.serial
+        )
+        #expect(stale.isEmpty)
+        #expect(staleAgain.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+        #expect(store.agents[AgentID("wB:p4")]?.status == .blocked)
+        #expect(store.agents[AgentID("wB:p4")]?.enteredAt == startedAt)
+
+        let fresh = store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2",
+                agentStatus: "blocked", stateChangeSeq: 5, title: "Still Claude"
+            ),
+            makeAgentInfo(paneId: "wA:p2", agentStatus: "idle", stateChangeSeq: 1),
+        ]), requestedAtEpoch: after.epoch, requestedAtSerial: after.serial)
+        #expect(fresh.isEmpty)
+        #expect(store.agents[AgentID("wB:p4")]?.enteredAt == startedAt)
+        #expect(store.agents[AgentID("wB:p4")]?.workspaceName == "Beta")
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+        #expect(store.agents.count == 2)
+        #expect(blockedAlerts(present(blocked) + present(move) + stale + staleAgain + fresh).count == 1)
+    }
+
+    @Test("A same-id move uses the cached tab label and keeps the episode")
+    @MainActor
+    func sameWorkspaceMoveUsesLabel() throws {
+        let store = AgentStore()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)
+        ]))
+        var agent = try #require(store.agents[AgentID("wA:p1")])
+        let entered = Date(timeIntervalSince1970: 1_700_000_000)
+        agent.enteredAt = entered
+        store.agents[AgentID("wA:p1")] = agent
+
+        let move = store.applyEvent(.paneMoved(
+            previousPaneId: "wA:p1",
+            pane: makeAgentInfo(
+                paneId: "wA:p1", tabId: "wA:t9",
+                agentStatus: "blocked", stateChangeSeq: 5
+            ),
+            createdWorkspaceLabel: nil,
+            createdTabLabel: nil
+        ))
+        #expect(move == nil)
+        #expect(store.agents[AgentID("wA:p1")]?.tabName == "tests")
+        #expect(store.agents[AgentID("wA:p1")]?.workspaceName == "Alpha")
+        #expect(store.agents[AgentID("wA:p1")]?.enteredAt == entered)
+        #expect(store.agents.count == 1)
+    }
+
+    @Test("A move into a new workspace uses the label the event created")
+    @MainActor
+    func createdWorkspaceLabel() throws {
+        let store = AgentStore()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 2)
+        ]))
+        let move = store.applyEvent(.paneMoved(
+            previousPaneId: "wA:p1",
+            pane: makeAgentInfo(
+                paneId: "wC:p1", workspaceId: "wC", tabId: "wC:t1",
+                agentStatus: "working", stateChangeSeq: 2, title: "Claude"
+            ),
+            createdWorkspaceLabel: "proj",
+            createdTabLabel: "scratch"
+        ))
+        #expect(move == nil)
+        let moved = try #require(store.agents[AgentID("wC:p1")])
+        #expect(moved.workspaceName == "proj")
+        #expect(moved.tabName == "scratch")
+
+        // The label stays available for a later pane_updated of the same pane.
+        store.applyEvent(.paneUpdated(makeAgentInfo(
+            paneId: "wC:p1", workspaceId: "wC", tabId: "wC:t1",
+            agentStatus: "working", stateChangeSeq: 0, title: "Renamed"
+        )))
+        #expect(store.agents[AgentID("wC:p1")]?.workspaceName == "proj")
+        #expect(store.agents[AgentID("wC:p1")]?.tabName == "scratch")
+        #expect(store.agents[AgentID("wC:p1")]?.name == "Renamed")
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+    }
+
+    @Test("A stale seq on the moved pane does not roll the status back")
+    @MainActor
+    func staleSeqDoesNotRollStatusBack() throws {
+        let store = AgentStore()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 9)
+        ]))
+        let entered = try #require(store.agents[AgentID("wA:p1")]?.enteredAt)
+        let move = store.applyEvent(.paneMoved(
+            previousPaneId: "wA:p1",
+            pane: makeAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2",
+                agentStatus: "working", stateChangeSeq: 4
+            ),
+            createdWorkspaceLabel: nil,
+            createdTabLabel: nil
+        ))
+        #expect(move == nil)
+        let moved = try #require(store.agents[AgentID("wB:p4")])
+        #expect(moved.status == .blocked)
+        #expect(moved.stateChangeSeq == 9)
+        #expect(moved.enteredAt == entered)
+        #expect(moved.workspaceName == "Beta")
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+    }
+
+    @Test("A move that changes status reports that transition")
+    @MainActor
+    func statusChangeOnMoveReports() throws {
+        let store = AgentStore()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)
+        ]))
+        var agent = try #require(store.agents[AgentID("wA:p1")])
+        let pinned = Date(timeIntervalSince1970: 1_700_000_000)
+        agent.enteredAt = pinned
+        store.agents[AgentID("wA:p1")] = agent
+        let move = store.applyEvent(.paneMoved(
+            previousPaneId: "wA:p1",
+            pane: makeAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2",
+                agentStatus: "blocked", stateChangeSeq: 5
+            ),
+            createdWorkspaceLabel: nil,
+            createdTabLabel: nil
+        ))
+        #expect(move?.from == .working)
+        #expect(move?.to == .blocked)
+        #expect(move?.agentId == AgentID("wB:p4"))
+        #expect(store.agents[AgentID("wB:p4")]?.enteredAt == move?.enteredAt)
+        #expect(store.agents[AgentID("wB:p4")]?.enteredAt != pinned)
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+    }
+
+    @Test("A move back to a shell drops the row and a pre-move list cannot restore it")
+    @MainActor
+    func moveToShellDrops() {
+        let store = AgentStore()
+        let seed = store.captureHerdRequest()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)
+        ]), requestedAtEpoch: seed.epoch, requestedAtSerial: seed.serial)
+        let inFlight = store.captureHerdRequest()
+        let move = store.applyEvent(.paneMoved(
+            previousPaneId: "wA:p1",
+            pane: makeAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2",
+                agent: nil, agentStatus: "unknown", stateChangeSeq: 5
+            ),
+            createdWorkspaceLabel: nil,
+            createdTabLabel: nil
+        ))
+        #expect(move == nil)
+        #expect(store.agents.isEmpty)
+
+        let stale = store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)
+        ]), requestedAtEpoch: inFlight.epoch, requestedAtSerial: inFlight.serial)
+        #expect(stale.isEmpty)
+        #expect(store.agents.isEmpty)
+        #expect(store.agents[AgentID("wB:p4")] == nil)
+    }
+}

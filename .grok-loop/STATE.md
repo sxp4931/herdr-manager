@@ -46,11 +46,38 @@ Self-review:
 - Pass 1's alert helper concatenated `[AgentStatusTransition]` with `[AgentStatusTransition?]`. Those arrays do not add. The optional is wrapped first so the suite type-checks.
 - Not compiled and not run. No Swift toolchain on this box.
 
+### Pass 3 — a pane move re-keys the agent instead of leaving the old id in place
+
+herdr's `pane_moved` payload is `previous_pane_id` plus the moved `PaneInfo`. A cross-workspace move assigns a new public pane id and does not emit close or create. The parser kept only the new id. `AgentStore` then looked that id up, found nothing, and left the row on the old id, labelled with the raw workspace and tab ids when the id happened to match. The next poll saw a new pane. A blocked agent alerted a second time, its dwell started over, and Jump focused `AgentID.workspaceId` parsed from the stale id. herdmgr's live table has no poll: after the id change, later status events named a row the table did not have.
+
+The event now carries the previous id, the moved pane, and the label of a workspace or tab the move created. The store and `HerdSnapshot.applying` move the row onto the new id and keep the episode when the status did not change: dwell, verdict, last output. A seq on the moved pane that is behind the stored one does not roll the status back. A real status change still reports a transition, on the new id. A list captured before the move cannot put the old id back or drop the new one; a list captured after adopts the new id and keeps the episode start. The menu bar points the selection at the new id before the store drops the old one. Same-workspace moves, whose id does not change, resolve the tab and workspace through the label cache instead of showing the raw id.
+
+Why this one: backlog items 1–3 stay deferred (below). This one is every cross-workspace move, and it trips the same "needs you" alert passes 1 and 2 were about. The wire shape is the current herdr `EventData::PaneMoved`.
+
+Files:
+- `Sources/HerdrManagerCore/Domain/Types.swift`
+- `Sources/HerdrManagerCore/Domain/HerdSnapshot+Events.swift`
+- `Sources/HerdrManagerCore/Adapter/HerdrAdapter.swift`
+- `Sources/HerdrManagerCore/Store/AgentStore.swift`
+- `Sources/ShepherdApp/AppModel.swift`
+- `Tests/HerdrManagerCoreTests/AdapterTests.swift`
+- `Tests/HerdrManagerCoreTests/AgentStoreHerdTests.swift`
+- `Tests/HerdrManagerCoreTests/HerdSnapshotEventsTests.swift`
+
+Self-review:
+- Swift 6: `HerdrEvent` stays `Sendable`. The new payload is `HerdrAgentInfo` plus strings. Basis updates stay on the `@MainActor` store, in `@ObservationIgnored` storage. `AppModel.retargetSelection` runs on the main actor before `applyEvent`, while the old id is still in the store. No new macOS APIs. CLI and MCP do not switch on the old associated values; the only exhaustive switches are the store and `HerdSnapshot.applying`.
+- A request stamp captured before the move has an earlier epoch, so two such lists neither resurrect the old id, nor drop the new row, nor add a second blocked alert. A stamp captured after the move applies the new id and keeps `enteredAt` when status and seq match. The move's seq floor is one past the seq the row kept, and `continuesEpisode` is carried from the status event that opened the dwell, so the catch-up poll does not start a new one.
+- Same-id move: tab label comes from the snapshot cache (`wA:t9` → "tests"), not the raw id. New workspace: `created_workspace.label` / `created_tab.label` are cached, and a later `pane_updated` of that pane still resolves them.
+- A moved pane whose seq is behind the stored one keeps the stored status and seq and still changes id. A move that actually changes status returns one transition for the new id and starts a new dwell.
+- A move to a shell removes the row; a pre-move list does not restore it. herdmgr re-keys in place, so the next `pane_updated` on the new id updates that row, and a layout resync can preserve dwell by the new id.
+- Not compiled and not run. No Swift toolchain on this box.
+
 ## Backlog / ideas
 
 1. A seq-less `pane_updated` that arrives after a poll already applied a newer status still flips the pane. The event carries no seq, so it cannot be told apart from a genuine second prompt. Deferred again: any rule that drops a seq-less status change also drops the live update the subscription exists to deliver. A non-zero seq is already ignored when it is behind the stored one.
-2. Dwell restore still matches a reused pane on kind + non-zero seq + status. `agent_session.value` is parsed onto `HerdrAgentInfo` and not kept on `Agent`. Putting it in the occupant fingerprint would also change Settings override keys (`DwellTracker.fingerprint` and `AppModel.fingerprintForAgent` must stay identical). Deferred: needs a second identity stored on `Agent` and in the dwell file, with old files still matching, and it is a separate change from the read-order fix.
-3. `paneBasis` keeps one small tombstone per pane that had a status or presence event, so a late pre-event list cannot resurrect it. Pane ids are not reused; the map grows with panes seen this launch. Deferred: one struct per pane per launch is not worth a pruning rule that might drop a basis an in-flight read still needs.
+2. Dwell restore still matches a reused pane on kind + non-zero seq + status. `agent_session.value` is parsed onto `HerdrAgentInfo` and not kept on `Agent`. Putting it in the occupant fingerprint would also change Settings override keys (`DwellTracker.fingerprint` and `AppModel.fingerprintForAgent` must stay identical). Deferred: needs a second identity stored on `Agent` and in the dwell file, with old files still matching, and it is a separate change from re-keying a move.
+3. `paneBasis` keeps a tombstone for a pane a status, presence, or move event touched, including the previous id after a cross-workspace move, so a late pre-event list cannot resurrect it. Pane ids are not reused; the map grows with ids seen this launch. Deferred: one or two structs per moved pane per launch is not worth a pruning rule that might drop a basis an in-flight read still needs.
+4. MCP `agent.answer` checks `state_change_seq` and then awaits `agent.explain` and `refreshHealth` before `sendKeys`. A prompt answered or replaced in that gap still receives the keys. `PolicyEngine.recordStatusChange` also ignores a lower seq, so after a herdr restart the 3-answer cap can stay stuck on a reused pane id for the life of the MCP process. Deferred: the move re-key is the deterministic menu-bar alert; this is the next write-safety gap, and the lower-seq rule is what the existing policy test locks in for a stale observation.
 
 ## Notes
 

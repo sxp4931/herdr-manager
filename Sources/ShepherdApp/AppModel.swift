@@ -589,6 +589,10 @@ final class AppModel {
                 break
             }
 
+            // A cross-workspace move publishes a new pane id. Follow it
+            // before the store drops the old one, or the highlight and Jump
+            // stay pointed at a pane that is no longer in the herd.
+            retargetSelection(for: event)
             // React only to status changes the store accepted. `pane_updated`
             // is what herdr sends on protocol 17; `.agentStatusChanged` is the
             // legacy/dotted shape. Comparing the raw event against the
@@ -599,6 +603,15 @@ final class AppModel {
                 notifyAndDiagnoseIfNeeded(transition)
             }
         }
+    }
+
+    private func retargetSelection(for event: HerdrEvent) {
+        guard case .paneMoved(let previousPaneId, let info, _, _) = event else { return }
+        guard !info.paneId.isEmpty, let kind = info.agent, !kind.isEmpty else { return }
+        let previous = AgentID(previousPaneId.isEmpty ? info.paneId : previousPaneId)
+        let newId = AgentID(info.paneId)
+        guard previous != newId, selectedAgentId == previous, store.agents[previous] != nil else { return }
+        selectedAgentId = newId
     }
 
     /// Shared "did this agent just become blocked/start working" reaction for

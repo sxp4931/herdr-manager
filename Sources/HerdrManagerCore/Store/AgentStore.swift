@@ -426,13 +426,13 @@ public final class AgentStore {
         case .paneClosed(let paneId):
             removeAfterEvent(AgentID(paneId))
 
-        case .paneMoved(let paneId, let workspaceId, let tabId):
-            let agentId = AgentID(paneId)
-            if var agent = agents[agentId] {
-                if let ws = workspaceId { agent.workspaceName = ws }
-                if let tab = tabId { agent.tabName = tab }
-                agents[agentId] = agent
-            }
+        case .paneMoved(let previousPaneId, let info, let createdWorkspaceLabel, let createdTabLabel):
+            return applyPaneMove(
+                previousPaneId: previousPaneId,
+                info: info,
+                createdWorkspaceLabel: createdWorkspaceLabel,
+                createdTabLabel: createdTabLabel
+            )
 
         case .paneUpdated(let info):
             guard !info.paneId.isEmpty else { return nil }
@@ -531,6 +531,139 @@ public final class AgentStore {
         return nil
     }
 
+    /// Re-key a moved pane onto the id herdr now publishes.
+    ///
+    /// A cross-workspace move assigns a new public pane id and does not
+    /// emit close or create. Treating the event as an update of the new id
+    /// left the row on the old one, so the next poll inserted a second
+    /// agent and alerted again for a block that had only changed rooms.
+    /// The episode (dwell, verdict, last output) stays. A snapshot captured
+    /// before the move cannot put the old id back or drop the new one.
+    private func applyPaneMove(
+        previousPaneId: String,
+        info: HerdrAgentInfo,
+        createdWorkspaceLabel: String?,
+        createdTabLabel: String?
+    ) -> AgentStatusTransition? {
+        if let createdWorkspaceLabel, !info.workspaceId.isEmpty {
+            workspaceNameCache[info.workspaceId] = createdWorkspaceLabel
+        }
+        if let createdTabLabel, !info.tabId.isEmpty {
+            tabNameCache[info.tabId] = createdTabLabel
+        }
+        guard !info.paneId.isEmpty else { return nil }
+
+        let previousId = AgentID(previousPaneId.isEmpty ? info.paneId : previousPaneId)
+        let newId = AgentID(info.paneId)
+        let existing = agents[previousId] ?? (previousId == newId ? nil : agents[newId])
+
+        guard let agentKind = info.agent, !agentKind.isEmpty else {
+            if previousId != newId {
+                removeAfterEvent(previousId)
+            }
+            removeAfterEvent(newId)
+            return nil
+        }
+
+        // The moved pane carries its current seq. A seq behind the one
+        // `agent.list` already applied is an older status riding along
+        // with the location change; keep the newer status. A higher seq
+        // with the same status is still this episode — the move itself
+        // is not a new dwell.
+        let seqIsMeaningful = info.stateChangeSeq != 0
+        let seqBehind = seqIsMeaningful && existing != nil && info.stateChangeSeq < existing!.stateChangeSeq
+        let status = seqBehind
+            ? existing!.status
+            : (AgentStatus(rawValue: info.agentStatus) ?? .unknown)
+        let statusChanged = existing?.status != status
+        let enteredAt = (existing == nil || statusChanged) ? Date() : existing!.enteredAt
+        let verdict = (existing == nil || statusChanged) ? Self.verdict(for: status) : existing!.verdict
+        let stateChangeSeq: UInt64
+        if seqBehind {
+            stateChangeSeq = existing!.stateChangeSeq
+        } else if seqIsMeaningful {
+            stateChangeSeq = info.stateChangeSeq
+        } else {
+            stateChangeSeq = existing?.stateChangeSeq ?? 0
+        }
+
+        let kind: AgentKind
+        if let session = info.agentSession {
+            kind = .custom(session.agent)
+        } else {
+            kind = .custom(agentKind)
+        }
+        let name = info.title ?? info.terminalTitleStripped ?? existing?.name ?? agentKind
+        let wsName = info.workspaceId.isEmpty
+            ? (existing?.workspaceName ?? "")
+            : (workspaceNameCache[info.workspaceId] ?? info.workspaceId)
+        let tabName = info.tabId.isEmpty
+            ? (existing?.tabName ?? "")
+            : (tabNameCache[info.tabId] ?? info.tabId)
+        let updated = Agent(
+            id: newId,
+            kind: kind,
+            name: name,
+            displayName: name,
+            status: status,
+            stateChangeSeq: stateChangeSeq,
+            enteredAt: enteredAt,
+            lastOutputAt: existing?.lastOutputAt,
+            verdict: verdict,
+            workspaceName: wsName,
+            tabName: tabName,
+            cwd: info.foregroundCwd ?? info.cwd ?? existing?.cwd ?? ""
+        )
+
+        let carriedEpisode: Bool
+        if let previous = paneBasis[previousId]?.continuesEpisode {
+            carriedEpisode = previous
+        } else if previousId != newId, let arrived = paneBasis[newId]?.continuesEpisode {
+            carriedEpisode = arrived
+        } else {
+            carriedEpisode = false
+        }
+        var next = agents
+        if previousId != newId {
+            next.removeValue(forKey: previousId)
+        }
+        next[newId] = updated
+        if next != agents {
+            agents = next
+        }
+        notePaneMove(
+            from: previousId,
+            to: newId,
+            seqFloor: Self.seq(after: stateChangeSeq),
+            continuesEpisode: statusChanged || carriedEpisode
+        )
+        return Self.transition(from: existing?.status, to: updated)
+    }
+
+    /// Remember a move. The previous id is a tombstone so a list captured
+    /// before the move cannot insert it again. The new id is kept when that
+    /// list does not contain it yet. Both share one epoch.
+    private func notePaneMove(
+        from previousId: AgentID,
+        to newId: AgentID,
+        seqFloor: UInt64,
+        continuesEpisode: Bool
+    ) {
+        herdEpoch += 1
+        if previousId != newId {
+            paneBasis[previousId] = PaneBasis(
+                epoch: herdEpoch,
+                seqFloor: seqFloor,
+                continuesEpisode: false
+            )
+        }
+        paneBasis[newId] = PaneBasis(
+            epoch: herdEpoch,
+            seqFloor: seqFloor,
+            continuesEpisode: continuesEpisode
+        )
+    }
+
     /// Drop a pane an event removed, and keep a snapshot answered before
     /// that event from adding it back.
     private func removeAfterEvent(_ agentId: AgentID, seq: UInt64? = nil) {
@@ -538,8 +671,8 @@ public final class AgentStore {
         noteEventChange(for: agentId, seqFloor: seq ?? Self.seq(after: removed.stateChangeSeq))
     }
 
-    /// Record that an event moved this pane, and that a snapshot requested
-    /// earlier must not paint over it.
+    /// Record that a status or presence event changed this pane, and that a
+    /// snapshot requested earlier must not paint over it.
     private func noteEventChange(for agentId: AgentID, seqFloor: UInt64) {
         herdEpoch += 1
         paneBasis[agentId] = PaneBasis(epoch: herdEpoch, seqFloor: seqFloor, continuesEpisode: true)

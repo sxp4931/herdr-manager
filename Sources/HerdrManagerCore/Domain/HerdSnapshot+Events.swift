@@ -54,15 +54,100 @@ extension HerdSnapshot {
         case .paneClosed(let paneId), .paneExited(let paneId):
             agents.removeAll { $0.id.raw == paneId }
 
-        case .paneMoved(let paneId, let workspaceId, let tabId):
-            if let idx = agents.firstIndex(where: { $0.id.raw == paneId }) {
-                if let ws = workspaceId { agents[idx].workspaceName = workspaceNames[ws] ?? ws }
-                if let tab = tabId { agents[idx].tabName = tabNames[tab] ?? tab }
-            }
+        case .paneMoved(let previousPaneId, let info, let createdWorkspaceLabel, let createdTabLabel):
+            agents = applyingPaneMove(
+                previousPaneId: previousPaneId,
+                info: info,
+                createdWorkspaceLabel: createdWorkspaceLabel,
+                createdTabLabel: createdTabLabel,
+                to: agents,
+                now: now
+            )
 
         case .paneCreated, .paneFocused, .workspacesChanged, .connected, .disconnected, .ignored:
             break
         }
         return agents
+    }
+
+    /// herdmgr's row after `pane_moved`. The id change is the event: the
+    /// live table has no poll, and herdr does not emit close/create, so
+    /// leaving the row on `previousPaneId` drops every later status event.
+    /// A same-status move keeps the dwell. Labels prefer this snapshot,
+    /// then the container the move created.
+    private func applyingPaneMove(
+        previousPaneId: String,
+        info: HerdrAgentInfo,
+        createdWorkspaceLabel: String?,
+        createdTabLabel: String?,
+        to agents: [Agent],
+        now: Date
+    ) -> [Agent] {
+        guard !info.paneId.isEmpty else { return agents }
+        let previousRaw = previousPaneId.isEmpty ? info.paneId : previousPaneId
+        let existing = agents.first { $0.id.raw == previousRaw }
+            ?? (previousRaw == info.paneId ? nil : agents.first { $0.id.raw == info.paneId })
+
+        guard let agentKind = info.agent, !agentKind.isEmpty else {
+            return agents.filter { $0.id.raw != previousRaw && $0.id.raw != info.paneId }
+        }
+
+        let seqIsMeaningful = info.stateChangeSeq != 0
+        let seqBehind = seqIsMeaningful && existing != nil && info.stateChangeSeq < existing!.stateChangeSeq
+        let status = seqBehind
+            ? existing!.status
+            : (AgentStatus(rawValue: info.agentStatus) ?? .unknown)
+        let statusChanged = existing?.status != status
+        let stateChangeSeq: UInt64
+        if seqBehind {
+            stateChangeSeq = existing!.stateChangeSeq
+        } else if seqIsMeaningful {
+            stateChangeSeq = info.stateChangeSeq
+        } else {
+            stateChangeSeq = existing?.stateChangeSeq ?? 0
+        }
+        let kind: AgentKind
+        if let session = info.agentSession {
+            kind = .custom(session.agent)
+        } else {
+            kind = .custom(agentKind)
+        }
+        let name = info.title ?? info.terminalTitleStripped ?? existing?.name ?? agentKind
+        let wsName = labeled(info.workspaceId, in: workspaceNames, created: createdWorkspaceLabel)
+            ?? existing?.workspaceName
+            ?? ""
+        let tabName = labeled(info.tabId, in: tabNames, created: createdTabLabel)
+            ?? existing?.tabName
+            ?? ""
+        let updated = Agent(
+            id: AgentID(info.paneId),
+            kind: kind,
+            name: name,
+            displayName: name,
+            status: status,
+            stateChangeSeq: stateChangeSeq,
+            enteredAt: (existing == nil || statusChanged) ? now : existing!.enteredAt,
+            lastOutputAt: existing?.lastOutputAt,
+            verdict: (existing == nil || statusChanged) ? Self.displayVerdict(for: status, now: now) : existing!.verdict,
+            workspaceName: wsName,
+            tabName: tabName,
+            cwd: info.foregroundCwd ?? info.cwd ?? existing?.cwd ?? ""
+        )
+
+        var kept = agents.filter { row in
+            if previousRaw != info.paneId && row.id.raw == previousRaw { return false }
+            if row.id.raw == info.paneId { return false }
+            return true
+        }
+        let insertAt = agents.firstIndex { $0.id.raw == previousRaw || $0.id.raw == info.paneId } ?? kept.count
+        kept.insert(updated, at: min(insertAt, kept.count))
+        return kept
+    }
+
+    private func labeled(_ id: String, in names: [String: String], created: String?) -> String? {
+        guard !id.isEmpty else { return nil }
+        if let known = names[id], !known.isEmpty { return known }
+        if let created, !created.isEmpty { return created }
+        return id
     }
 }

@@ -770,10 +770,19 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             guard !paneId.isEmpty else { return .ignored }
             return .paneExited(paneId: paneId)
         case "pane_moved":
-            guard !paneId.isEmpty else { return .ignored }
-            let wsId = pane["workspace_id"] as? String ?? data["workspace_id"] as? String
-            let tabId = pane["tab_id"] as? String ?? data["tab_id"] as? String
-            return .paneMoved(paneId: paneId, workspaceId: wsId, tabId: tabId)
+            // Real envelope: previous_pane_id plus the moved PaneInfo. The
+            // new id lives on that pane; a cross-workspace move changes it.
+            // A flat record that only has pane_id is the same pane renamed
+            // in place.
+            let previous = data["previous_pane_id"] as? String ?? ""
+            let info = parseAgentInfo(pane)
+            guard !info.paneId.isEmpty else { return .ignored }
+            return .paneMoved(
+                previousPaneId: previous,
+                pane: info,
+                createdWorkspaceLabel: Self.createdContainerLabel(data["created_workspace"]),
+                createdTabLabel: Self.createdContainerLabel(data["created_tab"])
+            )
         case "workspace_created", "workspace_updated", "workspace_metadata_updated",
              "workspace_closed", "workspace_renamed", "workspace_moved", "workspace_focused",
              "worktree_created", "worktree_opened", "worktree_removed",
@@ -785,6 +794,15 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             // yet — harmless to drop) and any genuinely unknown event.
             return .ignored
         }
+    }
+
+    /// `created_workspace` / `created_tab` on a pane move. The label is what
+    /// the panel should show; the id is already on the moved pane.
+    private static func createdContainerLabel(_ value: Any?) -> String? {
+        guard let dict = value as? [String: Any],
+              let label = dict["label"] as? String,
+              !label.isEmpty else { return nil }
+        return label
     }
 
     /// Shared parser for both `agent.list`'s `AgentInfo` entries and the
