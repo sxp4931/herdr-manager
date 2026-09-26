@@ -1777,4 +1777,166 @@ struct AgentStorePaneMoveTests {
         #expect(store.agents.isEmpty)
         #expect(store.agents[AgentID("wB:p4")] == nil)
     }
+
+    @Test("A seq-less move re-keys, keeps the episode, and does not replace a known label")
+    @MainActor
+    func seqlessMoveKeepsEpisode() throws {
+        // PaneInfo carries no state_change_seq. The payload status is whatever
+        // the pane showed when the event was built, including a replay from
+        // herdr's buffer, so it must not open a new dwell.
+        let store = AgentStore()
+        let seed = store.captureHerdRequest()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 9)
+        ]), requestedAtEpoch: seed.epoch, requestedAtSerial: seed.serial)
+        var agent = try #require(store.agents[AgentID("wA:p1")])
+        let entered = Date(timeIntervalSince1970: 1_700_000_000)
+        agent.enteredAt = entered
+        store.agents[AgentID("wA:p1")] = agent
+
+        let inFlight = store.captureHerdRequest()
+        let move = store.applyEvent(.paneMoved(
+            previousPaneId: "wA:p1",
+            pane: makeAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2",
+                agentStatus: "working", stateChangeSeq: 0, title: "Still Claude"
+            ),
+            createdWorkspaceLabel: "stale",
+            createdTabLabel: "stale-tab"
+        ))
+        #expect(move == nil)
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+        let moved = try #require(store.agents[AgentID("wB:p4")])
+        #expect(moved.status == .blocked)
+        #expect(moved.stateChangeSeq == 9)
+        #expect(moved.enteredAt == entered)
+        #expect(moved.name == "Still Claude")
+        #expect(moved.workspaceName == "Beta")
+        #expect(moved.tabName == "logs")
+        let after = store.captureHerdRequest()
+
+        let stale = store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)
+        ]), requestedAtEpoch: inFlight.epoch, requestedAtSerial: inFlight.serial)
+        #expect(stale.isEmpty)
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+        #expect(store.agents[AgentID("wB:p4")]?.status == .blocked)
+        #expect(store.agents[AgentID("wB:p4")]?.enteredAt == entered)
+
+        let catchUp = store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2",
+                agentStatus: "blocked", stateChangeSeq: 9, title: "Still Claude"
+            )
+        ]), requestedAtEpoch: after.epoch, requestedAtSerial: after.serial)
+        #expect(catchUp.isEmpty)
+        #expect(store.agents[AgentID("wB:p4")]?.status == .blocked)
+        #expect(store.agents[AgentID("wB:p4")]?.stateChangeSeq == 9)
+        #expect(store.agents[AgentID("wB:p4")]?.enteredAt == entered)
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+    }
+
+    @Test("A seq-less move onto the id already shown does not reopen the episode")
+    @MainActor
+    func seqlessMoveOntoCurrentIdKeepsEpisode() throws {
+        let store = AgentStore()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2", agentStatus: "blocked", stateChangeSeq: 9)
+        ]))
+        var agent = try #require(store.agents[AgentID("wB:p4")])
+        let entered = Date(timeIntervalSince1970: 1_700_000_000)
+        agent.enteredAt = entered
+        store.agents[AgentID("wB:p4")] = agent
+
+        let move = store.applyEvent(.paneMoved(
+            previousPaneId: "wA:p1",
+            pane: makeAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2",
+                agentStatus: "working", stateChangeSeq: 0
+            ),
+            createdWorkspaceLabel: "stale",
+            createdTabLabel: "stale-tab"
+        ))
+        #expect(move == nil)
+        let kept = try #require(store.agents[AgentID("wB:p4")])
+        #expect(kept.status == .blocked)
+        #expect(kept.stateChangeSeq == 9)
+        #expect(kept.enteredAt == entered)
+        #expect(kept.workspaceName == "Beta")
+        #expect(kept.tabName == "logs")
+        #expect(store.agents.count == 1)
+    }
+
+    @Test("A seq-less move for an untracked pane does not insert it or its label")
+    @MainActor
+    func seqlessMoveDoesNotInsert() {
+        let store = AgentStore()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p2", agentStatus: "idle", stateChangeSeq: 1)
+        ]))
+        let move = store.applyEvent(.paneMoved(
+            previousPaneId: "wA:p1",
+            pane: makeAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2",
+                agentStatus: "blocked", stateChangeSeq: 0
+            ),
+            createdWorkspaceLabel: "ghost",
+            createdTabLabel: "ghost-tab"
+        ))
+        #expect(move == nil)
+        #expect(store.agents[AgentID("wB:p4")] == nil)
+        #expect(store.agents.count == 1)
+
+        store.applyEvent(.paneUpdated(makeAgentInfo(
+            paneId: "wB:p9", workspaceId: "wB", tabId: "wB:t2",
+            agentStatus: "working", stateChangeSeq: 0
+        )))
+        #expect(store.agents[AgentID("wB:p9")]?.workspaceName == "Beta")
+        #expect(store.agents[AgentID("wB:p9")]?.tabName == "logs")
+    }
+
+    @Test("A seq-less move to a shell still drops the tracked row")
+    @MainActor
+    func seqlessMoveToShellDrops() {
+        let store = AgentStore()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)
+        ]))
+        let move = store.applyEvent(.paneMoved(
+            previousPaneId: "wA:p1",
+            pane: makeAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2",
+                agent: nil, agentStatus: "unknown", stateChangeSeq: 0
+            ),
+            createdWorkspaceLabel: nil,
+            createdTabLabel: nil
+        ))
+        #expect(move == nil)
+        #expect(store.agents.isEmpty)
+    }
+
+    @Test("A seq-less move into a workspace the cache does not know uses the created label")
+    @MainActor
+    func seqlessMoveUsesCreatedLabelWhenCacheIsEmpty() throws {
+        let store = AgentStore()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 2)
+        ]))
+        let move = store.applyEvent(.paneMoved(
+            previousPaneId: "wA:p1",
+            pane: makeAgentInfo(
+                paneId: "wC:p1", workspaceId: "wC", tabId: "wC:t1",
+                agentStatus: "blocked", stateChangeSeq: 0, title: "Claude"
+            ),
+            createdWorkspaceLabel: "proj",
+            createdTabLabel: "scratch"
+        ))
+        #expect(move == nil)
+        let moved = try #require(store.agents[AgentID("wC:p1")])
+        #expect(moved.status == .working)
+        #expect(moved.stateChangeSeq == 2)
+        #expect(moved.workspaceName == "proj")
+        #expect(moved.tabName == "scratch")
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+    }
 }

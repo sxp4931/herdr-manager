@@ -587,8 +587,15 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// `pane.agent_status_changed` per-pane subscription was for. Deliberately
     /// excludes `pane.agent_status_changed`, `pane.scroll_changed`, and
     /// `pane.output_matched`, which the schema requires a `pane_id` for.
+    ///
+    /// `pane.moved` takes no `pane_id` either. herdr emits it instead of
+    /// close/create, and a cross-workspace move assigns a new pane id there.
+    /// The store and herdmgr already re-key on that event; without it in
+    /// this list the event never arrives. Shepherd then keeps the old id
+    /// until the next poll and alerts again for the same block. herdmgr's
+    /// live table has no poll, so the row stays on the old id.
     internal static let globalSubscriptionTypes: [String] = [
-        "pane.updated", "pane.created", "pane.closed",
+        "pane.updated", "pane.created", "pane.closed", "pane.moved",
         "pane.exited", "pane.focused", "pane.agent_detected",
         "workspace.created", "workspace.closed", "workspace.renamed", "workspace.focused",
         "tab.created", "tab.closed", "tab.renamed"

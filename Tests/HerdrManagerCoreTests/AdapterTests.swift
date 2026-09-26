@@ -745,6 +745,14 @@ struct SubscriptionParamsTests {
         #expect(LiveHerdrAdapter.globalSubscriptionTypes.contains("pane.updated"))
         #expect(!LiveHerdrAdapter.globalSubscriptionTypes.isEmpty)
     }
+
+    @Test("pane.moved is subscribed so a cross-workspace id change is delivered")
+    func includesPaneMoved() {
+        // herdr's Subscription::PaneMoved carries no pane_id. Omitting it
+        // leaves the re-key path dead: the move is not a close plus a create.
+        #expect(LiveHerdrAdapter.globalSubscriptionTypes.contains("pane.moved"))
+        #expect(LiveHerdrAdapter.globalSubscriptionTypes.filter { $0 == "pane.moved" }.count == 1)
+    }
 }
 
 // MARK: - agent.focus params (Bug 3)

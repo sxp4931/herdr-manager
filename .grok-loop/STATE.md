@@ -116,6 +116,28 @@ Self-review:
 - A herd read, a `session.snapshot`, a refresh that cannot connect, and a refresh herdr answers with an error, each at serial 4, leave a protocol recorded at serial 5 in place. The failed refresh still returns writes off for that caller. A refresh whose snapshot says 18, after serial 5 recorded 16, returns 16 with writes off. Serial 6's failed refresh does clear to 0. A nil-serial `snapshot()` still replaces whatever the floor is holding, which is the CLI's rule. The previous nil-serial reset tests still describe that rule.
 - Not compiled and not run. No Swift toolchain on this box.
 
+### Pass 6 — subscribe to pane.moved, and treat a seq-less move as a re-key
+
+Pass 3 re-keys a cross-workspace move. The live socket never asked for the event. herdr's `Subscription::PaneMoved` takes no `pane_id` (safe to subscribe globally; the pane-scoped types are still excluded). A move emits `pane.moved` and does not emit close or create. Without the subscription the handler never ran. Shepherd kept the old id until the 3s poll, and that poll saw a new pane, so a blocked agent alerted again and Jump focused the stale id. herdmgr's live table has no poll, so the row stayed on the old id and later status events updated nothing.
+
+`pane.moved` is now in `globalSubscriptionTypes`. The wire `PaneInfo` has no `state_change_seq`, so every real move parses as seq 0. On the protocol-17 baseline herdr also replays the retained event buffer from sequence 0 when a client subscribes (newer herdr starts the cursor at subscribe time). A seq-less move therefore only re-keys a pane the table already has. It keeps that row's status, seq, and dwell, and it does not insert a pane the snapshot never showed. A created workspace or tab label fills the cache only when that id has no name yet, so a replayed label cannot replace one the last snapshot stored. A move back to a shell still drops the tracked row. A non-zero seq keeps the old rules, including a real status change. A list captured before the move still cannot put the old id back.
+
+Why this one: backlog items 1–7 stay deferred. This is the event pass 3 handled and the socket was not delivering. The seq-less rule is what makes subscribing safe on the protocol-17 replay.
+
+Files:
+- `Sources/HerdrManagerCore/Adapter/HerdrAdapter.swift`
+- `Sources/HerdrManagerCore/Store/AgentStore.swift`
+- `Sources/HerdrManagerCore/Domain/HerdSnapshot+Events.swift`
+- `Tests/HerdrManagerCoreTests/AdapterTests.swift`
+- `Tests/HerdrManagerCoreTests/AgentStoreHerdTests.swift`
+- `Tests/HerdrManagerCoreTests/HerdSnapshotEventsTests.swift`
+
+Self-review:
+- Swift 6: no new types, isolation, or macOS APIs. The subscription list is a static `[String]`. The seq check is a local `UInt64` compare on the main-actor store and on `HerdSnapshot`, which is a `Sendable` value type. `if !seqIsMeaningful, let existing` binds the optional `Agent` already in hand. Label-cache writes happen after the untracked-pane return, so an ignored replay does not replace a name the snapshot stored.
+- A seq-less payload that says working, for a blocked row at seq 9, re-keys, keeps blocked, seq 9, and `enteredAt`, and does not alert. The snapshot's name for that workspace wins over the event's created label. A list captured before the move does not restore the old id. The next poll, captured after the move, keeps the dwell. The same payload aimed at an id the store does not have inserts nothing and does not plant the created label. A seq-less move onto the id the snapshot already shows does not reopen the episode. A seq-less move to a shell still removes the row. A seq-less move into a workspace the cache does not know uses the created label and still keeps the stored status.
+- herdmgr: the same seq-less payload re-keys and keeps the dwell; an unknown pane adds no row. A move that also emits `workspace.created` or `tab.created` still resyncs herdmgr before `pane.moved` is read, which resets dwell (backlog 8). Shepherd does not resync on those events, so the move re-keys first.
+- Not compiled and not run. No Swift toolchain on this box.
+
 ## Backlog / ideas
 
 1. A seq-less `pane_updated` that arrives after a poll already applied a newer status still flips the pane. The event carries no seq, so it cannot be told apart from a genuine second prompt. Deferred again: any rule that drops a seq-less status change also drops the live update the subscription exists to deliver. A non-zero seq is already ignored when it is behind the stored one.
@@ -125,6 +147,9 @@ Self-review:
 5. A connect failure on a request that does not pass `readSerial` (`explain`, `pane.read`, `sendKeys`, `prompt`, `focus`, `connect`, and the subscription loop's `clearProtocolReading`) still clears the protocol with a nil serial and does not raise the floor. An in-flight herd read captured earlier can then record the protocol it saw and turn writes back on after that failure. Deferred: those calls sit outside the herd-read counter. Closing it means a serial on every adapter request, including Shepherd's diagnose, peek, and focus paths, or recording the clear on the io queue under an enqueue id. A nil-serial success can no longer do this. MCP herd reads and the write-gate refresh pass serials, and a serial behind the floor is ignored.
 6. Gated `agent.say` reads the pane, then awaits `checkWritesEnabled`, then prompts, with no second read. A status change in that gap still receives the text. Deferred: it is a message, not a key bound to one prompt, and the confirm-tier tools already revalidate immediately before their send.
 7. `HerdrAgentInfo.==` does not compare `agentSession` (`AgentSession` is not `Equatable`). `AnswerSendCheck` uses the fingerprint, not `==`. Deferred: a one-line equality fix is safe only after confirming nothing relies on two sessions in the same pane comparing equal.
+8. herdmgr resets dwell when a move also emits `workspace.created`, `tab.created`, `workspace.closed`, or `tab.closed`. herdr emits those before `pane.moved`, and herdmgr refetches on `workspacesChanged` before it reads the move, so the new id is adopted as a new row. Deferred: keeping the pre-resync rows until the move arrives means recognizing the burst, and holding that list across a later unrelated event would rebuild the table from stale rows. Shepherd does not refetch on those events, so pass 6's re-key runs first there.
+9. A seq-less `pane_moved` does not adopt a status that appears only on that payload. Deferred: `PaneInfo` has no seq, so a live status and a replayed one are the same bytes. Applying the payload status is what made a protocol-17 buffer replay reopen a blocked episode. `pane.updated` and Shepherd's poll still carry status. herdmgr misses a status change that arrived only inside the move until the next `pane_updated`.
+10. A seq-less `pane_moved` with no agent still drops a row whose id matches. A replayed same-id move-to-shell can remove an agent that started in that pane later. Deferred: a live move to a shell has the same shape, and leaving the row would stick in herdmgr. Shepherd's next poll inserts the agent again.
 
 ## Notes
 

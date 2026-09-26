@@ -545,17 +545,33 @@ public final class AgentStore {
         createdWorkspaceLabel: String?,
         createdTabLabel: String?
     ) -> AgentStatusTransition? {
-        if let createdWorkspaceLabel, !info.workspaceId.isEmpty {
-            workspaceNameCache[info.workspaceId] = createdWorkspaceLabel
-        }
-        if let createdTabLabel, !info.tabId.isEmpty {
-            tabNameCache[info.tabId] = createdTabLabel
-        }
         guard !info.paneId.isEmpty else { return nil }
 
         let previousId = AgentID(previousPaneId.isEmpty ? info.paneId : previousPaneId)
         let newId = AgentID(info.paneId)
         let existing = agents[previousId] ?? (previousId == newId ? nil : agents[newId])
+
+        // `PaneInfo` has no `state_change_seq`, so a real `pane_moved`
+        // parses as 0. On the protocol-17 baseline herdr also replays the
+        // retained event buffer at subscribe. That replay must not insert a
+        // pane the snapshot does not have, or replace the episode the
+        // snapshot just established. A live move still re-keys the row we
+        // are tracking. Status changes keep arriving as `pane_updated`.
+        if info.stateChangeSeq == 0 && existing == nil {
+            return nil
+        }
+
+        // A container this move created. Do not replace a name the last
+        // snapshot already stored: a replayed move carries the label from
+        // back then, and a rename since then lives in the cache.
+        if let createdWorkspaceLabel, !info.workspaceId.isEmpty,
+           workspaceNameCache[info.workspaceId] == nil {
+            workspaceNameCache[info.workspaceId] = createdWorkspaceLabel
+        }
+        if let createdTabLabel, !info.tabId.isEmpty,
+           tabNameCache[info.tabId] == nil {
+            tabNameCache[info.tabId] = createdTabLabel
+        }
 
         guard let agentKind = info.agent, !agentKind.isEmpty else {
             if previousId != newId {
@@ -569,17 +585,25 @@ public final class AgentStore {
         // `agent.list` already applied is an older status riding along
         // with the location change; keep the newer status. A higher seq
         // with the same status is still this episode — the move itself
-        // is not a new dwell.
+        // is not a new dwell. A seq of 0 is "not on this event": keep the
+        // stored episode and only change where the row lives.
         let seqIsMeaningful = info.stateChangeSeq != 0
         let seqBehind = seqIsMeaningful && existing != nil && info.stateChangeSeq < existing!.stateChangeSeq
-        let status = seqBehind
-            ? existing!.status
-            : (AgentStatus(rawValue: info.agentStatus) ?? .unknown)
+        let status: AgentStatus
+        if !seqIsMeaningful, let existing {
+            status = existing.status
+        } else if seqBehind {
+            status = existing!.status
+        } else {
+            status = AgentStatus(rawValue: info.agentStatus) ?? .unknown
+        }
         let statusChanged = existing?.status != status
         let enteredAt = (existing == nil || statusChanged) ? Date() : existing!.enteredAt
         let verdict = (existing == nil || statusChanged) ? Self.verdict(for: status) : existing!.verdict
         let stateChangeSeq: UInt64
-        if seqBehind {
+        if !seqIsMeaningful, let existing {
+            stateChangeSeq = existing.stateChangeSeq
+        } else if seqBehind {
             stateChangeSeq = existing!.stateChangeSeq
         } else if seqIsMeaningful {
             stateChangeSeq = info.stateChangeSeq

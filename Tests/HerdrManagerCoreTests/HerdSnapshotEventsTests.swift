@@ -199,6 +199,59 @@ struct HerdSnapshotEventsTests {
         #expect(rows[0].enteredAt == entered)
     }
 
+    @Test("A seq-less pane_moved re-keys and keeps status when the payload disagrees")
+    func seqlessMoveKeepsStatus() {
+        let entered = Date(timeIntervalSince1970: 1_700_000_000)
+        let row = Agent(
+            id: AgentID("wA:p1"),
+            kind: .custom("claude"),
+            name: "Claude",
+            displayName: "Claude",
+            status: .blocked,
+            stateChangeSeq: 9,
+            enteredAt: entered,
+            verdict: .healthy,
+            workspaceName: "Cuedora",
+            tabName: "main"
+        )
+        let rows = labels.applying(
+            .paneMoved(
+                previousPaneId: "wA:p1",
+                pane: makeEventAgentInfo(
+                    paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                    agentStatus: "working", stateChangeSeq: 0
+                ),
+                createdWorkspaceLabel: "proj",
+                createdTabLabel: "scratch"
+            ),
+            to: [row],
+            now: now
+        )
+        #expect(rows.map(\.id.raw) == ["wB:p4"])
+        guard let moved = rows.first else { return }
+        #expect(moved.status == .blocked)
+        #expect(moved.stateChangeSeq == 9)
+        #expect(moved.enteredAt == entered)
+        #expect(moved.workspaceName == "proj")
+        #expect(moved.tabName == "scratch")
+    }
+
+    @Test("A seq-less pane_moved for an unknown pane adds no row")
+    func seqlessMoveUnknownAddsNothing() {
+        let other = Agent(id: AgentID("wA:p2"), status: .idle)
+        let rows = labels.applying(
+            .paneMoved(
+                previousPaneId: "wA:p1",
+                pane: makeEventAgentInfo(paneId: "wB:p4", agentStatus: "blocked"),
+                createdWorkspaceLabel: nil,
+                createdTabLabel: nil
+            ),
+            to: [other],
+            now: now
+        )
+        #expect(rows.map(\.id.raw) == ["wA:p2"])
+    }
+
     @Test("pane_moved to a shell drops the row")
     func paneMovedToShellDrops() {
         let row = Agent(id: AgentID("wA:p1"), status: .working)

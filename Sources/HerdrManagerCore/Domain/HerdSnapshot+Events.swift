@@ -88,18 +88,33 @@ extension HerdSnapshot {
         let existing = agents.first { $0.id.raw == previousRaw }
             ?? (previousRaw == info.paneId ? nil : agents.first { $0.id.raw == info.paneId })
 
+        // Same rule as `AgentStore.applyPaneMove`. The wire event has no
+        // seq. Re-key a row we already show; do not invent one, and do not
+        // open a new dwell from the status riding along on the move.
+        // herdmgr has no poll, so a replayed move would otherwise stick.
+        if info.stateChangeSeq == 0 && existing == nil {
+            return agents
+        }
+
         guard let agentKind = info.agent, !agentKind.isEmpty else {
             return agents.filter { $0.id.raw != previousRaw && $0.id.raw != info.paneId }
         }
 
         let seqIsMeaningful = info.stateChangeSeq != 0
         let seqBehind = seqIsMeaningful && existing != nil && info.stateChangeSeq < existing!.stateChangeSeq
-        let status = seqBehind
-            ? existing!.status
-            : (AgentStatus(rawValue: info.agentStatus) ?? .unknown)
+        let status: AgentStatus
+        if !seqIsMeaningful, let existing {
+            status = existing.status
+        } else if seqBehind {
+            status = existing!.status
+        } else {
+            status = AgentStatus(rawValue: info.agentStatus) ?? .unknown
+        }
         let statusChanged = existing?.status != status
         let stateChangeSeq: UInt64
-        if seqBehind {
+        if !seqIsMeaningful, let existing {
+            stateChangeSeq = existing.stateChangeSeq
+        } else if seqBehind {
             stateChangeSeq = existing!.stateChangeSeq
         } else if seqIsMeaningful {
             stateChangeSeq = info.stateChangeSeq
