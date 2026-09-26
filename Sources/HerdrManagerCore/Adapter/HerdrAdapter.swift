@@ -29,6 +29,12 @@ public extension HerdrAdapter {
 
 // MARK: - LiveHerdrAdapter
 
+/// Epoch issued for one socket call. Written on the calling task before
+/// that call suspends, and read only after it resumes.
+private final class ProtocolEpochBox: @unchecked Sendable {
+    var value: UInt64 = 0
+}
+
 /// Two sockets, by design. `reqClient` carries request/response traffic
 /// (snapshot, explain, reads, writes) — one short transaction at a time,
 /// serialized inside the client. `subClient` is dedicated to the long-lived
@@ -51,6 +57,13 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// can finish before an earlier one; the earlier result must not put
     /// the write gate back on the protocol it saw.
     private var _herdReadSerialFloor: UInt64 = 0
+    /// Last enqueue id issued. The floor below is the highest one whose
+    /// protocol update was kept.
+    private var _nextProtocolEpoch: UInt64 = 0
+    /// `explain`, `pane.read`, `sendKeys`, and the subscription drop have
+    /// no herd-read serial. They clear under an epoch, so a herd read that
+    /// started earlier cannot turn writes back on.
+    private var _protocolEpochFloor: UInt64 = 0
     private var eventContinuation: AsyncStream<HerdrEvent>.Continuation?
     private let eventStream: AsyncStream<HerdrEvent>
     private var eventLoopTask: Task<Void, Never>?
@@ -76,15 +89,27 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// hung herdr surfaces as `.timeout` rather than blocking indefinitely.
     ///
     /// `readSerial` is the capture id of the herd read this transaction
-    /// belongs to. A connect failure clears the protocol under that serial,
-    /// so an earlier read whose continuation runs last cannot wipe a later
-    /// reading. Callers that omit it still clear unconditionally.
+    /// belongs to. A connect failure clears the protocol under that serial
+    /// and under the epoch issued as the work is enqueued. A read that
+    /// started earlier cannot put its protocol back after that clear, even
+    /// when it has no serial of its own. `epochBox` receives that epoch
+    /// before this call suspends, so a caller that records the protocol
+    /// after a success uses the same id.
     private func onIO<T: Sendable>(
         readSerial: UInt64? = nil,
+        epochBox: ProtocolEpochBox? = nil,
         _ body: @escaping @Sendable () throws -> T
     ) async throws -> T {
+        let box = epochBox ?? ProtocolEpochBox()
         do {
             return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+                // The epoch and the enqueue share this lock. `async` returns
+                // before the block runs, so the lock is not held across the
+                // socket call, and a higher epoch cannot run first.
+                stateLock.lock()
+                defer { stateLock.unlock() }
+                let epoch = nextProtocolEpochLocked()
+                box.value = epoch
                 ioQueue.async {
                     do {
                         continuation.resume(returning: try body())
@@ -97,10 +122,25 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             // herdr is not accepting connections: it stopped or is restarting,
             // and whatever answers next may be a different build.
             if case .connectFailed = error {
-                setLatestProtocol(0, readSerial: readSerial)
+                recordProtocol(0, readSerial: readSerial, epoch: box.value)
             }
             throw error
         }
+    }
+
+    /// Caller holds `stateLock`.
+    private func nextProtocolEpochLocked() -> UInt64 {
+        _nextProtocolEpoch += 1
+        return _nextProtocolEpoch
+    }
+
+    /// Id of one protocol update, in enqueue order. A test stands in for a
+    /// request that has already started by issuing its epoch here and
+    /// passing it to `setLatestProtocol`.
+    func issueProtocolEpoch() -> UInt64 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return nextProtocolEpochLocked()
     }
 
     public var connectionState: HerdrConnectionState {
@@ -119,21 +159,37 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// without a live herdr.
     ///
     /// `readSerial` orders overlapping herd reads. A serial behind one
-    /// already recorded is ignored. Callers that omit it always record:
-    /// the CLI, a connect failure on a request that is not part of the
-    /// ordering, and the subscription loop forgetting the reading when
-    /// the event stream drops. Shepherd, MCP herd reads, and MCP's
-    /// write-gate refresh pass the serial captured before the request.
-    func setLatestProtocol(_ version: Int, readSerial: UInt64? = nil) {
+    /// already recorded is ignored. Omit it and the serial gate stays
+    /// open: the CLI's snapshot has no serial and still records.
+    ///
+    /// `epoch` orders every request, including one with no serial. An
+    /// epoch behind one already recorded is ignored. Request paths pass
+    /// the id `onIO` issued at enqueue. Omit it only when a test seeds
+    /// the serial gate: a nil epoch does not move the epoch floor and
+    /// does not lose to it.
+    func setLatestProtocol(_ version: Int, readSerial: UInt64? = nil, epoch: UInt64? = nil) {
         stateLock.lock()
         defer { stateLock.unlock() }
         if let readSerial, readSerial < _herdReadSerialFloor {
             return
         }
+        if let epoch, epoch < _protocolEpochFloor {
+            return
+        }
         if let readSerial {
             _herdReadSerialFloor = readSerial
         }
+        if let epoch {
+            _protocolEpochFloor = epoch
+        }
         _latestProtocolVersion = version
+    }
+
+    /// `epoch` 0 means the enqueue did not run. Recording without an epoch
+    /// would skip the floor, so that update is dropped.
+    private func recordProtocol(_ version: Int, readSerial: UInt64?, epoch: UInt64) {
+        guard epoch > 0 else { return }
+        setLatestProtocol(version, readSerial: readSerial, epoch: epoch)
     }
 
     private func latestProtocol() -> Int {
@@ -147,8 +203,13 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// reading could send a write to a herdr that no longer supports it.
     /// 0 reads as "protocol unknown" (writes off) until the next snapshot,
     /// which is also what makes the MCP write gate re-read it.
-    private func clearProtocolReading() {
-        setLatestProtocol(0)
+    ///
+    /// The epoch is issued here, so it sits after every request already
+    /// enqueued and before every request not yet started. An in-flight
+    /// herd read cannot put the old protocol back.
+    func clearProtocolReading() {
+        let epoch = issueProtocolEpoch()
+        setLatestProtocol(0, epoch: epoch)
     }
 
     public func connect() async throws {
@@ -165,13 +226,20 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     ///
     /// The zero-argument form is the `HerdrAdapter` requirement and always
     /// records. A serial behind one already recorded still returns this
-    /// snapshot and leaves the write gate on the newer reading.
+    /// snapshot and leaves the write gate on the newer reading. The epoch
+    /// issued for the socket call is recorded either way, so a snapshot
+    /// that started earlier cannot overwrite this one.
     public func snapshot(readSerial: UInt64?) async throws -> HerdrSnapshot {
-        let snap = try await onIO(readSerial: readSerial) { [reqClient] in
+        try await snapshot(readSerial: readSerial, epochBox: nil)
+    }
+
+    private func snapshot(readSerial: UInt64?, epochBox: ProtocolEpochBox?) async throws -> HerdrSnapshot {
+        let box = epochBox ?? ProtocolEpochBox()
+        let snap = try await onIO(readSerial: readSerial, epochBox: box) { [reqClient] in
             let result = try reqClient.sendRead(method: "session.snapshot", params: [:])
             return try LiveHerdrAdapter.parseSnapshot(result)
         }
-        setLatestProtocol(snap.protocol, readSerial: readSerial)
+        recordProtocol(snap.protocol, readSerial: readSerial, epoch: box.value)
         return snap
     }
 
@@ -460,9 +528,12 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// one that followed a herdr restart — has already been recorded. The
     /// same serial covers a connect failure: `onIO` clears the reading
     /// under it, and a serial behind one already recorded leaves the later
-    /// reading in place. Omit it when there is only one reader.
+    /// reading in place. The enqueue epoch covers a connect failure on a
+    /// call that has no serial (`explain`, `pane.read`, `sendKeys`). Omit
+    /// the serial when there is only one reader.
     public func herdSnapshot(readSerial: UInt64? = nil) async throws -> HerdSnapshot {
-        let result = try await onIO(readSerial: readSerial) { [reqClient] in
+        let epochBox = ProtocolEpochBox()
+        let result = try await onIO(readSerial: readSerial, epochBox: epochBox) { [reqClient] in
             let agentsResult = try reqClient.sendRead(method: "agent.list", params: [:])
             let agents = LiveHerdrAdapter.parseAgentList(agentsResult)
 
@@ -483,7 +554,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                 focusedPaneId: snap.focusedPaneId
             )
         }
-        setLatestProtocol(result.protocol, readSerial: readSerial)
+        recordProtocol(result.protocol, readSerial: readSerial, epoch: epochBox.value)
         return result
     }
 
@@ -898,12 +969,16 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// stored gate, and a success returns that gate rather than the protocol
     /// this response happened to carry: a slower earlier refresh must not
     /// enable writes after a later read saw a downgrade or a dead socket.
+    /// The snapshot's enqueue epoch does the same when this refresh has no
+    /// serial. The failure records under the epoch the attempt started
+    /// with, so a read that started later and already won is left alone.
     public func refreshHealth(readSerial: UInt64? = nil) async -> AdapterHealth {
+        let epochBox = ProtocolEpochBox()
         do {
-            _ = try await snapshot(readSerial: readSerial)
+            _ = try await snapshot(readSerial: readSerial, epochBox: epochBox)
             return health()
         } catch {
-            setLatestProtocol(0, readSerial: readSerial)
+            recordProtocol(0, readSerial: readSerial, epoch: epochBox.value)
             let unknown = Self.health(forProtocol: 0)
             return AdapterHealth(
                 protocolVersion: unknown.protocolVersion,

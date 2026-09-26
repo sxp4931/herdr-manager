@@ -1310,6 +1310,123 @@ struct ProtocolReadingResetTests {
         #expect(!health.writesEnabled)
         #expect(adapter.health().protocolVersion == 16)
     }
+
+    @Test("A herd snapshot records its enqueue epoch, so an earlier one cannot replace it")
+    func herdSnapshotRecordsEnqueueEpoch() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(17))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        let earlier = adapter.issueProtocolEpoch()
+
+        _ = try await adapter.herdSnapshot()
+        #expect(adapter.health().protocolVersion == 17)
+
+        // A read that was already in flight when this snapshot started.
+        adapter.setLatestProtocol(18, readSerial: 9, epoch: earlier)
+        #expect(adapter.health().protocolVersion == 17)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("A session snapshot records its enqueue epoch, so an earlier one cannot replace it")
+    func snapshotRecordsEnqueueEpoch() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(17))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        let earlier = adapter.issueProtocolEpoch()
+
+        _ = try await adapter.snapshot()
+        #expect(adapter.health().protocolVersion == 17)
+
+        adapter.setLatestProtocol(18, epoch: earlier)
+        #expect(adapter.health().protocolVersion == 17)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("A pane read that cannot connect is not undone by an earlier herd read")
+    func paneReadConnectFailureIsNotUndoneByAnEarlierEpoch() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        let earlier = adapter.issueProtocolEpoch()
+        adapter.setLatestProtocol(17, readSerial: 9, epoch: earlier)
+        #expect(adapter.health().writesEnabled)
+
+        do {
+            _ = try await adapter.read(paneId: "w1:p1", source: .visible)
+            Issue.record("Expected the read to fail with no herdr listening")
+        } catch {
+            #expect(error is NDJSONClientError)
+        }
+
+        #expect(adapter.health().protocolVersion == 0)
+        #expect(!adapter.health().writesEnabled)
+
+        // The in-flight herd read had a newer serial and no reason to lose
+        // on that gate. It still must not turn writes back on: it started
+        // before the socket refused the read.
+        adapter.setLatestProtocol(17, readSerial: 10, epoch: earlier)
+        #expect(adapter.health().protocolVersion == 0)
+
+        let later = adapter.issueProtocolEpoch()
+        adapter.setLatestProtocol(17, readSerial: 11, epoch: later)
+        #expect(adapter.health().protocolVersion == 17)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("An earlier connect failure does not wipe a protocol recorded later")
+    func earlierEpochDoesNotWipeANewerProtocol() {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        let earlier = adapter.issueProtocolEpoch()
+        let later = adapter.issueProtocolEpoch()
+        adapter.setLatestProtocol(18, readSerial: 4, epoch: later)
+
+        adapter.setLatestProtocol(0, epoch: earlier)
+        #expect(adapter.health().protocolVersion == 18)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("A dropped subscription is not undone by a herd read that already started")
+    func droppedSubscriptionIsNotUndoneByAnEarlierEpoch() {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        let earlier = adapter.issueProtocolEpoch()
+        adapter.setLatestProtocol(17, readSerial: 4, epoch: earlier)
+        #expect(adapter.health().writesEnabled)
+
+        adapter.clearProtocolReading()
+        #expect(adapter.health().protocolVersion == 0)
+        #expect(!adapter.health().writesEnabled)
+
+        adapter.setLatestProtocol(17, readSerial: 8, epoch: earlier)
+        #expect(adapter.health().protocolVersion == 0)
+
+        let later = adapter.issueProtocolEpoch()
+        adapter.setLatestProtocol(16, epoch: later)
+        #expect(adapter.health().protocolVersion == 16)
+        #expect(!adapter.health().writesEnabled)
+    }
+
+    @Test("A refresh herdr answers with an error is not undone by an earlier read")
+    func refreshErrorIsNotUndoneByAnEarlierEpoch() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .error("snapshot unavailable"))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        let earlier = adapter.issueProtocolEpoch()
+        adapter.setLatestProtocol(17, readSerial: 2, epoch: earlier)
+
+        let health = await adapter.refreshHealth()
+        #expect(!health.writesEnabled)
+        #expect(health.reason?.contains("snapshot unavailable") == true)
+        #expect(adapter.health().protocolVersion == 0)
+
+        // Nil serial, and a serial newer than the one this refresh carried.
+        // Neither is allowed to put protocol 17 back: the refresh started
+        // after that reading.
+        adapter.setLatestProtocol(17, epoch: earlier)
+        adapter.setLatestProtocol(17, readSerial: 9, epoch: earlier)
+        #expect(adapter.health().protocolVersion == 0)
+        #expect(!adapter.health().writesEnabled)
+    }
 }
 
 @Suite("Subscription line decode failures")
