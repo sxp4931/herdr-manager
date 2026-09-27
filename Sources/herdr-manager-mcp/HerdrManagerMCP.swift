@@ -893,7 +893,9 @@ actor MCPServer {
             }
 
             let status = paneInfo.agentStatus
-            let tier: AuthorityTier = (status == "idle" || status == "done") ? .gated : .confirm
+            // Idle and done auto-send. The gated path re-reads before the
+            // text, because `prompt` also submits Enter.
+            let tier: AuthorityTier = GatedSayFollow.acceptsAutoSend(status: status) ? .gated : .confirm
 
             // Does not take the slot. A confirm-tier say still has the
             // approval wait ahead of it; the send reserves.
@@ -1015,41 +1017,83 @@ actor MCPServer {
                 }
             }
 
-            // Gated tier: auto-allowed. The check above did not take
-            // the slot, and the write gate is an await.
-            if let error = await checkWritesEnabled() { return error }
+            // Gated tier: auto-allowed for idle and done. The check above
+            // did not take the slot, and it awaited the policy actor.
+            // `prompt` submits Enter, so address a list taken after that
+            // await. A move follows the session. A status that left idle
+            // or done, or a different occupant, sends nothing and does not
+            // take a slot. This list records the protocol, and the gate is
+            // read from it before the slot is taken.
+            let fresh = try await readHerd()
+            let confirmed: HerdrAgentInfo
+            switch GatedSayFollow.resolve(previous: paneInfo, in: fresh.agents) {
+            case .success(let info):
+                let health = adapter.health()
+                if !health.writesEnabled {
+                    return makeToolError(
+                        "Writes not enabled: \(health.reason ?? "herdr protocol not verified for writes"). No input sent."
+                    )
+                }
+                confirmed = info
+            case .failure(.agentGone):
+                return makeToolError("Agent not found: \(agentIdStr). No input sent.")
+            case .failure(.occupantChanged):
+                return makeToolError("Pane occupant changed before send. No input sent.")
+            case .failure(.noLongerAuto(let pane, let now)):
+                return makeToolError(
+                    "Agent \(pane) is \(now), so this say needs confirmation. No input sent."
+                )
+            }
             let reserved = await policy.reserveWrite(
-                agentId: agentIdStr,
+                agentId: confirmed.paneId,
                 tier: .gated,
-                sessionIdentity: paneInfo.sessionIdentity
+                sessionIdentity: confirmed.sessionIdentity
             )
             if let error = policyDenial(reserved) { return error }
-            try await adapter.prompt(paneId: paneId, text: text)
+            try await adapter.prompt(paneId: confirmed.paneId, text: text)
 
+            let addressed = Self.addressedParams(
+                requested: agentIdStr,
+                resolved: confirmed.paneId,
+                extra: ["text_length": "\(text.count)"]
+            )
             var params: [String: String] = [
                 "agent_id": agentIdStr,
                 "text": redactor.redact(String(text.prefix(100))).redactedText
             ]
-            params["_fp_occupant"] = fpOccupant
-            params["_fp_status"] = fpStatus
-            params["_fp_seq"] = "\(fpSeq)"
+            if confirmed.paneId != agentIdStr {
+                params["resolved_agent_id"] = confirmed.paneId
+            }
+            params["_fp_occupant"] = occupantFingerprint(from: confirmed)
+            params["_fp_status"] = confirmed.agentStatus
+            params["_fp_seq"] = "\(confirmed.stateChangeSeq)"
 
             let actionId = await actionStore.create(tool: "agent.say", params: params)
             await actionStore.markExecuted(actionId)
 
             await journal.record(JournalEntry(
                 actionId: actionId, tool: "agent.say",
-                params: ["agent_id": agentIdStr, "text_length": "\(text.count)"],
-                caller: "mcp", preState: "status=\(status), seq=\(fpSeq)",
+                params: addressed,
+                caller: "mcp",
+                preState: "status=\(confirmed.agentStatus), seq=\(confirmed.stateChangeSeq)",
                 postState: "sent", outcome: "executed"
             ))
 
+            let resolvedField = confirmed.paneId == agentIdStr
+                ? ""
+                : ",\"resolvedAgentId\":\"\(confirmed.paneId)\""
             if let waitFor = arguments["wait_for"] as? String {
                 let timeoutMs = JSONNumber.int(arguments["timeout_ms"]) ?? 30000
-                let settled = try await adapter.waitStatus(paneId: paneId, until: [waitFor], timeoutMs: timeoutMs)
-                return makeToolResult("{\"sent\":true,\"actionId\":\"\(actionId)\",\"outcome\":\"\(settled ? "settled" : "timeout")\"}")
+                let settled = try await adapter.waitStatus(
+                    paneId: confirmed.paneId, until: [waitFor], timeoutMs: timeoutMs
+                )
+                return makeToolResult(
+                    "{\"sent\":true,\"actionId\":\"\(actionId)\",\"outcome\":\"\(settled ? "settled" : "timeout")\"\(resolvedField)}"
+                )
             }
-            return makeToolResult("{\"sent\":true,\"actionId\":\"\(actionId)\",\"outcome\":\"sent\"}")
+            return makeToolResult(
+                "{\"sent\":true,\"actionId\":\"\(actionId)\",\"outcome\":\"sent\"\(resolvedField)}"
+            )
         } catch {
             return makeToolError("agent.say failed: \(error.localizedDescription)")
         }

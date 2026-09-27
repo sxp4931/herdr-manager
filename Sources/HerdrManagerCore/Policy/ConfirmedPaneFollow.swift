@@ -137,3 +137,75 @@ public enum ConfirmedPaneFollow: Sendable {
         return true
     }
 }
+
+// MARK: - GatedSayFollow
+
+/// Where an auto-allowed `agent.say` goes after the write-gate re-read.
+///
+/// MCP sends that say with `prompt`, which writes the text and then Enter.
+/// The tier was chosen from an earlier `agent.list`: idle or done, so no
+/// person confirms it. The policy check after that list awaits. A
+/// cross-workspace move in that gap leaves the old pane id empty or
+/// occupied by someone else, and a block that appears there would receive
+/// the Enter.
+///
+/// The confirming list is the one that is addressed. The original pane
+/// wins when it still runs the same occupant. A different occupant refuses,
+/// even when the old session is also sitting on another pane. When the
+/// original pane is no longer an agent, the message follows a unique
+/// session. Status and seq are not an episode lock for that hop — a move
+/// that is still idle or done is the same request — but the pane that is
+/// addressed has to still be idle or done. Working and blocked take the
+/// confirm tier, and Enter must not reach them on the auto path. An empty
+/// session value does not follow a pane that left.
+public enum GatedSayFollow: Sendable {
+
+    public enum Refusal: Equatable, Sendable {
+        case agentGone
+        case occupantChanged
+        /// The pane that would be addressed is no longer idle or done.
+        case noLongerAuto(paneId: String, status: String)
+    }
+
+    /// Idle and done are the statuses an `agent.say` may send without a
+    /// person. The MCP tier and this re-read both use it, so the two cannot
+    /// drift. `prompt` submits Enter; every other status waits.
+    public static func acceptsAutoSend(status: String) -> Bool {
+        status == AgentStatus.idle.rawValue || status == AgentStatus.done.rawValue
+    }
+
+    /// The pane the auto-send should address, or why it should not.
+    public static func resolve(
+        previous: HerdrAgentInfo,
+        in agents: [HerdrAgentInfo]
+    ) -> Result<HerdrAgentInfo, Refusal> {
+        guard !previous.paneId.isEmpty else { return .failure(.agentGone) }
+
+        let target: HerdrAgentInfo
+        if let current = agents.first(where: { $0.paneId == previous.paneId && isAgent($0) }) {
+            guard current.occupantFingerprint == previous.occupantFingerprint else {
+                return .failure(.occupantChanged)
+            }
+            target = current
+        } else if let session = previous.sessionIdentity,
+                  let successor = ConfirmedPaneFollow.uniqueSuccessor(
+                    sessionIdentity: session,
+                    excluding: previous.paneId,
+                    in: agents
+                  ) {
+            target = successor
+        } else {
+            return .failure(.agentGone)
+        }
+
+        guard acceptsAutoSend(status: target.agentStatus) else {
+            return .failure(.noLongerAuto(paneId: target.paneId, status: target.agentStatus))
+        }
+        return .success(target)
+    }
+
+    private static func isAgent(_ info: HerdrAgentInfo) -> Bool {
+        guard let agent = info.agent, !agent.isEmpty else { return false }
+        return true
+    }
+}

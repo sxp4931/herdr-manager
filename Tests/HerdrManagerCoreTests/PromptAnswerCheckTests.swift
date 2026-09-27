@@ -539,3 +539,132 @@ struct ConfirmedPaneFollowTests {
         )
     }
 }
+
+@Suite("A gated say follows the session and stays idle or done")
+struct GatedSayFollowTests {
+
+    private func resolve(
+        _ observed: HerdrAgentInfo,
+        in agents: [HerdrAgentInfo]
+    ) -> Result<HerdrAgentInfo, GatedSayFollow.Refusal> {
+        GatedSayFollow.resolve(previous: observed, in: agents)
+    }
+
+    @Test("Only idle and done auto-send")
+    func autoStatuses() {
+        #expect(GatedSayFollow.acceptsAutoSend(status: "idle"))
+        #expect(GatedSayFollow.acceptsAutoSend(status: "done"))
+        #expect(!GatedSayFollow.acceptsAutoSend(status: "working"))
+        #expect(!GatedSayFollow.acceptsAutoSend(status: "blocked"))
+        #expect(!GatedSayFollow.acceptsAutoSend(status: "unknown"))
+    }
+
+    @Test("The same occupant still idle or done receives the text, including a new seq")
+    func sameOccupantStillAuto() {
+        let idle = info(status: "idle", seq: 4, session: session("abc"))
+        let later = info(status: "idle", seq: 9, session: session("abc"), title: "renamed")
+        #expect(resolve(idle, in: [later]) == .success(later))
+
+        let done = info(status: "done", seq: 4, session: session("abc"))
+        let finished = info(status: "idle", seq: 4, session: session("abc"))
+        #expect(resolve(done, in: [finished]) == .success(finished))
+    }
+
+    @Test("A status that left idle or done refuses, and a different occupant refuses first")
+    func statusOrOccupantRefuses() {
+        let idle = info(status: "idle", seq: 4, session: session("abc"))
+        #expect(
+            resolve(idle, in: [info(status: "working", seq: 5, session: session("abc"))])
+                == .failure(.noLongerAuto(paneId: paneId, status: "working"))
+        )
+        #expect(
+            resolve(idle, in: [info(status: "blocked", seq: 5, session: session("abc"))])
+                == .failure(.noLongerAuto(paneId: paneId, status: "blocked"))
+        )
+
+        let replaced = info(status: "blocked", seq: 4, session: session("xyz"))
+        let elsewhere = info(pane: "wB:p4", status: "idle", seq: 4, session: session("abc"))
+        #expect(resolve(idle, in: [replaced, elsewhere]) == .failure(.occupantChanged))
+    }
+
+    @Test("A unique session that is still idle receives the text on its new pane")
+    func followsIdleSession() {
+        let idle = info(status: "idle", seq: 4, session: session("abc"))
+        let moved = info(pane: "wB:p4", status: "idle", seq: 8, session: session("abc"), title: "renamed")
+        let resolved = resolve(idle, in: [moved])
+        #expect(resolved == .success(moved))
+        if case .success(let followed) = resolved {
+            #expect(followed.sessionIdentity == "agent|claude|session|abc")
+            #expect(followed.paneId == "wB:p4")
+        }
+
+        let done = info(status: "done", seq: 4, session: session("abc"))
+        let movedDone = info(pane: "wB:p4", status: "done", seq: 4, session: session("abc"))
+        #expect(resolve(done, in: [movedDone]) == .success(movedDone))
+    }
+
+    @Test("A moved session that is working or blocked does not receive Enter")
+    func movedOffAutoRefuses() {
+        let idle = info(status: "idle", seq: 4, session: session("abc"))
+        #expect(
+            resolve(idle, in: [info(pane: "wB:p4", status: "blocked", seq: 4, session: session("abc"))])
+                == .failure(.noLongerAuto(paneId: "wB:p4", status: "blocked"))
+        )
+        #expect(
+            resolve(idle, in: [info(pane: "wB:p4", status: "working", seq: 4, session: session("abc"))])
+                == .failure(.noLongerAuto(paneId: "wB:p4", status: "working"))
+        )
+    }
+
+    @Test("A shell left at the old id does not hide the idle successor")
+    func shellFollows() {
+        let idle = info(status: "idle", seq: 4, session: session("abc"))
+        let shell = info(agent: "", status: "unknown", seq: 0, session: session("abc"))
+        let moved = info(pane: "wB:p4", status: "idle", seq: 4, session: session("abc"))
+        #expect(resolve(idle, in: [shell, moved]) == .success(moved))
+    }
+
+    @Test("Two successors, a missing session, and a longer session value do not follow")
+    func ambiguousDoesNotFollow() {
+        let idle = info(status: "idle", seq: 4, session: session("abc"))
+        #expect(
+            resolve(idle, in: [
+                info(pane: "wB:p4", status: "idle", seq: 4, session: session("abc")),
+                info(pane: "wC:p8", status: "idle", seq: 4, session: session("abc")),
+            ]) == .failure(.agentGone)
+        )
+        #expect(resolve(idle, in: []) == .failure(.agentGone))
+
+        let fallback = info(agent: "codex", status: "idle", seq: 2, title: "Review")
+        let other = info(pane: "wB:p4", agent: "codex", status: "idle", seq: 2, title: "Review")
+        #expect(resolve(fallback, in: [other]) == .failure(.agentGone))
+
+        let renamed = info(agent: "codex", status: "idle", seq: 2, title: "Other")
+        #expect(resolve(fallback, in: [renamed]) == .failure(.occupantChanged))
+
+        let empty = info(status: "idle", seq: 4, session: session(""))
+        #expect(
+            resolve(empty, in: [info(pane: "wB:p4", status: "idle", seq: 4, session: session(""))])
+                == .failure(.agentGone)
+        )
+
+        let longer = info(pane: "wB:p4", status: "idle", seq: 4, session: session("abc|extra"))
+        #expect(resolve(idle, in: [longer]) == .failure(.agentGone))
+
+        let withBar = session("abc|def")
+        let observed = info(status: "idle", seq: 4, session: withBar)
+        let moved = info(pane: "wB:p4", status: "idle", seq: 4, session: withBar)
+        #expect(resolve(observed, in: [moved]) == .success(moved))
+    }
+
+    @Test("A re-read that drops the session, and an empty pane id, refuse")
+    func omittedSessionAndEmptyPane() {
+        let idle = info(status: "idle", seq: 4, session: session("abc"))
+        let omitted = info(status: "idle", seq: 4)
+        #expect(resolve(idle, in: [omitted]) == .failure(.occupantChanged))
+        #expect(
+            GatedSayFollow.resolve(previous: info(pane: "", status: "idle", seq: 1), in: [idle])
+                == .failure(.agentGone)
+        )
+    }
+}
