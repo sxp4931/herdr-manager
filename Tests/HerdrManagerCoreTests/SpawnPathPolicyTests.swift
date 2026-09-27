@@ -155,3 +155,73 @@ struct SpawnPathPolicyPathTests {
         #expect(result, "Exact match of allowed root should be accepted")
     }
 }
+
+@Suite("Spawn brief")
+struct SpawnBriefTests {
+
+    @Test("Idle, working, and done may receive the brief")
+    func sendsIntoALiveAgent() {
+        #expect(SpawnBrief.readyStatuses == ["idle", "working", "done"])
+        #expect(!SpawnBrief.readyStatuses.contains("blocked"))
+        #expect(SpawnBrief.wakeStatuses == ["idle", "working", "done", "blocked"])
+        for status in SpawnBrief.readyStatuses {
+            #expect(SpawnBrief.outcome(brief: "fix the tests", status: status) == .send)
+        }
+    }
+
+    @Test("A block does not receive Enter")
+    func withholdsOnABlock() {
+        #expect(SpawnBrief.outcome(brief: "fix the tests", status: "blocked") == .withhold(status: "blocked"))
+        #expect(SpawnBrief.outcome(brief: " ", status: "blocked") == .withhold(status: "blocked"))
+        #expect(SpawnBrief.outcome(brief: "fix the tests", status: "unknown") == .withhold(status: "unknown"))
+        #expect(SpawnBrief.outcome(brief: "fix the tests", status: nil) == .withhold(status: ""))
+        #expect(SpawnBrief.outcome(brief: "fix the tests", status: "Blocked") == .withhold(status: "Blocked"))
+    }
+
+    @Test("No brief is not a withhold")
+    func absentBrief() {
+        #expect(!SpawnBrief.isRequested(nil))
+        #expect(!SpawnBrief.isRequested(""))
+        #expect(SpawnBrief.isRequested(" "))
+        #expect(SpawnBrief.outcome(brief: nil, status: "blocked") == .none)
+        #expect(SpawnBrief.outcome(brief: "", status: "working") == .none)
+        #expect(SpawnBrief.resultFields(for: .none) == "")
+        #expect(SpawnBrief.journalPostState(for: .none) == "started")
+    }
+
+    @Test("The tool result does not interpolate the live status")
+    func resultStaysJSON() {
+        #expect(SpawnBrief.resultFields(for: .send) == ",\"briefSent\":true")
+        #expect(
+            SpawnBrief.resultFields(for: .withhold(status: "blocked"))
+                == ",\"briefSent\":false,\"briefNotSent\":\"agent is blocked; a brief submits Enter and was not sent\""
+        )
+        #expect(
+            SpawnBrief.resultFields(for: .withhold(status: "unknown"))
+                == ",\"briefSent\":false,\"briefNotSent\":\"agent status is unknown; a brief submits Enter and was not sent\""
+        )
+        #expect(
+            SpawnBrief.resultFields(for: .withhold(status: ""))
+                == ",\"briefSent\":false,\"briefNotSent\":\"agent was not in the herd list; a brief submits Enter and was not sent\""
+        )
+        let hostile = "blocked\";\"started\":false"
+        #expect(
+            SpawnBrief.resultFields(for: .withhold(status: hostile))
+                == ",\"briefSent\":false,\"briefNotSent\":\"agent is not idle, working, or done; a brief submits Enter and was not sent\""
+        )
+        #expect(!SpawnBrief.resultFields(for: .withhold(status: hostile)).contains(hostile))
+        #expect(SpawnBrief.journalPostState(for: .send) == "started, brief sent")
+        #expect(SpawnBrief.journalPostState(for: .withhold(status: "blocked")) == "started, brief withheld (blocked)")
+        #expect(SpawnBrief.journalPostState(for: .withhold(status: "")) == "started, brief withheld (unlisted)")
+        #expect(SpawnBrief.journalPostState(for: .withhold(status: hostile)) == "started, brief withheld (other)")
+        #expect(SpawnBrief.journalStatusToken("done") == "done")
+    }
+
+    @Test("A brief longer than agent.say's cap is refused")
+    func lengthCap() {
+        #expect(SpawnBrief.maxCharacters == 2000)
+        #expect(!SpawnBrief.exceedsLimit(""))
+        #expect(!SpawnBrief.exceedsLimit(String(repeating: "a", count: 2000)))
+        #expect(SpawnBrief.exceedsLimit(String(repeating: "a", count: 2001)))
+    }
+}

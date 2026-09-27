@@ -107,3 +107,112 @@ public enum SpawnPathPolicy: Sendable {
         return false
     }
 }
+
+// MARK: - SpawnBrief
+
+/// Whether `session.spawn`'s optional brief may be submitted.
+///
+/// The brief is delivered with `prompt`, which writes the text and then
+/// Enter. `agent.say` will not do that on its own when the pane is
+/// blocked: Enter accepts the highlighted row of a permission prompt.
+/// A new agent is often blocked on trust or a startup approval before
+/// it is idle. That status used to satisfy the startup wait, so the
+/// brief answered a prompt the caller had not seen.
+///
+/// Idle, working, and done may still receive it. Working stays because
+/// the brief is the first task, and a new agent is working while its
+/// UI comes up. `agent.say` asks a person before typing into work that
+/// is already underway; this brief is that first task. Blocked, unknown,
+/// and a pane the list does not contain do not receive Enter.
+public enum SpawnBrief: Sendable {
+
+    /// Same cap as `agent.say`. A longer brief is a caller error and is
+    /// refused before a pane is created.
+    public static let maxCharacters = 2000
+
+    /// Statuses the brief may be typed into.
+    public static let readyStatuses: [String] = [
+        AgentStatus.idle.rawValue,
+        AgentStatus.working.rawValue,
+        AgentStatus.done.rawValue,
+    ]
+
+    /// Statuses that end the startup wait. `blocked` is included so a
+    /// permission prompt returns immediately. It is not a ready status:
+    /// the list taken after the wait decides, and a block withholds Enter.
+    public static let wakeStatuses: [String] = readyStatuses + [AgentStatus.blocked.rawValue]
+
+    public enum Outcome: Equatable, Sendable {
+        case none
+        case send
+        case withhold(status: String)
+    }
+
+    /// Nil and `""` are no brief. Any other string, including whitespace,
+    /// is a brief: Enter would still submit it.
+    public static func isRequested(_ brief: String?) -> Bool {
+        guard let brief else { return false }
+        return !brief.isEmpty
+    }
+
+    public static func exceedsLimit(_ brief: String) -> Bool {
+        brief.count > maxCharacters
+    }
+
+    /// `status` nil means the pane was not in the herd list. That withholds,
+    /// with an empty status, rather than sending Enter to an id the list
+    /// does not show.
+    public static func outcome(brief: String?, status: String?) -> Outcome {
+        guard isRequested(brief) else { return .none }
+        let status = status ?? ""
+        if readyStatuses.contains(status) {
+            return .send
+        }
+        return .withhold(status: status)
+    }
+
+    /// Fixed phrases. The live status is not interpolated, so a pane
+    /// status cannot break the tool's JSON.
+    public static func skippedReason(status: String) -> String {
+        switch status {
+        case AgentStatus.blocked.rawValue:
+            return "agent is blocked; a brief submits Enter and was not sent"
+        case AgentStatus.unknown.rawValue:
+            return "agent status is unknown; a brief submits Enter and was not sent"
+        case "":
+            return "agent was not in the herd list; a brief submits Enter and was not sent"
+        default:
+            return "agent is not idle, working, or done; a brief submits Enter and was not sent"
+        }
+    }
+
+    public static func resultFields(for outcome: Outcome) -> String {
+        switch outcome {
+        case .none:
+            return ""
+        case .send:
+            return ",\"briefSent\":true"
+        case .withhold(let status):
+            return ",\"briefSent\":false,\"briefNotSent\":\"\(skippedReason(status: status))\""
+        }
+    }
+
+    /// A journal token for a withheld status. Only a real `AgentStatus`
+    /// raw value is copied. Anything else, including a quote, is `other`.
+    public static func journalStatusToken(_ status: String) -> String {
+        if status.isEmpty { return "unlisted" }
+        if let known = AgentStatus(rawValue: status) { return known.rawValue }
+        return "other"
+    }
+
+    public static func journalPostState(for outcome: Outcome) -> String {
+        switch outcome {
+        case .none:
+            return "started"
+        case .send:
+            return "started, brief sent"
+        case .withhold(let status):
+            return "started, brief withheld (\(journalStatusToken(status)))"
+        }
+    }
+}

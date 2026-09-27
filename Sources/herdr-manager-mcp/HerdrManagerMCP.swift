@@ -1396,6 +1396,14 @@ actor MCPServer {
         guard let name = arguments["name"] as? String, !name.isEmpty else {
             return makeToolError("Missing required parameter: name")
         }
+        // Same cap as agent.say, checked before any pane is created. A
+        // brief that cannot be sent must not leave an agent behind.
+        let brief = arguments["brief"] as? String
+        if let brief, SpawnBrief.exceedsLimit(brief) {
+            return makeToolError(
+                "Brief too long: \(brief.count) chars (max \(SpawnBrief.maxCharacters))"
+            )
+        }
 
         // Validate agent kind
         guard SpawnPathPolicy.isSupportedSpawnKind(kind) else {
@@ -1477,7 +1485,6 @@ actor MCPServer {
             }
         }
 
-        let brief = arguments["brief"] as? String
         let spaceLabel = arguments["space_label"] as? String
 
         var params: [String: String] = [
@@ -1489,6 +1496,9 @@ actor MCPServer {
             params["requested_name"] = name
         }
         if let resolvedPath { params["repo_path"] = resolvedPath }
+        if let brief, SpawnBrief.isRequested(brief) {
+            params["brief_length"] = "\(brief.count)"
+        }
         if let workspaceId { params["workspace_id"] = workspaceId }
         if let targetInfo {
             params["target_agent_id"] = targetInfo.paneId
@@ -1615,17 +1625,26 @@ actor MCPServer {
                 timeoutMs: 30_000
             )
 
-            if let brief, !brief.isEmpty {
-                let ready = try await adapter.waitStatus(
+            // `prompt` submits Enter. The wait used to treat `blocked` as
+            // ready, so a startup permission prompt received that Enter.
+            // Waking on blocked only ends the wait. The list after it is
+            // the status Enter would hit: idle, working, and done are sent
+            // the brief, and a block is not. A timeout is not a failed
+            // start. The agent is already running; the list still decides.
+            var briefOutcome = SpawnBrief.Outcome.none
+            if let brief, SpawnBrief.isRequested(brief) {
+                _ = try await adapter.waitStatus(
                     paneId: paneId,
-                    until: ["idle", "working", "blocked", "done"],
+                    until: SpawnBrief.wakeStatuses,
                     timeoutMs: 30_000
                 )
-                guard ready else {
-                    throw AgentResolutionError(description: "agent \(paneId) did not become ready before the brief timeout")
+                let fresh = try await readHerd()
+                let status = fresh.agents.first(where: { $0.paneId == paneId })?.agentStatus
+                briefOutcome = SpawnBrief.outcome(brief: brief, status: status)
+                if case .send = briefOutcome {
+                    try await requireFreshWrites()
+                    try await adapter.prompt(paneId: paneId, text: brief)
                 }
-                try await requireFreshWrites()
-                try await adapter.prompt(paneId: paneId, text: brief)
             }
 
             // The global slot was taken before the mutation. This only
@@ -1643,12 +1662,15 @@ actor MCPServer {
                     "pane_id": paneId
                 ],
                 caller: "mcp", preState: "placement=\(placement)",
-                postState: "started", outcome: "executed",
+                postState: SpawnBrief.journalPostState(for: briefOutcome),
+                outcome: "executed",
                 keepForever: true
             ))
             var result = "{\"agentId\":\"\(paneId)\",\"space\":\"\(finalWorkspaceId)\",\"placement\":\"\(placement)\""
             if let tabId { result += ",\"tab\":\"\(tabId)\"" }
-            result += ",\"started\":true,\"actionId\":\"\(actionId)\"}"
+            result += ",\"started\":true,\"actionId\":\"\(actionId)\""
+            result += SpawnBrief.resultFields(for: briefOutcome)
+            result += "}"
             return makeToolResult(result)
         } catch {
             let detail = String(describing: error)
@@ -2478,7 +2500,7 @@ actor MCPServer {
                     ],
                     "brief": [
                         "type": "string",
-                        "description": "Optional initial prompt to send after starting"
+                        "description": "Optional initial prompt (max 2000 characters). Sent only when the new agent is idle, working, or done. A blocked agent does not receive it, because the prompt submits Enter. The spawn still starts."
                     ],
                     "space_label": [
                         "type": "string",
