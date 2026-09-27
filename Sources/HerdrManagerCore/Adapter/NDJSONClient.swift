@@ -110,6 +110,11 @@ enum NDJSONFraming {
 
 public final class NDJSONClient: @unchecked Sendable {
     private let socketPath: String
+    /// How long a request socket waits for the next byte, in seconds.
+    /// The subscription socket passes `0`. `agent.wait` produces none
+    /// until the agent settles, so that wait has to finish before this
+    /// or the read returns `.timeout`.
+    public static let requestIOTimeoutSeconds = 30
     /// Socket-level send/receive timeout in seconds. `0` disables the timeout
     /// (used by the dedicated subscription client, whose event stream is
     /// push-based and legitimately blocks between events). A positive value
@@ -129,7 +134,7 @@ public final class NDJSONClient: @unchecked Sendable {
     nonisolated(unsafe) private var skippingOversize = false
     nonisolated(unsafe) private var isConnected = false
 
-    public init(socketPath: String, ioTimeoutSeconds: Int = 30) {
+    public init(socketPath: String, ioTimeoutSeconds: Int = NDJSONClient.requestIOTimeoutSeconds) {
         self.socketPath = socketPath
         self.ioTimeoutSeconds = ioTimeoutSeconds
     }

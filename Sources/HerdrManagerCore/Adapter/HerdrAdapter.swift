@@ -71,7 +71,10 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     public init(socketPath: String) {
         // Request client: bounded I/O timeout so a stalled herdr errors out
         // (.timeout) instead of blocking forever.
-        self.reqClient = NDJSONClient(socketPath: socketPath, ioTimeoutSeconds: 30)
+        self.reqClient = NDJSONClient(
+            socketPath: socketPath,
+            ioTimeoutSeconds: NDJSONClient.requestIOTimeoutSeconds
+        )
         // Subscription client: no timeout — the event stream is push-based and
         // legitimately blocks between events.
         self.subClient = NDJSONClient(socketPath: socketPath, ioTimeoutSeconds: 0)

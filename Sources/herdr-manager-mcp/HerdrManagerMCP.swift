@@ -892,6 +892,18 @@ actor MCPServer {
     // MARK: - agent.say
 
     private func handleAgentSay(arguments: [String: Any]) async -> [String: Any] {
+        // Checked before the write gate. A status herdr will not settle
+        // on, or a timeout the request socket cannot outlast, used to be
+        // forwarded only after the prompt had already submitted Enter.
+        // A non-string wait_for is the missing-argument path.
+        let waitDecision = SayWait.decide(
+            status: arguments["wait_for"] as? String,
+            timeoutMs: JSONNumber.int(arguments["timeout_ms"])
+        )
+        if let rejection = SayWait.rejection(waitDecision) {
+            return makeToolError(rejection)
+        }
+
         // Write-gate: reject if herdr protocol not verified for writes
         if let error = await checkWritesEnabled() { return error }
 
@@ -1014,12 +1026,10 @@ actor MCPServer {
                         postState: "sent", outcome: "executed"
                     ))
 
-                    if let waitFor = arguments["wait_for"] as? String {
-                        let timeoutMs = JSONNumber.int(arguments["timeout_ms"]) ?? 30000
-                        let settled = try await adapter.waitStatus(paneId: current.paneId, until: [waitFor], timeoutMs: timeoutMs)
-                        return makeToolResult("{\"sent\":true,\"actionId\":\"\(actionId)\",\"outcome\":\"\(settled ? "settled" : "timeout")\"}")
-                    }
-                    return makeToolResult("{\"sent\":true,\"actionId\":\"\(actionId)\",\"outcome\":\"sent\"}")
+                    let outcome = await sayWaitOutcome(paneId: current.paneId, decision: waitDecision)
+                    return makeToolResult(
+                        "{\"sent\":true,\"actionId\":\"\(actionId)\",\(SayWait.outcomeSuffix(for: outcome))}"
+                    )
                 } else if finalState == .denied {
                     await journal.record(JournalEntry(
                         actionId: actionId, tool: "agent.say",
@@ -1104,20 +1114,30 @@ actor MCPServer {
             let resolvedField = confirmed.paneId == agentIdStr
                 ? ""
                 : ",\"resolvedAgentId\":\"\(confirmed.paneId)\""
-            if let waitFor = arguments["wait_for"] as? String {
-                let timeoutMs = JSONNumber.int(arguments["timeout_ms"]) ?? 30000
-                let settled = try await adapter.waitStatus(
-                    paneId: confirmed.paneId, until: [waitFor], timeoutMs: timeoutMs
-                )
-                return makeToolResult(
-                    "{\"sent\":true,\"actionId\":\"\(actionId)\",\"outcome\":\"\(settled ? "settled" : "timeout")\"\(resolvedField)}"
-                )
-            }
+            let outcome = await sayWaitOutcome(paneId: confirmed.paneId, decision: waitDecision)
             return makeToolResult(
-                "{\"sent\":true,\"actionId\":\"\(actionId)\",\"outcome\":\"sent\"\(resolvedField)}"
+                "{\"sent\":true,\"actionId\":\"\(actionId)\",\(SayWait.outcomeSuffix(for: outcome))\(resolvedField)}"
             )
         } catch {
             return makeToolError("agent.say failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// `agent.wait` after a prompt that already succeeded. A throw is not
+    /// an unsent say: the text is in the pane, and the result says so.
+    /// Only a `.wait` decision reaches the socket. The canonical status
+    /// is the one `decide` folded, not the caller's raw word.
+    private func sayWaitOutcome(paneId: String, decision: SayWait.Decision) async -> String {
+        guard case .wait(let status, let timeoutMs) = decision else {
+            return SayWait.sentToken
+        }
+        do {
+            let settled = try await adapter.waitStatus(
+                paneId: paneId, until: [status], timeoutMs: timeoutMs
+            )
+            return SayWait.outcomeToken(settled: settled)
+        } catch {
+            return SayWait.waitFailedToken
         }
     }
 
@@ -1631,12 +1651,15 @@ actor MCPServer {
             // the status Enter would hit: idle, working, and done are sent
             // the brief, and a block is not. A timeout is not a failed
             // start. The agent is already running; the list still decides.
+            // The cap is under the request socket's silence budget. A
+            // 30s wait meets that budget and throws, which skips the list
+            // after the agent has already started.
             var briefOutcome = SpawnBrief.Outcome.none
             if let brief, SpawnBrief.isRequested(brief) {
                 _ = try await adapter.waitStatus(
                     paneId: paneId,
                     until: SpawnBrief.wakeStatuses,
-                    timeoutMs: 30_000
+                    timeoutMs: SayWait.maxTimeoutMs
                 )
                 let fresh = try await readHerd()
                 let status = fresh.agents.first(where: { $0.paneId == paneId })?.agentStatus
@@ -2404,7 +2427,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "agent.say",
-            "description": "Send free-text prompt to an agent via agent.prompt (atomic, bracketed-paste aware). Auto-allowed when idle/done; requires confirmation when working/blocked. Max 2000 chars.",
+            "description": "Send free-text prompt to an agent via agent.prompt (atomic, bracketed-paste aware). Auto-allowed when idle/done; requires confirmation when working/blocked. Max 2000 chars. Optional wait_for accepts \(SayWait.statusWords) only, and is refused before any text is sent when the status or timeout is not usable. outcome \(SayWait.waitFailedToken) means the text was already sent.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -2418,12 +2441,12 @@ actor MCPServer {
                     ],
                     "wait_for": [
                         "type": "string",
-                        "enum": ["idle", "done", "blocked"],
-                        "description": "Optional: wait for agent to reach this status"
-                    ],
+                        "enum": SayWait.acceptedStatuses,
+                        "description": "Optional settled status to wait for (\(SayWait.statusWords)). Surrounding space and case are ignored. working and unknown are not results. A blank or any other word is an error, and no text is sent. Omit to not wait."
+                    ] as [String: Any],
                     "timeout_ms": [
                         "type": "integer",
-                        "description": "Timeout for wait_for in milliseconds (default 30000)"
+                        "description": "How long to wait, in milliseconds, from 1 to \(SayWait.maxTimeoutMs) (default \(SayWait.defaultTimeoutMs)). Longer than that cannot finish before the request socket gives up, so it is refused before any text is sent. Ignored when wait_for is omitted."
                     ]
                 ] as [String: Any],
                 "required": ["agent_id", "text"]
