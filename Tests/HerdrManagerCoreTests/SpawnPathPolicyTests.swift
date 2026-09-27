@@ -246,8 +246,20 @@ struct SpawnBriefTests {
                 == ",\"briefSent\":false,\"briefNotSent\":\"the brief was not confirmed; it is not reported as sent\""
         )
         #expect(!unconfirmed.contains("was not sent"))
+        let rejected = SpawnBrief.resultFields(for: .rejected)
+        #expect(
+            rejected
+                == ",\"briefSent\":false,\"briefNotSent\":\"herdr rejected the text write; the brief was not sent\""
+        )
+        #expect(rejected.contains("was not sent"))
 
-        for fields in [unread, SpawnBrief.resultFields(for: .writesClosed), SpawnBrief.resultFields(for: .notConnected), unconfirmed] {
+        for fields in [
+            unread,
+            SpawnBrief.resultFields(for: .writesClosed),
+            SpawnBrief.resultFields(for: .notConnected),
+            unconfirmed,
+            rejected
+        ] {
             #expect(fields.filter { $0 == "\"" }.count == 6)
             #expect(!fields.contains("\\"))
         }
@@ -257,10 +269,12 @@ struct SpawnBriefTests {
         #expect(SpawnBrief.journalPostState(for: .notConnected) == "started, brief withheld (connect)")
         #expect(SpawnBrief.journalPostState(for: .unconfirmed) == "started, brief unconfirmed")
         #expect(!SpawnBrief.journalPostState(for: .unconfirmed).contains("\""))
+        #expect(SpawnBrief.journalPostState(for: .rejected) == "started, brief withheld (rejected)")
+        #expect(!SpawnBrief.journalPostState(for: .rejected).contains("\""))
     }
 
-    @Test("A prompt failure is unconfirmed unless nothing was written")
-    func promptFailureClassification() {
+    @Test("A herdr rejection of the brief is not an oversized success line")
+    func promptFailureClassification() throws {
         #expect(
             SpawnBrief.outcome(forPromptFailure: NDJSONClientError.writesDisabled("older than 17"))
                 == .writesClosed
@@ -273,10 +287,17 @@ struct SpawnBriefTests {
 
         let inserted = NDJSONClientError.promptEnterFailed
         #expect(SpawnBrief.outcome(forPromptFailure: inserted) == .unconfirmed)
-        // A herdr rejection of the text write is still this case. So is an
-        // oversized success line. Calling either "not sent" would hide text
-        // when the response was only too large to keep.
-        #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.invalidResponse("nope")) == .unconfirmed)
+        // The text write returned. Enter did not. That is not a rejection,
+        // and the phrase still does not claim the text was inserted.
+        #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.invalidResponse("nope")) == .rejected)
+        #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.invalidResponse("pane not found")) == .rejected)
+        #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.invalidResponse("herdr error -32601")) == .rejected)
+        #expect(
+            SpawnBrief.outcome(forPromptFailure: NDJSONClientError.invalidResponse("not NDJSON line exceeded 1 bytes"))
+                == .rejected
+        )
+        let oversized = "\(NDJSONClientError.oversizedLineDetailPrefix)\(NDJSONFraming.maxLineBytes) bytes"
+        #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.invalidResponse(oversized)) == .unconfirmed)
         #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.timeout) == .unconfirmed)
         #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.sendFailed(32)) == .unconfirmed)
         #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.readFailed(1)) == .unconfirmed)
@@ -289,6 +310,30 @@ struct SpawnBriefTests {
         #expect(!reported.contains("timed out"))
         #expect(!reported.contains("inserted"))
         #expect(!reported.contains("/tmp/herdr.sock"))
+        #expect(!reported.contains("was not sent"))
+
+        let rejection = SpawnBrief.resultFields(
+            for: SpawnBrief.outcome(forPromptFailure: NDJSONClientError.invalidResponse("pane not found"))
+        )
+        #expect(rejection.contains("was not sent"))
+        #expect(!rejection.contains("pane not found"))
+        #expect(!rejection.contains("inserted"))
+
+        let object = try JSONSerialization.jsonObject(with: Data(SpawnBrief.startedResult(
+            agentId: "w\"1",
+            space: "w1",
+            placement: "new_tab",
+            tab: "t2",
+            actionId: "A1",
+            brief: .rejected
+        ).utf8)) as? [String: Any]
+        #expect(object?["agentId"] as? String == "w\"1")
+        #expect(object?["started"] as? Bool == true)
+        #expect(object?["briefSent"] as? Bool == false)
+        #expect(
+            object?["briefNotSent"] as? String
+                == "herdr rejected the text write; the brief was not sent"
+        )
     }
 
     @Test("A quote in a herdr id stays inside the spawn result")

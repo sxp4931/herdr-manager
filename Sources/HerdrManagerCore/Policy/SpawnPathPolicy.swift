@@ -160,13 +160,20 @@ public enum SpawnBrief: Sendable {
         /// failure after the text write is `.unconfirmed`: `prompt`
         /// throws `promptEnterFailed` for that, not a connect error.
         case notConnected
-        /// `prompt` threw after the list said send. Enter's own failure
-        /// is `promptEnterFailed`: the text is in the pane. A herdr
-        /// rejection of the text write is still `invalidResponse`, and
-        /// that case stays here too. An oversized success response is
-        /// the same error, and calling it "not sent" would hide text
-        /// that had already landed.
+        /// `prompt` threw after the list said send, and the text may
+        /// already be in the pane. Enter's failure is `promptEnterFailed`:
+        /// the text write returned. An oversized success line is an
+        /// `invalidResponse` whose detail starts with
+        /// `NDJSON line exceeded `, and that request may have been
+        /// applied. A timeout or a dropped connection is the same.
+        /// The brief is not reported as sent, and it is not reported
+        /// as absent. A parsed herdr error is `.rejected`.
         case unconfirmed
+        /// herdr answered the text write with an error small enough to
+        /// read. That request was rejected, so the brief was not sent.
+        /// An oversized line is `.unconfirmed`: the same error case, and
+        /// calling it absent would hide text that may already be there.
+        case rejected
     }
 
     /// Nil and `""` are no brief. Any other string, including whitespace,
@@ -223,16 +230,20 @@ public enum SpawnBrief: Sendable {
             return "the prompt could not connect; a brief submits Enter and was not sent"
         case .unconfirmed:
             return "the brief was not confirmed; it is not reported as sent"
+        case .rejected:
+            return "herdr rejected the text write; the brief was not sent"
         }
     }
 
     /// Classify a throw from `prompt` itself. The write gate and a connect
     /// that fails before the text write did not insert anything. Enter's
     /// failure is its own error, after the text write has returned, and
-    /// the brief is not reported as sent. A herdr rejection of that text
-    /// write is still `invalidResponse`. So is an oversized response
-    /// line. Those stay unconfirmed: calling the rejection "not sent"
-    /// would also call an oversized success "not sent".
+    /// the brief is not reported as sent. A parsed herdr error on that
+    /// text write means the brief was not sent. An oversized success
+    /// line is the same `invalidResponse` case and stays unconfirmed:
+    /// calling it absent would hide text that may already be in the pane.
+    /// A detail that only contains the oversized prefix later is still
+    /// the rejection. The live message is not copied into the result.
     public static func outcome(forPromptFailure error: Error) -> Outcome {
         guard let client = error as? NDJSONClientError else {
             return .unconfirmed
@@ -242,7 +253,12 @@ public enum SpawnBrief: Sendable {
             return .writesClosed
         case .connectFailed, .socketCreationFailed:
             return .notConnected
-        case .promptEnterFailed, .invalidResponse, .timeout, .sendFailed, .readFailed, .connectionClosed:
+        case .invalidResponse(let detail):
+            if NDJSONClientError.isOversizedLineDetail(detail) {
+                return .unconfirmed
+            }
+            return .rejected
+        case .promptEnterFailed, .timeout, .sendFailed, .readFailed, .connectionClosed:
             return .unconfirmed
         }
     }
@@ -253,7 +269,7 @@ public enum SpawnBrief: Sendable {
             return ""
         case .send:
             return ",\"briefSent\":true"
-        case .withhold, .unread, .writesClosed, .notConnected, .unconfirmed:
+        case .withhold, .unread, .writesClosed, .notConnected, .unconfirmed, .rejected:
             guard let reason = deliveryReason(outcome) else { return "" }
             return ",\"briefSent\":false,\"briefNotSent\":\"\(reason)\""
         }
@@ -315,6 +331,8 @@ public enum SpawnBrief: Sendable {
             return "started, brief withheld (connect)"
         case .unconfirmed:
             return "started, brief unconfirmed"
+        case .rejected:
+            return "started, brief withheld (rejected)"
         }
     }
 }

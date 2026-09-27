@@ -2701,7 +2701,7 @@ actor MCPServer {
                     ],
                     "brief": [
                         "type": "string",
-                        "description": "Optional initial prompt (max 2000 characters). Sent only when the new agent is idle, working, or done. A blocked agent does not receive it, because the prompt submits Enter. If the status cannot be read, or the prompt does not finish cleanly, the brief is not reported as sent and the spawn still returns the pane."
+                        "description": "Optional initial prompt (max 2000 characters). Sent only when the new agent is idle, working, or done. A blocked agent does not receive it, because the prompt submits Enter. If the status cannot be read, or the prompt does not finish cleanly, the brief is not reported as sent and the spawn still returns the pane. When herdr rejects the text write, the result says the brief was not sent. A response too large to read does not, because the text may already be in the pane."
                     ],
                     "space_label": [
                         "type": "string",
