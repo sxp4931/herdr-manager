@@ -271,10 +271,11 @@ struct SpawnBriefTests {
         )
         #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.socketCreationFailed(1)) == .notConnected)
 
-        let inserted = NDJSONClientError.invalidResponse(
-            "text was inserted, but Enter failed: socket I/O timed out"
-        )
+        let inserted = NDJSONClientError.promptEnterFailed
         #expect(SpawnBrief.outcome(forPromptFailure: inserted) == .unconfirmed)
+        // A herdr rejection of the text write is still this case. So is an
+        // oversized success line. Calling either "not sent" would hide text
+        // when the response was only too large to keep.
         #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.invalidResponse("nope")) == .unconfirmed)
         #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.timeout) == .unconfirmed)
         #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.sendFailed(32)) == .unconfirmed)

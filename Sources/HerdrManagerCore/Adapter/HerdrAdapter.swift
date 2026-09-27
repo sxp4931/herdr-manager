@@ -410,9 +410,12 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                     params: Self.promptEnterParams(paneId: paneId)
                 )
             } catch {
-                throw NDJSONClientError.invalidResponse(
-                    "text was inserted, but Enter failed: \(String(describing: error))"
-                )
+                // The text write already returned. Wrapping this as
+                // `invalidResponse` made it look like herdr had rejected
+                // the text, and `agent.say` then reported a failed tool.
+                // A retry inserted the text again. The underlying error
+                // stays off this case so a result cannot copy a path.
+                throw NDJSONClientError.promptEnterFailed
             }
         }
     }

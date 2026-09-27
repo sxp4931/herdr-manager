@@ -16,6 +16,11 @@ public enum NDJSONClientError: Error, Sendable, CustomStringConvertible, Localiz
     case connectionClosed
     case invalidResponse(String)
     case timeout
+    /// `prompt` wrote the text. The Enter that submits it did not finish.
+    /// No underlying error is attached: that string can carry a socket
+    /// path, and a tool result must not copy it. Callers treat this as
+    /// text already in the pane, not as a write that never started.
+    case promptEnterFailed
     /// The protocol on the write gate does not allow a mutation. Thrown
     /// before any byte of that request is written.
     case writesDisabled(String)
@@ -36,6 +41,8 @@ public enum NDJSONClientError: Error, Sendable, CustomStringConvertible, Localiz
             return "invalid response: \(detail)"
         case .timeout:
             return "socket I/O timed out"
+        case .promptEnterFailed:
+            return "text was inserted, but Enter failed"
         case .writesDisabled(let reason):
             return "writes disabled: \(reason)"
         }

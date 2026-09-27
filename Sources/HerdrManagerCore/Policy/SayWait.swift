@@ -47,10 +47,17 @@ public enum SayWait: Sendable {
     public static let settledToken = "settled"
     public static let timeoutToken = "timeout"
     public static let waitFailedToken = "wait_failed"
+    /// Text is in the pane. Enter did not finish, so the prompt was not
+    /// submitted and `agent.wait` is not started.
+    public static let enterUnconfirmedToken = "enter_unconfirmed"
 
     /// Fixed. The live socket error is not copied: it can contain a
     /// quote, and the result has to say the prompt was already submitted.
     public static let waitFailedNote = "prompt already sent; read the agent before sending it again"
+
+    /// Fixed. Same reason: the text is already in the pane, and the
+    /// failure that stopped Enter can contain a path or a quote.
+    public static let enterUnconfirmedNote = "text is in the pane; Enter was not confirmed. Read the agent before sending it again"
 
     public enum Decision: Equatable, Sendable {
         /// No wait was asked for. `timeoutMs` is ignored, including a
@@ -100,12 +107,30 @@ public enum SayWait: Sendable {
     }
 
     /// The `outcome` field, and the note that belongs on a wait which
-    /// threw after the prompt. `token` is one of the constants above.
+    /// threw after the prompt, or on Enter failing after the text write.
+    /// `token` is one of the constants above.
     public static func outcomeSuffix(for token: String) -> String {
         if token == waitFailedToken {
             return "\"outcome\":\"\(waitFailedToken)\",\"waitNote\":\"\(waitFailedNote)\""
         }
+        if token == enterUnconfirmedToken {
+            return "\"outcome\":\"\(enterUnconfirmedToken)\",\"note\":\"\(enterUnconfirmedNote)\""
+        }
         return "\"outcome\":\"\(token)\""
+    }
+
+    /// Tool result when the text write returned and Enter did not.
+    /// `sent` stays false: the prompt was not submitted. `textInserted`
+    /// is why this is not an error result. `actionId` is the store's
+    /// id. `resolvedAgentId` is set only when the write followed a move.
+    public static func enterUnconfirmedResult(actionId: String, resolvedAgentId: String?) -> String {
+        var result = "{\"sent\":false,\"textInserted\":true,\"actionId\":\"\(actionId)\","
+        result += outcomeSuffix(for: enterUnconfirmedToken)
+        if let resolvedAgentId {
+            result += ",\"resolvedAgentId\":\"\(resolvedAgentId)\""
+        }
+        result += "}"
+        return result
     }
 
     private static func invalidStatus(_ text: String) -> String {

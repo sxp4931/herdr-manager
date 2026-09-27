@@ -1010,6 +1010,17 @@ actor MCPServer {
                     }
                     do {
                         try await adapter.prompt(paneId: current.paneId, text: text)
+                    } catch NDJSONClientError.promptEnterFailed {
+                        // The text is already in the pane. A failed tool is
+                        // what the caller retries, and a retry inserts it again.
+                        let resolved = current.paneId == agentIdStr ? nil : current.paneId
+                        return await sayTextInserted(
+                            actionId: actionId,
+                            shared: true,
+                            params: addressed,
+                            preState: "status=\(status)",
+                            resolvedAgentId: resolved
+                        )
                     } catch {
                         return await failClaimedWrite(
                             actionId: actionId, tool: "agent.say",
@@ -1082,8 +1093,6 @@ actor MCPServer {
                 sessionIdentity: confirmed.sessionIdentity
             )
             if let error = policyDenial(reserved) { return error }
-            try await adapter.prompt(paneId: confirmed.paneId, text: text)
-
             let addressed = Self.addressedParams(
                 requested: agentIdStr,
                 resolved: confirmed.paneId,
@@ -1099,6 +1108,20 @@ actor MCPServer {
             params["_fp_occupant"] = occupantFingerprint(from: confirmed)
             params["_fp_status"] = confirmed.agentStatus
             params["_fp_seq"] = "\(confirmed.stateChangeSeq)"
+            let resolvedAgentId = confirmed.paneId == agentIdStr ? nil : confirmed.paneId
+            let sayPreState = "status=\(confirmed.agentStatus), seq=\(confirmed.stateChangeSeq)"
+            do {
+                try await adapter.prompt(paneId: confirmed.paneId, text: text)
+            } catch NDJSONClientError.promptEnterFailed {
+                let actionId = await actionStore.create(tool: "agent.say", params: params)
+                return await sayTextInserted(
+                    actionId: actionId,
+                    shared: false,
+                    params: addressed,
+                    preState: sayPreState,
+                    resolvedAgentId: resolvedAgentId
+                )
+            }
 
             let actionId = await actionStore.create(tool: "agent.say", params: params)
             await actionStore.markExecuted(actionId)
@@ -1107,13 +1130,11 @@ actor MCPServer {
                 actionId: actionId, tool: "agent.say",
                 params: addressed,
                 caller: "mcp",
-                preState: "status=\(confirmed.agentStatus), seq=\(confirmed.stateChangeSeq)",
+                preState: sayPreState,
                 postState: "sent", outcome: "executed"
             ))
 
-            let resolvedField = confirmed.paneId == agentIdStr
-                ? ""
-                : ",\"resolvedAgentId\":\"\(confirmed.paneId)\""
+            let resolvedField = resolvedAgentId.map { ",\"resolvedAgentId\":\"\($0)\"" } ?? ""
             let outcome = await sayWaitOutcome(paneId: confirmed.paneId, decision: waitDecision)
             return makeToolResult(
                 "{\"sent\":true,\"actionId\":\"\(actionId)\",\(SayWait.outcomeSuffix(for: outcome))\(resolvedField)}"
@@ -1121,6 +1142,35 @@ actor MCPServer {
         } catch {
             return makeToolError("agent.say failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Enter failed after the text write. The action is recorded as
+    /// executed because the text is in the pane; the journal says Enter
+    /// was not confirmed. The tool result is not an error.
+    private func sayTextInserted(
+        actionId: String,
+        shared: Bool,
+        params: [String: String],
+        preState: String,
+        resolvedAgentId: String?
+    ) async -> [String: Any] {
+        if shared {
+            try? await sharedActionStore.markExecuted(actionId)
+        } else {
+            await actionStore.markExecuted(actionId)
+        }
+        await journal.record(JournalEntry(
+            actionId: actionId,
+            tool: "agent.say",
+            params: params,
+            caller: "mcp",
+            preState: preState,
+            postState: "text inserted, Enter unconfirmed",
+            outcome: "enter_unconfirmed"
+        ))
+        return makeToolResult(
+            SayWait.enterUnconfirmedResult(actionId: actionId, resolvedAgentId: resolvedAgentId)
+        )
     }
 
     /// `agent.wait` after a prompt that already succeeded. A throw is not
@@ -2451,7 +2501,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "agent.say",
-            "description": "Send free-text prompt to an agent via agent.prompt (atomic, bracketed-paste aware). Auto-allowed when idle/done; requires confirmation when working/blocked. Max 2000 chars. Optional wait_for accepts \(SayWait.statusWords) only, and is refused before any text is sent when the status or timeout is not usable. outcome \(SayWait.waitFailedToken) means the text was already sent.",
+            "description": "Send free-text prompt to an agent via agent.prompt (atomic, bracketed-paste aware). Auto-allowed when idle/done; requires confirmation when working/blocked. Max 2000 chars. Optional wait_for accepts \(SayWait.statusWords) only, and is refused before any text is sent when the status or timeout is not usable. outcome \(SayWait.waitFailedToken) means the text was already sent. outcome \(SayWait.enterUnconfirmedToken) means the text is already in the pane and Enter did not finish; do not send that text again.",
             "inputSchema": [
                 "type": "object",
                 "properties": [

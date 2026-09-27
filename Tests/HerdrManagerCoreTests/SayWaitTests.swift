@@ -99,4 +99,27 @@ struct SayWaitTests {
         #expect(!SayWait.waitFailedNote.contains("\""))
         #expect(SayWait.outcomeSuffix(for: SayWait.settledToken).contains("waitNote") == false)
     }
+
+    @Test("Enter failing after the text write is not an unsent error")
+    func enterUnconfirmedStaysAResult() {
+        #expect(SayWait.enterUnconfirmedToken == "enter_unconfirmed")
+        #expect(!SayWait.enterUnconfirmedNote.contains("\""))
+        #expect(!SayWait.enterUnconfirmedNote.contains("\\"))
+        #expect(
+            SayWait.outcomeSuffix(for: SayWait.enterUnconfirmedToken)
+                == "\"outcome\":\"enter_unconfirmed\",\"note\":\"text is in the pane; Enter was not confirmed. Read the agent before sending it again\""
+        )
+        let samePane = SayWait.enterUnconfirmedResult(actionId: "A1", resolvedAgentId: nil)
+        #expect(
+            samePane
+                == "{\"sent\":false,\"textInserted\":true,\"actionId\":\"A1\",\"outcome\":\"enter_unconfirmed\",\"note\":\"text is in the pane; Enter was not confirmed. Read the agent before sending it again\"}"
+        )
+        #expect(samePane.filter { $0 == "\"" }.count == 16)
+        #expect(!samePane.contains("\\"))
+        #expect(!samePane.contains("sent\":true"))
+        let moved = SayWait.enterUnconfirmedResult(actionId: "A1", resolvedAgentId: "w2:p4")
+        #expect(moved.contains("\"resolvedAgentId\":\"w2:p4\""))
+        #expect(moved.hasSuffix("}"))
+        #expect(!moved.contains("waitNote"))
+    }
 }

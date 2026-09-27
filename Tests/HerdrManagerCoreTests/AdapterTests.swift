@@ -1691,6 +1691,29 @@ struct WriteGateOnIOQueueTests {
         #expect(adapter.health().writesEnabled)
     }
 
+    @Test("Enter failing after the text write is not a rejected prompt")
+    func promptEnterFailureIsItsOwnError() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .succeedThenFail)
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        adapter.setLatestProtocol(17)
+
+        do {
+            try await adapter.prompt(paneId: "w1:p1", text: "hello")
+            Issue.record("expected Enter to fail after the text write")
+        } catch NDJSONClientError.promptEnterFailed {
+            // The text write returned. Enter's rejection is not attached,
+            // and this is not the invalidResponse a rejected text write throws.
+        } catch {
+            Issue.record("expected promptEnterFailed, got \(error)")
+        }
+
+        // Enter's failure is not a connect failure, so the reading stays.
+        #expect(adapter.health().protocolVersion == 17)
+        #expect(adapter.health().writesEnabled)
+    }
+
     @Test("A verified write that cannot connect still clears the reading")
     func verifiedWriteConnectFailureClearsReading() async {
         let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
@@ -2011,6 +2034,11 @@ struct CoreErrorDescriptionTests {
         let gated: Error = NDJSONClientError.writesDisabled("herdr protocol 16 is older than the minimum verified 17; writes disabled")
         #expect(gated.localizedDescription.contains("writes disabled"))
         #expect(gated.localizedDescription.contains("protocol 16"))
+
+        let entered: Error = NDJSONClientError.promptEnterFailed
+        #expect(entered.localizedDescription == "text was inserted, but Enter failed")
+        #expect(!entered.localizedDescription.contains("\""))
+        #expect(!entered.localizedDescription.contains("invalid response"))
     }
 
     @Test("SharedActionStoreError carries the store failure")

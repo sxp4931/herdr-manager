@@ -157,12 +157,15 @@ public enum SpawnBrief: Sendable {
         /// The write gate refused before `prompt`. Enter was not sent.
         case writesClosed
         /// The text write never connected. Enter was not sent. An Enter
-        /// failure after the text write is not this case: `prompt` wraps
-        /// that as `invalidResponse`, which is `.unconfirmed`.
+        /// failure after the text write is `.unconfirmed`: `prompt`
+        /// throws `promptEnterFailed` for that, not a connect error.
         case notConnected
-        /// `prompt` threw after the list said send. That call writes the
-        /// text and then Enter, and an Enter failure is reported only
-        /// after the text is in the pane. The brief is not reported as sent.
+        /// `prompt` threw after the list said send. Enter's own failure
+        /// is `promptEnterFailed`: the text is in the pane. A herdr
+        /// rejection of the text write is still `invalidResponse`, and
+        /// that case stays here too. An oversized success response is
+        /// the same error, and calling it "not sent" would hide text
+        /// that had already landed.
         case unconfirmed
     }
 
@@ -224,10 +227,12 @@ public enum SpawnBrief: Sendable {
     }
 
     /// Classify a throw from `prompt` itself. The write gate and a connect
-    /// that fails before the text write did not insert anything. Every
-    /// other failure, including herdr's error and a timed-out read, is
-    /// unconfirmed: Enter's failure is wrapped as `invalidResponse` after
-    /// the text write has already returned.
+    /// that fails before the text write did not insert anything. Enter's
+    /// failure is its own error, after the text write has returned, and
+    /// the brief is not reported as sent. A herdr rejection of that text
+    /// write is still `invalidResponse`. So is an oversized response
+    /// line. Those stay unconfirmed: calling the rejection "not sent"
+    /// would also call an oversized success "not sent".
     public static func outcome(forPromptFailure error: Error) -> Outcome {
         guard let client = error as? NDJSONClientError else {
             return .unconfirmed
@@ -237,7 +242,7 @@ public enum SpawnBrief: Sendable {
             return .writesClosed
         case .connectFailed, .socketCreationFailed:
             return .notConnected
-        case .invalidResponse, .timeout, .sendFailed, .readFailed, .connectionClosed:
+        case .promptEnterFailed, .invalidResponse, .timeout, .sendFailed, .readFailed, .connectionClosed:
             return .unconfirmed
         }
     }

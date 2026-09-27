@@ -885,6 +885,10 @@ final class AppModel {
             do {
                 try await self.adapter.prompt(paneId: agent.id.raw, text: text)
                 self.setLastError(nil)
+            } catch NDJSONClientError.promptEnterFailed {
+                self.setLastError(
+                    "Nudge inserted the text, but Enter did not finish. Check the pane before sending it again."
+                )
             } catch {
                 self.setLastError("Nudge failed: \(error.localizedDescription)")
             }
