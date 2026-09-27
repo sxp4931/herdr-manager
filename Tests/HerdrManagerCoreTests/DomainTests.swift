@@ -2427,6 +2427,130 @@ struct SecretRedactorTests {
             #expect(result.redactedText == line)
         }
     }
+
+    @Test("A Doppler token is redacted once and keeps its prefix")
+    func redactsDopplerToken() {
+        let redactor = SecretRedactor()
+        // Doppler's published sample body is 43 alphanumeric characters,
+        // inside the 40...44 range their scanner names.
+        let sample = "bAqhcVzrhy5cRHkOlNTc0Ve6w5NUDCpcutm8vGE9myi"
+        #expect(sample.count == 43)
+        let body40 = String(repeating: "a", count: 40)
+        let body44 = String(repeating: "B", count: 44)
+
+        let prefixes = [
+            "dp.ct.", "dp.pt.", "dp.sa.", "dp.said.", "dp.scim.", "dp.audit.",
+        ]
+        for prefix in prefixes {
+            let key = prefix + sample
+            let kept = prefix + "[REDACTED]"
+            let bare = redactor.redact("fetched \(key)")
+            #expect(bare.redactedText == "fetched \(kept)")
+            #expect(bare.redactionCount == 1)
+            #expect(!bare.redactedText.contains(sample))
+            let again = redactor.redact(bare.redactedText)
+            #expect(again.redactedText == bare.redactedText)
+            #expect(again.redactionCount == 0)
+        }
+
+        // The config slug is not the secret. Both shapes keep `dp.st.`.
+        let service = "dp.st." + sample
+        let configured = "dp.st.dev." + sample
+        let hyphenConfig = "dp.st.my-config." + body40
+        let underscoreConfig = "dp.st.my_config." + body44
+        for key in [service, configured, hyphenConfig, underscoreConfig] {
+            let result = redactor.redact(key)
+            #expect(result.redactedText == "dp.st.[REDACTED]")
+            #expect(result.redactionCount == 1)
+            #expect(!result.redactedText.contains(sample))
+            #expect(!result.redactedText.contains(body40))
+            #expect(!result.redactedText.contains(body44))
+            let again = redactor.redact(result.redactedText)
+            #expect(again.redactionCount == 0)
+        }
+
+        // `DOPPLER_TOKEN` already ends in the assignment keyword. The
+        // prefix stays, and the placeholder is not a second secret.
+        let cli = "dp.ct." + sample
+        let kept = "dp.ct.[REDACTED]"
+        let assigned = redactor.redact("DOPPLER_TOKEN=\(configured)")
+        #expect(assigned.redactedText == "DOPPLER_TOKEN=dp.st.[REDACTED]")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        let quoted = redactor.redact(#"{"token": "\#(cli)"}"#)
+        #expect(quoted.redactedText == #"{"token": "\#(kept)"}"#)
+        #expect(quoted.redactionCount == 1)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        let header = redactor.redact("Authorization: Bearer \(configured)")
+        #expect(header.redactedText == "Authorization: Bearer dp.st.[REDACTED]")
+        #expect(header.redactionCount == 1)
+        let headerAgain = redactor.redact(header.redactedText)
+        #expect(headerAgain.redactionCount == 0)
+        let lower = redactor.redact("authorization: bearer \(cli)")
+        #expect(lower.redactedText == "authorization: bearer \(kept)")
+        #expect(lower.redactionCount == 1)
+
+        let remote = redactor.redact("https://user:\(cli)@api.doppler.com/v3")
+        #expect(remote.redactedText == "https://user:\(kept)@api.doppler.com/v3")
+        #expect(remote.redactionCount == 1)
+        #expect(remote.redactedText.contains("api.doppler.com/v3"))
+        let remoteAgain = redactor.redact(remote.redactedText)
+        #expect(remoteAgain.redactionCount == 0)
+
+        let sentence = redactor.redact("saw \(cli). next")
+        #expect(sentence.redactedText == "saw \(kept). next")
+        #expect(sentence.redactionCount == 1)
+        let noted = redactor.redact(service + "-note")
+        #expect(noted.redactedText == "dp.st.[REDACTED]-note")
+        #expect(noted.redactionCount == 1)
+        #expect(!noted.redactedText.contains(sample))
+        let hyphen = redactor.redact("my-\(cli)")
+        #expect(hyphen.redactedText == "my-\(kept)")
+        #expect(hyphen.redactionCount == 1)
+
+        let short = redactor.redact("dp.ct." + body40)
+        #expect(short.redactedText == "dp.ct.[REDACTED]")
+        #expect(short.redactionCount == 1)
+        let long = redactor.redact("dp.pt." + body44)
+        #expect(long.redactedText == "dp.pt.[REDACTED]")
+        #expect(long.redactionCount == 1)
+
+        let pair = redactor.redact("\(cli) and \(configured)")
+        #expect(pair.redactedText == "\(kept) and dp.st.[REDACTED]")
+        #expect(pair.redactionCount == 2)
+
+        // `@` is still not the end of an ordinary assignment.
+        let leftover = redactor.redact("token=\(cli)@leftoversecret")
+        #expect(leftover.redactedText == "token=[REDACTED]")
+        #expect(leftover.redactionCount == 2)
+        #expect(!leftover.redactedText.contains("leftoversecret"))
+        #expect(!leftover.redactedText.contains(sample))
+
+        let keptLines = [
+            "tokens start with dp.ct.",
+            "dp.ct." + String(repeating: "a", count: 39),
+            "dp.ct." + String(repeating: "a", count: 45),
+            "dp.ct." + body44 + "1",
+            "dp.ct." + String(sample.prefix(20)) + "-" + String(sample.dropFirst(20)),
+            "DP.CT." + sample,
+            "DP.ST.DEV." + sample,
+            "x" + cli,
+            "_" + cli,
+            // A one-character config, an uppercase config, and a config
+            // longer than 35 are not the shape Doppler's scanner names.
+            "dp.st.d." + sample,
+            "dp.st.Dev." + sample,
+            "dp.st." + String(repeating: "c", count: 36) + "." + body40,
+        ]
+        for line in keptLines {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line.prefix(80))")
+            #expect(result.redactedText == line)
+        }
+    }
 }
 
 // MARK: - DwellTracker Tests

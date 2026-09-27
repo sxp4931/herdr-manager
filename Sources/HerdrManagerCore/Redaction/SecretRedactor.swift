@@ -203,6 +203,49 @@ public final class SecretRedactor: Sendable {
                 "(?<![A-Za-z0-9_])pplx-[A-Za-z0-9]{48}(?![A-Za-z0-9])",
                 "pplx-[REDACTED]"
             ),
+            // Doppler auth tokens. A service token reads every secret in
+            // one config. `DOPPLER_TOKEN` already ends in `token`, so an
+            // assignment is hidden. `doppler configure` and a pane log
+            // print the token with no keyword. The shapes are the ones
+            // Doppler publishes for secret scanning: `dp.ct.`, `dp.pt.`,
+            // `dp.sa.`, `dp.said.`, `dp.scim.`, and `dp.audit.` plus 40
+            // to 44 alphanumeric characters, and `dp.st.` with an
+            // optional lowercase config (`dp.st.dev.<secret>`, 2 to 35
+            // characters) in front of that same body. A shorter body
+            // stays, and a longer run stays whole, so a tail is not left
+            // behind. The config is not the secret; the replacement
+            // keeps `dp.st.`. A letter, digit, or underscore glued to
+            // the front is not the prefix. The prefix is the lowercase
+            // form Doppler prints. `dp.said.` is named on its own so
+            // `dp.sa.` cannot stop at `sa`.
+            (
+                "(?<![A-Za-z0-9_])dp\\.said\\.[A-Za-z0-9]{40,44}(?![A-Za-z0-9])",
+                "dp.said.[REDACTED]"
+            ),
+            (
+                "(?<![A-Za-z0-9_])dp\\.scim\\.[A-Za-z0-9]{40,44}(?![A-Za-z0-9])",
+                "dp.scim.[REDACTED]"
+            ),
+            (
+                "(?<![A-Za-z0-9_])dp\\.audit\\.[A-Za-z0-9]{40,44}(?![A-Za-z0-9])",
+                "dp.audit.[REDACTED]"
+            ),
+            (
+                "(?<![A-Za-z0-9_])dp\\.st\\.(?:[a-z0-9_-]{2,35}\\.)?[A-Za-z0-9]{40,44}(?![A-Za-z0-9])",
+                "dp.st.[REDACTED]"
+            ),
+            (
+                "(?<![A-Za-z0-9_])dp\\.sa\\.[A-Za-z0-9]{40,44}(?![A-Za-z0-9])",
+                "dp.sa.[REDACTED]"
+            ),
+            (
+                "(?<![A-Za-z0-9_])dp\\.ct\\.[A-Za-z0-9]{40,44}(?![A-Za-z0-9])",
+                "dp.ct.[REDACTED]"
+            ),
+            (
+                "(?<![A-Za-z0-9_])dp\\.pt\\.[A-Za-z0-9]{40,44}(?![A-Za-z0-9])",
+                "dp.pt.[REDACTED]"
+            ),
             // Slack app-level tokens (`xapp-1-<app>-<id>-<secret>`). The
             // older `xox[baprs]` pattern does not name this prefix. The
             // version is the single digit Slack issues. Each later
