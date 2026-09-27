@@ -63,6 +63,35 @@ struct HerdSnapshotDwellTests {
         #expect(byId["wA:p3"]?.enteredAt == Date(timeIntervalSince1970: 9_000))
         #expect(byId["wA:p2"]?.status == .done)
     }
+
+    @Test("A same-episode refetch keeps a crash, and a status change does not")
+    func displayAgentsPreservesProcessGoneForUnchangedEpisodes() {
+        func snapshot(_ infos: [HerdrAgentInfo]) -> HerdSnapshot {
+            HerdSnapshot(
+                version: "0.7.5", protocol: 17,
+                agents: infos,
+                workspaceNames: ["wA": "Cuedora"], tabNames: ["wA:t1": "Claude"],
+                focusedWorkspaceId: nil, focusedTabId: nil, focusedPaneId: nil
+            )
+        }
+
+        var before = snapshot([
+            makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 5),
+            makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 7)
+        ]).displayAgents(now: Date(timeIntervalSince1970: 1_000))
+        before[0].verdict = .processGone(lastLine: "zsh (pid 1)")
+        before[1].verdict = .processGone(lastLine: "zsh (pid 2)")
+
+        let after = snapshot([
+            makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 5),
+            makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "done", stateChangeSeq: 8)
+        ]).displayAgents(preserving: before, now: Date(timeIntervalSince1970: 9_000))
+
+        let byId = Dictionary(after.map { ($0.id.raw, $0) }, uniquingKeysWith: { first, _ in first })
+        #expect(byId["wA:p1"]?.verdict == .processGone(lastLine: "zsh (pid 1)"))
+        #expect(byId["wA:p2"]?.verdict.isProcessGone == false)
+        #expect(byId["wA:p2"]?.status == .done)
+    }
 }
 
 @Suite("HerdLiveTable layout refetch and pane move")
@@ -143,6 +172,27 @@ struct HerdLiveTableDwellTests {
         #expect(live.agents[0].tabName == "scratch")
         #expect(live.agents[1].id.raw == "wA:p2")
         #expect(live.agents[1].enteredAt == started)
+    }
+
+    @Test("pane.moved puts a pre-refetch crash back on the new id")
+    func moveAfterLayoutRefreshKeepsProcessGone() {
+        var live = initialTable()
+        live.applyProcessGone([
+            AgentID("wA:p1"): .gone(lastLine: "zsh (pid 4)")
+        ], now: started)
+        refreshAfterMove(on: &live, at: refreshedAt)
+
+        // The refetch is already on the new id, which herdr still calls blocked.
+        #expect(live.agents.first?.id.raw == "wB:p4")
+        #expect(live.agents.first?.verdict.isProcessGone == false)
+
+        live.apply(moveEvent(), now: moveAt)
+
+        #expect(live.agents.first?.id.raw == "wB:p4")
+        #expect(live.agents.first?.status == .blocked)
+        #expect(live.agents.first?.enteredAt == started)
+        #expect(live.agents.first?.verdict == .processGone(lastLine: "zsh (pid 4)"))
+        #expect(live.agents.dropFirst().first?.verdict.isProcessGone == false)
     }
 
     @Test("A second layout refetch in the burst does not replace the remembered dwell")

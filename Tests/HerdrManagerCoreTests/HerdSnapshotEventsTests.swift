@@ -101,6 +101,46 @@ struct HerdSnapshotEventsTests {
         #expect(seqless.first?.enteredAt == now)
     }
 
+    @Test("A same-status update keeps a crash, and a status change clears it")
+    func processGoneSurvivesSameStatusUpdate() {
+        let entered = Date(timeIntervalSince1970: 1_000)
+        let crashed = Agent(
+            id: AgentID("wA:p1"),
+            kind: .custom("claude"),
+            status: .working,
+            stateChangeSeq: 5,
+            enteredAt: entered,
+            verdict: .processGone(lastLine: "zsh (pid 1)")
+        )
+
+        let sameStatus = labels.applying(
+            .paneUpdated(makeEventAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 9)),
+            to: [crashed],
+            now: now
+        )
+        #expect(sameStatus.first?.status == .working)
+        #expect(sameStatus.first?.stateChangeSeq == 9)
+        #expect(sameStatus.first?.enteredAt == entered)
+        #expect(sameStatus.first?.verdict == .processGone(lastLine: "zsh (pid 1)"))
+
+        let statusChanged = labels.applying(
+            .paneUpdated(makeEventAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 10)),
+            to: [crashed],
+            now: now
+        )
+        #expect(statusChanged.first?.status == .blocked)
+        #expect(statusChanged.first?.verdict.isProcessGone == false)
+        #expect(statusChanged.first?.verdict.isAwaitingInput == true)
+
+        let statusEvent = labels.applying(
+            .agentStatusChanged(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 6),
+            to: [crashed],
+            now: now
+        )
+        #expect(statusEvent.first?.verdict == .processGone(lastLine: "zsh (pid 1)"))
+        #expect(statusEvent.first?.stateChangeSeq == 6)
+    }
+
     @Test("pane_moved re-keys a cross-workspace move and keeps the dwell")
     func paneMovedRekeys() {
         let entered = Date(timeIntervalSince1970: 1_700_000_000)

@@ -55,6 +55,60 @@ public enum AttentionTriage: Sendable {
         return a.id.raw < b.id.raw
     }
 
+    /// Exclusive bucket for one agent. Process-gone wins over herdr's raw
+    /// status, then a live block, then silence. Idle and unknown are the
+    /// leftovers `counts` does not tally; a stale silent verdict on done or
+    /// idle stays in that status's bucket.
+    public enum Kind: String, Sendable, Equatable {
+        case gone
+        case blocked
+        case silent
+        case done
+        case working
+        case idle
+        case unknown
+    }
+
+    public static func kind(for agent: Agent) -> Kind {
+        if agent.verdict.isProcessGone { return .gone }
+        if isActionablyBlocked(agent) { return .blocked }
+        if isActionablySilent(agent) { return .silent }
+        switch agent.status {
+        case .done: return .done
+        case .working: return .working
+        case .idle: return .idle
+        case .blocked: return .blocked
+        case .unknown: return .unknown
+        }
+    }
+
+    /// Text-table mark. Gone and blocked share a colour on the menu bar,
+    /// which says which with a word. A text cell has only this mark, so a
+    /// crashed pane is the word and a permission prompt stays the circle.
+    /// `working` overrides the working mark where a surface already paints
+    /// working differently from idle.
+    public static func statusMark(for kind: Kind, working: String = "🟢") -> String {
+        switch kind {
+        case .gone: return "GONE"
+        case .blocked: return "🔴"
+        case .silent: return "🟠"
+        case .done: return "🔵"
+        case .working: return working
+        case .idle: return "🟢"
+        case .unknown: return "⚪"
+        }
+    }
+
+    public static func statusMark(for agent: Agent, working: String = "🟢") -> String {
+        statusMark(for: kind(for: agent), working: working)
+    }
+
+    /// Human footer for a herd table. The counts are the exclusive buckets,
+    /// so a crashed pane is `gone` and not also `blocked`.
+    public static func statusFooter(agentCount: Int, counts: Counts) -> String {
+        "\(agentCount) agents | \(counts.blocked) blocked | \(counts.gone) gone | \(counts.silent) silent | \(counts.done) done"
+    }
+
     /// Exclusive badge/footer counts. A stale silent verdict on done or idle
     /// is not silence; process-gone on a blocked pane is gone, not blocked.
     public struct Counts: Equatable, Sendable {
@@ -71,16 +125,13 @@ public enum AttentionTriage: Sendable {
     public static func counts<S: Sequence>(_ agents: S) -> Counts where S.Element == Agent {
         var counts = Counts()
         for agent in agents {
-            if agent.verdict.isProcessGone {
-                counts.gone += 1
-            } else if isActionablyBlocked(agent) {
-                counts.blocked += 1
-            } else if isActionablySilent(agent) {
-                counts.silent += 1
-            } else if agent.status == .done {
-                counts.done += 1
-            } else if agent.status == .working {
-                counts.working += 1
+            switch kind(for: agent) {
+            case .gone: counts.gone += 1
+            case .blocked: counts.blocked += 1
+            case .silent: counts.silent += 1
+            case .done: counts.done += 1
+            case .working: counts.working += 1
+            case .idle, .unknown: break
             }
         }
         return counts

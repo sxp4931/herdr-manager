@@ -15,13 +15,14 @@ extension HerdSnapshot {
         case .agentStatusChanged(let paneId, let agentStatus, let seq):
             guard let idx = agents.firstIndex(where: { $0.id.raw == paneId }) else { break }
             if let seq, seq < agents[idx].stateChangeSeq { break }
+            let previous = agents[idx]
             let newStatus = AgentStatus(rawValue: agentStatus) ?? .unknown
-            if newStatus != agents[idx].status {
+            if newStatus != previous.status {
                 agents[idx].enteredAt = now
             }
             agents[idx].status = newStatus
             if let seq { agents[idx].stateChangeSeq = seq }
-            agents[idx].verdict = Self.displayVerdict(for: newStatus, now: now)
+            agents[idx].verdict = Self.verdict(replacing: previous, with: newStatus, now: now)
 
         case .paneUpdated(let info):
             guard !info.paneId.isEmpty else { break }
@@ -43,13 +44,14 @@ extension HerdSnapshot {
                 agents.remove(at: idx)
                 break
             }
+            let previous = agents[idx]
             let newStatus = AgentStatus(rawValue: info.agentStatus) ?? .unknown
-            if newStatus != agents[idx].status {
+            if newStatus != previous.status {
                 agents[idx].enteredAt = now
             }
             agents[idx].status = newStatus
             if info.stateChangeSeq != 0 { agents[idx].stateChangeSeq = info.stateChangeSeq }
-            agents[idx].verdict = Self.displayVerdict(for: newStatus, now: now)
+            agents[idx].verdict = Self.verdict(replacing: previous, with: newStatus, now: now)
 
         case .paneClosed(let paneId), .paneExited(let paneId):
             agents.removeAll { $0.id.raw == paneId }
@@ -157,6 +159,18 @@ extension HerdSnapshot {
         let insertAt = agents.firstIndex { $0.id.raw == previousRaw || $0.id.raw == info.paneId } ?? kept.count
         kept.insert(updated, at: min(insertAt, kept.count))
         return kept
+    }
+
+    /// A same-status update does not clear a crash. herdr keeps reporting
+    /// working or blocked after the process has died, and that event is
+    /// what would otherwise paint the status verdict back over the crash.
+    /// A real status change is a new episode and takes the status verdict;
+    /// the next process read stamps a crash again if the shell is still bare.
+    private static func verdict(replacing previous: Agent, with status: AgentStatus, now: Date) -> Verdict {
+        if status == previous.status, previous.verdict.isProcessGone {
+            return previous.verdict
+        }
+        return displayVerdict(for: status, now: now)
     }
 
     private func labeled(_ id: String, in names: [String: String], created: String?) -> String? {

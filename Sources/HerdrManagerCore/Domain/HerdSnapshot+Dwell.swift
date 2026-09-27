@@ -20,6 +20,13 @@ extension HerdSnapshot {
             }
             var merged = agent
             merged.enteredAt = old.enteredAt
+            // The refetch rebuilds the row from herdr's status, which stays
+            // working or blocked after the process dies. A crash already
+            // stamped on this episode has to survive that rebuild; the next
+            // process read clears it if the agent is actually back.
+            if old.verdict.isProcessGone {
+                merged.verdict = old.verdict
+            }
             return merged
         }
     }
@@ -75,6 +82,14 @@ public struct HerdLiveTable: Sendable {
         agents = refreshed.displayAgents(preserving: agents, now: now)
     }
 
+    /// Stamp process-list reads onto the rows. See `ProcessGoneObservation.apply`.
+    public mutating func applyProcessGone(
+        _ observations: [AgentID: ProcessGoneObservation],
+        now: Date = Date()
+    ) {
+        agents = ProcessGoneObservation.apply(observations, to: agents, now: now)
+    }
+
     /// Apply one subscription event. `.workspacesChanged` is not applied
     /// here: the caller refetches and passes the snapshot to
     /// `noteLayoutRefresh`. Treating it as a normal event would leave the
@@ -117,6 +132,12 @@ public struct HerdLiveTable: Sendable {
             return updated
         }
         updated[index].enteredAt = saved.enteredAt
+        // The new id's row was built from herdr's status. The crash was
+        // stamped on the pre-refetch id, and a same-episode move keeps it.
+        // A process read after this move clears it if the agent is back.
+        if saved.verdict.isProcessGone {
+            updated[index].verdict = saved.verdict
+        }
         return updated
     }
 

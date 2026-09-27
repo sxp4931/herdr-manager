@@ -557,6 +557,83 @@ struct AttentionTriageTests {
         #expect(counts.working == 0)
         #expect(counts.total == 4)
         #expect(counts.urgent == 2)
+        #expect(AttentionTriage.kind(for: blockedSilent) == .blocked)
+        #expect(AttentionTriage.kind(for: goneSilent) == .gone)
+        #expect(AttentionTriage.kind(for: doneSilent) == .done)
+        #expect(AttentionTriage.kind(for: idleSilent) == .idle)
+        #expect(AttentionTriage.kind(for: workingSilent) == .silent)
+    }
+
+    @Test("A crashed pane is not drawn or counted as blocked")
+    func goneMarkAndFooterAreNotBlocked() {
+        let crashedWhileBlocked = Agent(
+            id: AgentID("crash-blocked"),
+            status: .blocked,
+            verdict: .processGone(lastLine: "zsh")
+        )
+        let crashedWhileWorking = Agent(
+            id: AgentID("crash-working"),
+            status: .working,
+            verdict: .processGone(lastLine: "zsh")
+        )
+        let crashedUnknown = Agent(
+            id: AgentID("crash-unknown"),
+            status: .unknown,
+            verdict: .processGone(lastLine: "zsh")
+        )
+        let blocked = Agent(id: AgentID("blocked"), status: .blocked)
+        let silent = Agent(
+            id: AgentID("silent"),
+            status: .working,
+            verdict: .silent(since: Date(), cpu: nil)
+        )
+        let done = Agent(id: AgentID("done"), status: .done, verdict: .healthy)
+        let working = Agent(id: AgentID("working"), status: .working, verdict: .healthy)
+        let idle = Agent(id: AgentID("idle"), status: .idle, verdict: .healthy)
+        let unknown = Agent(id: AgentID("unknown"), status: .unknown)
+
+        #expect(AttentionTriage.kind(for: crashedWhileBlocked) == .gone)
+        #expect(AttentionTriage.kind(for: crashedWhileWorking) == .gone)
+        #expect(AttentionTriage.kind(for: crashedUnknown) == .gone)
+        #expect(AttentionTriage.kind(for: blocked) == .blocked)
+        #expect(AttentionTriage.kind(for: silent) == .silent)
+        #expect(AttentionTriage.kind(for: done) == .done)
+        #expect(AttentionTriage.kind(for: working) == .working)
+        #expect(AttentionTriage.kind(for: idle) == .idle)
+        #expect(AttentionTriage.kind(for: unknown) == .unknown)
+        #expect(AttentionTriage.kind(for: crashedWhileBlocked).rawValue == "gone")
+
+        #expect(AttentionTriage.statusMark(for: crashedWhileBlocked) == "GONE")
+        #expect(AttentionTriage.statusMark(for: crashedWhileWorking) == "GONE")
+        #expect(AttentionTriage.statusMark(for: blocked) == "🔴")
+        #expect(AttentionTriage.statusMark(for: silent) == "🟠")
+        #expect(AttentionTriage.statusMark(for: done) == "🔵")
+        #expect(AttentionTriage.statusMark(for: working) == "🟢")
+        #expect(AttentionTriage.statusMark(for: working, working: "🟡") == "🟡")
+        #expect(AttentionTriage.statusMark(for: idle) == "🟢")
+        #expect(AttentionTriage.statusMark(for: unknown) == "⚪")
+        #expect(
+            AttentionTriage.statusMark(for: crashedWhileBlocked)
+                != AttentionTriage.statusMark(for: blocked)
+        )
+        // The working override does not recolor a crash or an idle pane.
+        #expect(AttentionTriage.statusMark(for: crashedWhileWorking, working: "🟡") == "GONE")
+        #expect(AttentionTriage.statusMark(for: idle, working: "🟡") == "🟢")
+
+        let counts = AttentionTriage.counts([
+            crashedWhileBlocked, crashedWhileWorking, blocked, silent, done, working, idle, unknown,
+        ])
+        #expect(counts.gone == 2)
+        #expect(counts.blocked == 1)
+        #expect(counts.silent == 1)
+        #expect(counts.done == 1)
+        #expect(counts.working == 1)
+        #expect(AttentionTriage.statusFooter(agentCount: 8, counts: counts)
+            == "8 agents | 1 blocked | 2 gone | 1 silent | 1 done")
+        // A herd whose only attention is a crash used to read as nothing.
+        let onlyGone = AttentionTriage.counts([crashedWhileBlocked])
+        #expect(AttentionTriage.statusFooter(agentCount: 1, counts: onlyGone)
+            == "1 agents | 0 blocked | 1 gone | 0 silent | 0 done")
     }
 
     @Test("Worst-first order is gone/blocked, silent, done")

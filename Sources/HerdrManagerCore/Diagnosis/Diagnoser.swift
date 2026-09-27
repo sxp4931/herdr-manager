@@ -1,5 +1,43 @@
 import Foundation
 
+// MARK: - Process-gone observation
+
+/// What one process-list read says about a pane that is supposed to be
+/// alive. `.unknown` means the read failed or came back empty; it is not
+/// evidence the agent is running.
+public enum ProcessGoneObservation: Sendable, Equatable {
+    case gone(lastLine: String?)
+    case running
+    case unknown
+
+    /// Stamp these reads onto rows. A crash replaces the row's verdict.
+    /// A running read clears a crash back to the status verdict and leaves
+    /// every other verdict alone. An unknown read, or an id that was not
+    /// checked, changes nothing.
+    public static func apply(
+        _ observations: [AgentID: ProcessGoneObservation],
+        to agents: [Agent],
+        now: Date = Date()
+    ) -> [Agent] {
+        agents.map { agent in
+            guard let observation = observations[agent.id] else { return agent }
+            switch observation {
+            case .gone(let lastLine):
+                var updated = agent
+                updated.verdict = .processGone(lastLine: lastLine)
+                return updated
+            case .running:
+                guard agent.verdict.isProcessGone else { return agent }
+                var updated = agent
+                updated.verdict = HerdSnapshot.displayVerdict(for: agent.status, now: now)
+                return updated
+            case .unknown:
+                return agent
+            }
+        }
+    }
+}
+
 // MARK: - Diagnoser
 
 /// The S1-S4 classifier. Precedence: S3 → S1 → S2 → S4.
@@ -30,9 +68,12 @@ public actor Diagnoser {
     ) async -> Verdict {
         let paneId = agent.id.raw  // herdr uses full session-qualified IDs (e.g. "w5:p2")
 
-        // S3: Process gone — check first, highest priority
-        if let s3 = await checkProcessGone(agent: agent, paneId: paneId, adapter: adapter) {
-            return s3
+        // S3: Process gone — check first, highest priority.
+        // An unreadable process list is not proof the agent is alive, so
+        // only a confirmed bare shell returns here. Anything else falls
+        // through to the status checks.
+        if case .gone(let lastLine) = await checkProcessGone(agent: agent, paneId: paneId, adapter: adapter) {
+            return .processGone(lastLine: lastLine)
         }
 
         // S1: Awaiting input — blocked + explain
@@ -68,18 +109,25 @@ public actor Diagnoser {
 
     // MARK: - S3: Process Gone
 
-    /// Check if the agent's process is gone. Returns .processGone if so, nil otherwise.
+    /// One process-list read for callers that stamp the crash onto a row
+    /// and leave every other verdict alone. `.unknown` is not "alive":
+    /// a failed or empty read must not clear a crash already on the row.
+    public func observeProcessGone(agent: Agent, adapter: HerdrAdapter) async -> ProcessGoneObservation {
+        await checkProcessGone(agent: agent, paneId: agent.id.raw, adapter: adapter)
+    }
+
+    /// Check if the agent's process is gone.
     ///
     /// A *finished* (`done`) or `idle` agent has legitimately returned to the
     /// shell — that is the expected end state, NOT a crash, so we never flag it.
     /// We only consider agents that are supposed to be alive (working/blocked/
     /// unknown), and even then we corroborate: the foreground must be a bare
     /// shell. If a non-shell process (e.g. `node`/`bun` hosting the agent) is
-    /// in the foreground, the read is inconclusive and we stay silent rather
-    /// than raise a false "process gone".
-    private func checkProcessGone(agent: Agent, paneId: String, adapter: HerdrAdapter) async -> Verdict? {
+    /// in the foreground, the read says the agent is still running. An empty
+    /// list or a failed read is `.unknown` — not proof either way.
+    private func checkProcessGone(agent: Agent, paneId: String, adapter: HerdrAdapter) async -> ProcessGoneObservation {
         guard agent.status == .working || agent.status == .blocked || agent.status == .unknown else {
-            return nil
+            return .running
         }
 
         do {
@@ -87,19 +135,19 @@ public actor Diagnoser {
             let procs = procInfo.foregroundProcesses
 
             // Empty foreground = we couldn't read it; inconclusive, don't alarm.
-            guard !procs.isEmpty else { return nil }
+            guard !procs.isEmpty else { return .unknown }
 
             // Corroborate: only a bare shell in the foreground means the agent's
             // process group vanished. Anything else (a runtime hosting it) means
-            // we genuinely can't tell, so we do not declare it gone.
+            // the agent is still there.
             let foregroundIsBareShell = procs.allSatisfy { Self.isShellProcessName($0.name) }
-            guard foregroundIsBareShell else { return nil }
+            guard foregroundIsBareShell else { return .running }
 
             let lastLine = procs.last.map { "\($0.name) (pid \($0.pid))" }
-            return .processGone(lastLine: lastLine)
+            return .gone(lastLine: lastLine)
         } catch {
-            // If we can't get process info, we can't determine S3 — fall through
-            return nil
+            // If we can't get process info, we can't determine S3.
+            return .unknown
         }
     }
 

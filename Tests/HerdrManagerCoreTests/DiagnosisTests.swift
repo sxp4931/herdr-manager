@@ -651,6 +651,43 @@ struct DiagnoserFinishedClassificationTests {
         #expect(verdict.isProcessGone)
     }
 
+    @Test("A process read distinguishes a crash, a live runtime, and an unreadable list")
+    func observeProcessGoneDoesNotTreatUnknownAsAlive() async {
+        let working = Agent(id: AgentID("w1:p1"), kind: .claude, status: .working)
+        let diagnoser = Diagnoser()
+        let crashed = await diagnoser.observeProcessGone(agent: working, adapter: MockHerdrAdapter(
+            processInfoResult: bareShell
+        ))
+        #expect(crashed == .gone(lastLine: "zsh (pid 10)"))
+
+        let runtime = ProcessInfoResult(
+            shellPid: 10,
+            foregroundProcesses: [ForegroundProcess(pid: 456, name: "node", argv0: nil, cmdline: nil, cwd: nil)]
+        )
+        let alive = await diagnoser.observeProcessGone(agent: working, adapter: MockHerdrAdapter(
+            processInfoResult: runtime
+        ))
+        #expect(alive == .running)
+
+        let unreadable = await diagnoser.observeProcessGone(agent: working, adapter: MockHerdrAdapter(
+            processInfoResult: ProcessInfoResult(shellPid: 10, foregroundProcesses: [])
+        ))
+        #expect(unreadable == .unknown)
+
+        // A thrown read is the same as an empty one: not evidence of life.
+        let failed = await diagnoser.observeProcessGone(
+            agent: working, adapter: MockHerdrAdapter(processInfoResult: nil)
+        )
+        #expect(failed == .unknown)
+
+        // Done has legitimately returned to the shell, and the read is not asked.
+        let done = Agent(id: AgentID("w1:p1"), kind: .claude, status: .done)
+        let finished = await diagnoser.observeProcessGone(
+            agent: done, adapter: MockHerdrAdapter(processInfoResult: nil)
+        )
+        #expect(finished == .running)
+    }
+
     @Test("Blocked with a bare shell is process-gone, not awaiting input")
     func blockedBareShellIsGone() async {
         let agent = Agent(id: AgentID("w1:p1"), kind: .claude, status: .blocked)
@@ -667,6 +704,77 @@ struct DiagnoserFinishedClassificationTests {
         let verdict = await Diagnoser().diagnose(agent: agent, adapter: adapter)
         #expect(verdict.isProcessGone)
         #expect(!verdict.isAwaitingInput)
+    }
+}
+
+@Suite("Process-gone stamp")
+struct ProcessGoneStampTests {
+    private let now = Date(timeIntervalSince1970: 8_000)
+
+    @Test("A crash replaces the status verdict and a running read clears only that crash")
+    func stampSetsAndClears() {
+        let working = Agent(id: AgentID("w1:p1"), status: .working, verdict: .healthy)
+        let blocked = Agent(
+            id: AgentID("w1:p2"),
+            status: .blocked,
+            verdict: .awaitingInput(BlockClassification(
+                kind: .unknownBlock, since: now, summary: "blocked"
+            ))
+        )
+        let crashed = ProcessGoneObservation.apply(
+            [working.id: .gone(lastLine: "zsh (pid 1)")],
+            to: [working, blocked],
+            now: now
+        )
+        #expect(crashed[0].verdict == .processGone(lastLine: "zsh (pid 1)"))
+        #expect(crashed[1].verdict.isAwaitingInput)
+        #expect(AttentionTriage.kind(for: crashed[0]) == .gone)
+        #expect(AttentionTriage.statusMark(for: crashed[0]) == "GONE")
+        #expect(AttentionTriage.statusMark(for: crashed[1]) == "🔴")
+        #expect(AttentionTriage.statusFooter(agentCount: 2, counts: AttentionTriage.counts(crashed))
+            == "2 agents | 1 blocked | 1 gone | 0 silent | 0 done")
+
+        // Running clears the crash back to the status verdict. The permission
+        // prompt beside it is not a crash and stays.
+        let cleared = ProcessGoneObservation.apply(
+            [working.id: .running],
+            to: crashed,
+            now: now
+        )
+        #expect(cleared[0].verdict.isHealthy)
+        #expect(cleared[1].verdict.isAwaitingInput)
+
+        let blockedCrash = ProcessGoneObservation.apply(
+            [blocked.id: .gone(lastLine: nil)],
+            to: [blocked],
+            now: now
+        )
+        let blockedAgain = ProcessGoneObservation.apply(
+            [blocked.id: .running],
+            to: blockedCrash,
+            now: now
+        )
+        #expect(blockedAgain[0].verdict == HerdSnapshot.displayVerdict(for: .blocked, now: now))
+    }
+
+    @Test("An unreadable process list does not clear a crash or invent one")
+    func unknownLeavesTheRow() {
+        let crashed = Agent(
+            id: AgentID("w1:p1"),
+            status: .working,
+            verdict: .processGone(lastLine: "zsh (pid 1)")
+        )
+        let healthy = Agent(id: AgentID("w1:p2"), status: .working, verdict: .healthy)
+        let after = ProcessGoneObservation.apply(
+            [crashed.id: .unknown, healthy.id: .unknown],
+            to: [crashed, healthy],
+            now: now
+        )
+        #expect(after[0].verdict == crashed.verdict)
+        #expect(after[1].verdict.isHealthy)
+
+        let untouched = ProcessGoneObservation.apply([:], to: [crashed], now: now)
+        #expect(untouched[0].verdict == crashed.verdict)
     }
 }
 

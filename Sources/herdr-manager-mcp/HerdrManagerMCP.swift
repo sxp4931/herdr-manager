@@ -1689,7 +1689,7 @@ actor MCPServer {
         let silent = counts.silent
         let done = counts.done
         let working = counts.working
-        let idle = agents.filter { $0.status == .idle && !$0.verdict.isProcessGone }.count
+        let idle = agents.filter { AttentionTriage.kind(for: $0) == .idle }.count
 
         // Group by workspace
         var byWorkspace: [String: [Agent]] = [:]
@@ -1703,14 +1703,18 @@ actor MCPServer {
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         var statusParts: [String] = []
-        if gone > 0 { statusParts.append("🔴 \(gone) gone") }
-        if blocked > 0 { statusParts.append("🔴 \(blocked) blocked") }
-        if silent > 0 { statusParts.append("🟠 \(silent) silent") }
-        if done > 0 { statusParts.append("🔵 \(done) done") }
-        if working > 0 { statusParts.append("🟡 \(working) working") }
-        if idle > 0 { statusParts.append("🟢 \(idle) idle") }
-        let unknown = agents.filter { $0.status == .unknown }.count
-        if unknown > 0 { statusParts.append("⚪ \(unknown) unknown") }
+        if gone > 0 { statusParts.append("\(AttentionTriage.statusMark(for: AttentionTriage.Kind.gone)) \(gone) gone") }
+        if blocked > 0 { statusParts.append("\(AttentionTriage.statusMark(for: AttentionTriage.Kind.blocked)) \(blocked) blocked") }
+        if silent > 0 { statusParts.append("\(AttentionTriage.statusMark(for: AttentionTriage.Kind.silent)) \(silent) silent") }
+        if done > 0 { statusParts.append("\(AttentionTriage.statusMark(for: AttentionTriage.Kind.done)) \(done) done") }
+        if working > 0 {
+            statusParts.append("\(AttentionTriage.statusMark(for: AttentionTriage.Kind.working, working: "🟡")) \(working) working")
+        }
+        if idle > 0 { statusParts.append("\(AttentionTriage.statusMark(for: AttentionTriage.Kind.idle)) \(idle) idle") }
+        let unknown = agents.filter { AttentionTriage.kind(for: $0) == .unknown }.count
+        if unknown > 0 {
+            statusParts.append("\(AttentionTriage.statusMark(for: AttentionTriage.Kind.unknown)) \(unknown) unknown")
+        }
         lines.append(statusParts.joined(separator: " · "))
         lines.append("")
 
@@ -1995,16 +1999,7 @@ actor MCPServer {
     // MARK: - Formatting Helpers
 
     nonisolated private static func statusGlyph(_ agent: Agent) -> String {
-        if agent.verdict.isProcessGone { return "🔴" }
-        if agent.status == .blocked { return "🔴" }
-        if AttentionTriage.isActionablySilent(agent) { return "🟠" }
-        switch agent.status {
-        case .blocked: return "🔴"
-        case .done: return "🔵"
-        case .working: return "🟡"
-        case .idle: return "🟢"
-        case .unknown: return "⚪"
-        }
+        AttentionTriage.statusMark(for: agent, working: "🟡")
     }
 
     nonisolated private static func verdictName(_ verdict: Verdict) -> String {
