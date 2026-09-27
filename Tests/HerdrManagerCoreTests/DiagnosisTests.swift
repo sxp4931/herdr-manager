@@ -2116,6 +2116,74 @@ struct DiagnoserFinishedClassificationTests {
         #expect(mixed == .running)
     }
 
+    @Test("A spaced agent basename herdr looks up is not a crashed agent")
+    func spacedAgentBasenameIsNotProcessGone() async {
+        let working = Agent(id: AgentID("w1:p1"), kind: .custom("kimi"), status: .working)
+        let diagnoser = Diagnoser()
+
+        func observe(
+            _ argv: [String],
+            pid: Int32 = 70,
+            name: String = "pwsh"
+        ) async -> ProcessGoneObservation {
+            await diagnoser.observeProcessGone(
+                agent: working,
+                adapter: MockHerdrAdapter(processInfoResult: ProcessInfoResult(
+                    shellPid: 10,
+                    foregroundProcesses: [
+                        ForegroundProcess(
+                            pid: pid, name: name, argv0: nil, cmdline: nil, cwd: nil,
+                            argv: argv
+                        )
+                    ]
+                ))
+            )
+        }
+
+        // herdr's lookup names these with a space. The hyphenated form was
+        // already an agent; `Kimi Code.exe` was the shell the agent left.
+        let kimi = await observe([
+            "powershell.exe", "-File",
+            "C:\\Program Files\\Kimi Code\\Kimi Code.exe",
+        ], name: "powershell.exe")
+        #expect(kimi == .running)
+        let qwen = await observe([
+            "pwsh", "-File", "D:\\Apps\\Qwen Code.cmd",
+        ])
+        #expect(qwen == .running)
+        let letta = await observe([
+            "/bin/zsh", "/opt/letta/Letta Code.js",
+        ], name: "zsh")
+        #expect(letta == .running)
+        let kilo = await observe([
+            "bash", "/usr/local/bin/Kilo Code",
+        ], name: "bash")
+        #expect(kilo == .running)
+        let mastra = await observe([
+            "cmd.exe", "/C", "\"C:\\Tools\\Mastra Code.bat\"",
+        ], name: "cmd.exe")
+        #expect(mastra == .running)
+        let devin = await observe([
+            "cmd.exe", "/K", "\"Devin CLI.exe\" --resume",
+        ], pid: 71, name: "cmd.exe")
+        #expect(devin == .running)
+
+        // A longer basename is not that lookup, and neither is a note
+        // after the name. The shell is still the crash.
+        let longer = await observe([
+            "sh", "/tmp/kimi code extra",
+        ], pid: 72, name: "sh")
+        #expect(longer == .gone(lastLine: "sh (pid 72)"))
+        let coder = await observe([
+            "pwsh", "-File", "C:\\Program Files\\Kimi Coder.exe",
+        ], pid: 73)
+        #expect(coder == .gone(lastLine: "pwsh (pid 73)"))
+        let helper = await observe([
+            "bash", "/usr/local/bin/devin-cli-helper",
+        ], pid: 74, name: "bash")
+        #expect(helper == .gone(lastLine: "bash (pid 74)"))
+    }
+
     @Test("Blocked with a bare shell is process-gone, not awaiting input")
     func blockedBareShellIsGone() async {
         let agent = Agent(id: AgentID("w1:p1"), kind: .claude, status: .blocked)

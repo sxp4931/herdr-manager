@@ -412,18 +412,21 @@ private enum ShellForeground {
     /// Basename herdr's agent lookup accepts as one token, after a path
     /// and one of `.exe`, `.cmd`, `.bat`, `.ps1`, `.js`. A leading `-` is
     /// a login shell's argv0, not a program. `muse-bin-<version>` is the
-    /// launcher herdr matches separately. Names with a space are not a
-    /// basename. `cli.js` is not one of these names. The npm entrypoints
-    /// herdr still calls an agent are `isKnownPackageEntrypoint`.
+    /// launcher herdr matches separately. The spaced names are the same
+    /// lookup: `Kimi Code.exe` is Kimi, and so are `Qwen Code`, `Letta
+    /// Code`, `Kilo Code`, `Mastra Code`, and `Devin CLI`. A longer
+    /// basename is not one of those. `cli.js` is not one of these names.
+    /// The npm entrypoints herdr still calls an agent are
+    /// `isKnownPackageEntrypoint`.
     private static let knownAgentPrograms: Set<String> = [
         "pi", "claude", "claude-code", "codex", "gemini", "cursor", "cursor-agent",
-        "devin", "devin-cli", "agy", "antigravity", "antigravity-cli",
-        "cline", ".cline", "omp", "mastracode", "mastra-code",
+        "devin", "devin-cli", "devin cli", "agy", "antigravity", "antigravity-cli",
+        "cline", ".cline", "omp", "mastracode", "mastra-code", "mastra code",
         "opencode", "opencode2", "open-code", "copilot", "github-copilot", "ghcs",
-        "kimi", "kimi-code", "kiro", "kiro-cli", "droid", "amp", "amp-local",
-        "grok", "grok-build", "hermes", "hermes-agent", "kilo", "kilo-code",
-        "qodercli", "qoderclicn", "qoder", "qodercn", "qwen", "qwen-code",
-        "letta", "letta-code", "maki", "muse", "muse-code", "muse-cli",
+        "kimi", "kimi-code", "kimi code", "kiro", "kiro-cli", "droid", "amp", "amp-local",
+        "grok", "grok-build", "hermes", "hermes-agent", "kilo", "kilo-code", "kilo code",
+        "qodercli", "qoderclicn", "qoder", "qodercn", "qwen", "qwen-code", "qwen code",
+        "letta", "letta-code", "letta code", "maki", "muse", "muse-code", "muse-cli",
     ]
 
     private static func launchesKnownAgent(_ process: ForegroundProcess) -> Bool {
