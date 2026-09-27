@@ -2551,6 +2551,119 @@ struct SecretRedactorTests {
             #expect(result.redactedText == line)
         }
     }
+
+    @Test("An age identity is redacted once and keeps its prefix")
+    func redactsAgeSecretKey() {
+        let redactor = SecretRedactor()
+        // age-keygen writes exactly 58 characters from the Bech32
+        // alphabet after `AGE-SECRET-KEY-1`. `Q` is in that alphabet.
+        let body = String(repeating: "Q", count: 58)
+        #expect(body.count == 58)
+        let alphabet = "QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L"
+        let mixed = String(String(repeating: alphabet, count: 2).prefix(58))
+        #expect(mixed.count == 58)
+        let key = "AGE-SECRET-KEY-1" + body
+        let mixedKey = "AGE-SECRET-KEY-1" + mixed
+        let kept = "AGE-SECRET-KEY-1[REDACTED]"
+
+        let bare = redactor.redact("age-keygen wrote \(key)")
+        #expect(bare.redactedText == "age-keygen wrote \(kept)")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains(body))
+        let again = redactor.redact(bare.redactedText)
+        #expect(again.redactedText == bare.redactedText)
+        #expect(again.redactionCount == 0)
+
+        let other = redactor.redact(mixedKey)
+        #expect(other.redactedText == kept)
+        #expect(other.redactionCount == 1)
+        #expect(!other.redactedText.contains(mixed))
+
+        // The public key on the line above is not the identity.
+        let generated = """
+        # public key: age1ql3z7hjy9xx0qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsq9vzp6
+        \(key)
+        """
+        let file = redactor.redact(generated)
+        #expect(file.redactedText.contains("age1ql3z7hjy9xx0qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsq9vzp6"))
+        #expect(file.redactedText.contains(kept))
+        #expect(!file.redactedText.contains(body))
+        #expect(file.redactionCount == 1)
+        let fileAgain = redactor.redact(file.redactedText)
+        #expect(fileAgain.redactionCount == 0)
+
+        // `AGE_SECRET_KEY` already ends in the assignment keyword. The
+        // prefix stays, and the placeholder is not a second secret.
+        let assigned = redactor.redact("AGE_SECRET_KEY=\(key)")
+        #expect(assigned.redactedText == "AGE_SECRET_KEY=\(kept)")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        let quoted = redactor.redact(#"{"token": "\#(mixedKey)"}"#)
+        #expect(quoted.redactedText == #"{"token": "\#(kept)"}"#)
+        #expect(quoted.redactionCount == 1)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        let header = redactor.redact("Authorization: Bearer \(key)")
+        #expect(header.redactedText == "Authorization: Bearer \(kept)")
+        #expect(header.redactionCount == 1)
+        let headerAgain = redactor.redact(header.redactedText)
+        #expect(headerAgain.redactionCount == 0)
+        let lower = redactor.redact("authorization: bearer \(mixedKey)")
+        #expect(lower.redactedText == "authorization: bearer \(kept)")
+        #expect(lower.redactionCount == 1)
+
+        let remote = redactor.redact("https://user:\(key)@keys.example/identity")
+        #expect(remote.redactedText == "https://user:\(kept)@keys.example/identity")
+        #expect(remote.redactionCount == 1)
+        #expect(remote.redactedText.contains("keys.example/identity"))
+        let remoteAgain = redactor.redact(remote.redactedText)
+        #expect(remoteAgain.redactionCount == 0)
+
+        let sentence = redactor.redact("saw \(key). next")
+        #expect(sentence.redactedText == "saw \(kept). next")
+        #expect(sentence.redactionCount == 1)
+        let noted = redactor.redact(key + "-note")
+        #expect(noted.redactedText == kept + "-note")
+        #expect(noted.redactionCount == 1)
+        #expect(!noted.redactedText.contains(body))
+        let hyphen = redactor.redact("my-\(key)")
+        #expect(hyphen.redactedText == "my-\(kept)")
+        #expect(hyphen.redactionCount == 1)
+
+        let pair = redactor.redact("\(key) and \(mixedKey)")
+        #expect(pair.redactedText == "\(kept) and \(kept)")
+        #expect(pair.redactionCount == 2)
+
+        // `@` is still not the end of an ordinary assignment.
+        let leftover = redactor.redact("token=\(key)@leftoversecret")
+        #expect(leftover.redactedText == "token=[REDACTED]")
+        #expect(leftover.redactionCount == 2)
+        #expect(!leftover.redactedText.contains("leftoversecret"))
+        #expect(!leftover.redactedText.contains(body))
+
+        let keptLines = [
+            "age-keygen writes AGE-SECRET-KEY-1",
+            "AGE-SECRET-KEY-1" + String(repeating: "Q", count: 57),
+            "AGE-SECRET-KEY-1" + String(repeating: "Q", count: 59),
+            key + "Q",
+            key + "1",
+            "AGE-SECRET-KEY-1" + String(repeating: "Q", count: 20) + "B" + String(repeating: "Q", count: 37),
+            "AGE-SECRET-KEY-1" + String(repeating: "Q", count: 20) + "I" + String(repeating: "Q", count: 37),
+            "AGE-SECRET-KEY-1" + String(repeating: "Q", count: 20) + "O" + String(repeating: "Q", count: 37),
+            "AGE-SECRET-KEY-1" + String(repeating: "Q", count: 20) + "-" + String(repeating: "Q", count: 37),
+            "age-secret-key-1" + body,
+            "x" + key,
+            "_" + key,
+            "age1ql3z7hjy9xx0qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsq9vzp6",
+        ]
+        for line in keptLines {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line.prefix(80))")
+            #expect(result.redactedText == line)
+        }
+    }
 }
 
 // MARK: - DwellTracker Tests

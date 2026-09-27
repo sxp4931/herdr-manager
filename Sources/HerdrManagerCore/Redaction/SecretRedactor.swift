@@ -246,6 +246,23 @@ public final class SecretRedactor: Sendable {
                 "(?<![A-Za-z0-9_])dp\\.pt\\.[A-Za-z0-9]{40,44}(?![A-Za-z0-9])",
                 "dp.pt.[REDACTED]"
             ),
+            // age identity files. `age-keygen` prints `AGE-SECRET-KEY-1`
+            // plus 58 Bech32 characters, and that line decrypts every
+            // file the matching public key encrypted. An assignment
+            // whose name ends in `secret_key` already hides
+            // `AGE_SECRET_KEY=…`. The generator's own output, and a
+            // pasted identity, have no keyword. Fifty-eight is the
+            // length age writes: a shorter body stays, and a longer
+            // run stays whole, so a tail is not left behind. The body
+            // is the Bech32 alphabet, so `B`, `I`, `O`, and `1` are
+            // not part of it. A letter, digit, or underscore glued to
+            // the front is not the prefix. The case is the one
+            // `age-keygen` prints. A public key (`age1…`) is not this
+            // line.
+            (
+                "(?<![A-Za-z0-9_])AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}(?![A-Za-z0-9])",
+                "AGE-SECRET-KEY-1[REDACTED]"
+            ),
             // Slack app-level tokens (`xapp-1-<app>-<id>-<secret>`). The
             // older `xox[baprs]` pattern does not name this prefix. The
             // version is the single digit Slack issues. Each later
