@@ -3,7 +3,9 @@ import Foundation
 extension HerdSnapshot {
     /// herdmgr's live table after one subscription event. Rows an event
     /// introduces are labelled from this snapshot; the same staleness rules
-    /// as `AgentStore.applyEvent` apply.
+    /// as `AgentStore.applyEvent` apply. An existing row also takes the
+    /// event's title, kind, directory, and any container this snapshot can
+    /// already name. Those fields are not a new episode.
     ///
     /// `pane_created` adds nothing: every new pane starts as a plain shell,
     /// and a placeholder row for it showed as an unknown agent until the
@@ -52,6 +54,13 @@ extension HerdSnapshot {
             agents[idx].status = newStatus
             if info.stateChangeSeq != 0 { agents[idx].stateChangeSeq = info.stateChangeSeq }
             agents[idx].verdict = Self.verdict(replacing: previous, with: newStatus, now: now)
+            // herdmgr has no poll. This event is the only copy of a title,
+            // kind, directory, or tab change, and none of those open an
+            // episode. A missing title or an unknown container keeps the
+            // row's current value: a seq-less payload leaves fields off,
+            // and a workspace this snapshot has not labelled yet may still
+            // be wearing the name the move created.
+            applyPresentation(of: info, to: &agents[idx])
 
         case .paneClosed(let paneId), .paneExited(let paneId):
             agents.removeAll { $0.id.raw == paneId }
@@ -159,6 +168,48 @@ extension HerdSnapshot {
         let insertAt = agents.firstIndex { $0.id.raw == previousRaw || $0.id.raw == info.paneId } ?? kept.count
         kept.insert(updated, at: min(insertAt, kept.count))
         return kept
+    }
+
+    /// Fields on `pane_updated` that are not the status episode.
+    ///
+    /// `title` wins over the stripped terminal title, matching
+    /// `displayAgent`. An empty string is absent. Kind prefers the session's
+    /// agent when that string is non-empty, then the detected `agent`.
+    /// Directory prefers `foreground_cwd`. Workspace and tab update only
+    /// when this snapshot already has a label for the id, so a raw id cannot
+    /// replace a name the move just created.
+    private func applyPresentation(of info: HerdrAgentInfo, to agent: inout Agent) {
+        guard let agentKind = info.agent, !agentKind.isEmpty else { return }
+        if let session = info.agentSession, !session.agent.isEmpty {
+            agent.kind = .custom(session.agent)
+        } else {
+            agent.kind = .custom(agentKind)
+        }
+        if let name = Self.nonempty(info.title) ?? Self.nonempty(info.terminalTitleStripped) {
+            agent.name = name
+            agent.displayName = name
+        }
+        if let directory = Self.nonempty(info.foregroundCwd) ?? Self.nonempty(info.cwd) {
+            agent.cwd = directory
+        }
+        if let workspace = knownLabel(info.workspaceId, in: workspaceNames) {
+            agent.workspaceName = workspace
+        }
+        if let tab = knownLabel(info.tabId, in: tabNames) {
+            agent.tabName = tab
+        }
+    }
+
+    /// A container this snapshot can name. An unknown id is not the raw id:
+    /// the caller keeps the label the row already has.
+    private func knownLabel(_ id: String, in names: [String: String]) -> String? {
+        guard !id.isEmpty, let known = names[id], !known.isEmpty else { return nil }
+        return known
+    }
+
+    private static func nonempty(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        return value
     }
 
     /// A same-status update does not clear a crash. herdr keeps reporting

@@ -9,7 +9,9 @@ private func makeDwellAgentInfo(
     agent: String? = "claude",
     agentStatus: String = "working",
     stateChangeSeq: UInt64 = 1,
-    session: HerdrSnapshot.AgentSession? = nil
+    session: HerdrSnapshot.AgentSession? = nil,
+    title: String? = "Claude",
+    terminalTitleStripped: String? = "Claude"
 ) -> HerdrAgentInfo {
     HerdrAgentInfo(
         paneId: paneId,
@@ -18,8 +20,8 @@ private func makeDwellAgentInfo(
         agent: agent,
         displayAgent: "claude",
         name: nil,
-        title: "Claude",
-        terminalTitleStripped: "Claude",
+        title: title,
+        terminalTitleStripped: terminalTitleStripped,
         agentStatus: agentStatus,
         agentSession: session,
         focused: false,
@@ -249,6 +251,34 @@ struct HerdLiveTableDwellTests {
 
         #expect(live.agents.first?.enteredAt == started)
         #expect(live.agents.first?.status == .blocked)
+    }
+
+    @Test("A title change before the move keeps the remembered dwell")
+    func titleChangeDoesNotDropRememberedRows() {
+        var live = initialTable()
+        refreshAfterMove(on: &live, at: refreshedAt)
+        let updateAt = Date(timeIntervalSince1970: 9_200)
+        live.apply(
+            .paneUpdated(makeDwellAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                agentStatus: "blocked", stateChangeSeq: 0,
+                title: "Action Required",
+                terminalTitleStripped: "Action Required"
+            )),
+            now: updateAt
+        )
+        #expect(live.agents.first?.name == "Action Required")
+        #expect(live.agents.first?.displayName == "Action Required")
+        #expect(live.agents.first?.workspaceName == "proj")
+        #expect(live.agents.first?.tabName == "scratch")
+        #expect(live.agents.first?.status == .blocked)
+        #expect(live.agents.first?.stateChangeSeq == 5)
+        #expect(live.agents.first?.enteredAt == refreshedAt)
+
+        live.apply(moveEvent(), now: moveAt)
+        #expect(live.agents.first?.enteredAt == started)
+        #expect(live.agents.first?.status == .blocked)
+        #expect(live.agents.first?.stateChangeSeq == 5)
     }
 
     @Test("A seq-less update that leaves the episode alone still restores")

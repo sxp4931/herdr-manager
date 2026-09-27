@@ -8,7 +8,12 @@ private func makeEventAgentInfo(
     tabId: String = "wA:t1",
     agent: String? = "claude",
     agentStatus: String = "working",
-    stateChangeSeq: UInt64 = 0
+    stateChangeSeq: UInt64 = 0,
+    title: String? = nil,
+    terminalTitleStripped: String? = nil,
+    cwd: String? = "/tmp",
+    foregroundCwd: String? = "/tmp",
+    session: HerdrSnapshot.AgentSession? = nil
 ) -> HerdrAgentInfo {
     HerdrAgentInfo(
         paneId: paneId,
@@ -17,14 +22,14 @@ private func makeEventAgentInfo(
         agent: agent,
         displayAgent: agent,
         name: nil,
-        title: nil,
-        terminalTitleStripped: nil,
+        title: title,
+        terminalTitleStripped: terminalTitleStripped,
         agentStatus: agentStatus,
-        agentSession: nil,
+        agentSession: session,
         focused: false,
         stateChangeSeq: stateChangeSeq,
-        cwd: "/tmp",
-        foregroundCwd: "/tmp",
+        cwd: cwd,
+        foregroundCwd: foregroundCwd,
         revision: 1,
         tokens: [:],
         stateLabels: [:],
@@ -99,6 +104,181 @@ struct HerdSnapshotEventsTests {
         #expect(seqless.first?.status == .working)
         #expect(seqless.first?.stateChangeSeq == 9)
         #expect(seqless.first?.enteredAt == now)
+    }
+
+    @Test("A same-status pane_updated refreshes title, kind, directory, and a known tab")
+    func paneUpdatedRefreshesPresentation() {
+        let entered = Date(timeIntervalSince1970: 1_000)
+        let row = Agent(
+            id: AgentID("wA:p1"),
+            kind: .custom("claude"),
+            name: "Review",
+            displayName: "Review",
+            status: .working,
+            stateChangeSeq: 5,
+            enteredAt: entered,
+            verdict: .processGone(lastLine: "zsh (pid 1)"),
+            workspaceName: "Cuedora",
+            tabName: "main",
+            cwd: "/old"
+        )
+        let named = HerdSnapshot(
+            version: "0.7.5", protocol: 17,
+            agents: [],
+            workspaceNames: ["wA": "Cuedora"],
+            tabNames: ["wA:t1": "main", "wA:t9": "tests"],
+            focusedWorkspaceId: nil, focusedTabId: nil, focusedPaneId: nil
+        )
+        let session = HerdrSnapshot.AgentSession(
+            source: "herdr:codex", agent: "codex", kind: "id", value: "019f"
+        )
+        let refreshed = named.applying(
+            .paneUpdated(makeEventAgentInfo(
+                paneId: "wA:p1",
+                tabId: "wA:t9",
+                agent: "claude",
+                agentStatus: "working",
+                stateChangeSeq: 0,
+                terminalTitleStripped: "Action Required",
+                cwd: "/workspace/herdr-manager",
+                foregroundCwd: "/workspace/herdr-manager/Sources",
+                session: session
+            )),
+            to: [row],
+            now: now
+        )
+        guard let agent = refreshed.first else {
+            Issue.record("Expected the row to stay")
+            return
+        }
+        #expect(agent.name == "Action Required")
+        #expect(agent.displayName == "Action Required")
+        #expect(agent.kind == .custom("codex"))
+        #expect(agent.cwd == "/workspace/herdr-manager/Sources")
+        #expect(agent.tabName == "tests")
+        #expect(agent.workspaceName == "Cuedora")
+        #expect(agent.status == .working)
+        #expect(agent.stateChangeSeq == 5)
+        #expect(agent.enteredAt == entered)
+        #expect(agent.verdict == .processGone(lastLine: "zsh (pid 1)"))
+
+        // Metadata title wins over the stripped terminal title.
+        let titled = named.applying(
+            .paneUpdated(makeEventAgentInfo(
+                paneId: "wA:p1",
+                tabId: "wA:t9",
+                agentStatus: "working",
+                stateChangeSeq: 0,
+                title: "Metadata",
+                terminalTitleStripped: "Action Required"
+            )),
+            to: refreshed,
+            now: now
+        )
+        #expect(titled.first?.name == "Metadata")
+        #expect(titled.first?.displayName == "Metadata")
+        #expect(titled.first?.enteredAt == entered)
+        #expect(titled.first?.verdict == .processGone(lastLine: "zsh (pid 1)"))
+    }
+
+    @Test("A pane_updated that omits presentation fields, or is stale, leaves them")
+    func paneUpdatedDoesNotRollPresentationBackward() {
+        let entered = Date(timeIntervalSince1970: 1_000)
+        let row = Agent(
+            id: AgentID("wA:p1"),
+            kind: .custom("codex"),
+            name: "Metadata",
+            displayName: "Metadata",
+            status: .working,
+            stateChangeSeq: 5,
+            enteredAt: entered,
+            verdict: .processGone(lastLine: "zsh (pid 1)"),
+            workspaceName: "proj",
+            tabName: "scratch",
+            cwd: "/workspace/herdr-manager/Sources"
+        )
+        let kept = labels.applying(
+            .paneUpdated(makeEventAgentInfo(
+                paneId: "wA:p1",
+                workspaceId: "wMissing",
+                tabId: "wMissing:t1",
+                agent: "claude",
+                agentStatus: "working",
+                stateChangeSeq: 0,
+                title: "",
+                terminalTitleStripped: "",
+                cwd: "",
+                foregroundCwd: nil
+            )),
+            to: [row],
+            now: now
+        )
+        guard let agent = kept.first else {
+            Issue.record("Expected the row to stay")
+            return
+        }
+        // Kind still follows the detected agent. The empty title, empty
+        // directory, and unknown container do not wipe the row.
+        #expect(agent.kind == .custom("claude"))
+        #expect(agent.name == "Metadata")
+        #expect(agent.displayName == "Metadata")
+        #expect(agent.cwd == "/workspace/herdr-manager/Sources")
+        #expect(agent.workspaceName == "proj")
+        #expect(agent.tabName == "scratch")
+        #expect(agent.enteredAt == entered)
+        #expect(agent.verdict == .processGone(lastLine: "zsh (pid 1)"))
+
+        let stale = labels.applying(
+            .paneUpdated(makeEventAgentInfo(
+                paneId: "wA:p1",
+                agentStatus: "blocked",
+                stateChangeSeq: 4,
+                terminalTitleStripped: "Older"
+            )),
+            to: kept,
+            now: now
+        )
+        // Behind the stored seq the whole event is ignored, including the
+        // title and the status it wanted to apply.
+        #expect(stale == kept)
+    }
+
+    @Test("A status change still opens an episode and takes the new title")
+    func paneUpdatedStatusChangeTakesTitle() {
+        let entered = Date(timeIntervalSince1970: 1_000)
+        let row = Agent(
+            id: AgentID("wA:p1"),
+            kind: .custom("claude"),
+            name: "Review",
+            displayName: "Review",
+            status: .working,
+            stateChangeSeq: 5,
+            enteredAt: entered,
+            verdict: .processGone(lastLine: "zsh (pid 1)"),
+            workspaceName: "Cuedora",
+            tabName: "main"
+        )
+        let changed = labels.applying(
+            .paneUpdated(makeEventAgentInfo(
+                paneId: "wA:p1",
+                agentStatus: "blocked",
+                stateChangeSeq: 6,
+                terminalTitleStripped: "Needs you"
+            )),
+            to: [row],
+            now: now
+        )
+        guard let agent = changed.first else {
+            Issue.record("Expected the row to stay")
+            return
+        }
+        #expect(agent.name == "Needs you")
+        #expect(agent.displayName == "Needs you")
+        #expect(agent.status == .blocked)
+        #expect(agent.stateChangeSeq == 6)
+        #expect(agent.enteredAt == now)
+        #expect(agent.verdict.isProcessGone == false)
+        #expect(agent.verdict.isAwaitingInput)
     }
 
     @Test("A same-status update keeps a crash, and a status change clears it")
