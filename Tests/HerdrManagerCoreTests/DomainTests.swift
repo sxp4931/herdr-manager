@@ -2346,6 +2346,87 @@ struct SecretRedactorTests {
             #expect(result.redactedText == line)
         }
     }
+
+    @Test("A Perplexity API key is redacted once and keeps its prefix")
+    func redactsPerplexityKey() {
+        let redactor = SecretRedactor()
+        let body = String(repeating: "Ab3", count: 16)
+        #expect(body.count == 48)
+        let key = "pplx-" + body
+        let kept = "pplx-[REDACTED]"
+
+        let bare = redactor.redact("searched with \(key)")
+        #expect(bare.redactedText == "searched with \(kept)")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains(body))
+        let bareAgain = redactor.redact(bare.redactedText)
+        #expect(bareAgain.redactedText == bare.redactedText)
+        #expect(bareAgain.redactionCount == 0)
+
+        // `PERPLEXITY_API_KEY` already ends in the assignment keyword.
+        // The prefix stays, and the placeholder is not a second secret.
+        let assigned = redactor.redact("PERPLEXITY_API_KEY=\(key)")
+        #expect(assigned.redactedText == "PERPLEXITY_API_KEY=\(kept)")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        let quoted = redactor.redact(#"{"api_key": "\#(key)"}"#)
+        #expect(quoted.redactedText == #"{"api_key": "\#(kept)"}"#)
+        #expect(quoted.redactionCount == 1)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        let header = redactor.redact("Authorization: Bearer \(key)")
+        #expect(header.redactedText == "Authorization: Bearer \(kept)")
+        #expect(header.redactionCount == 1)
+        let headerAgain = redactor.redact(header.redactedText)
+        #expect(headerAgain.redactionCount == 0)
+        let lower = redactor.redact("authorization: bearer \(key)")
+        #expect(lower.redactedText == "authorization: bearer \(kept)")
+        #expect(lower.redactionCount == 1)
+
+        let remote = redactor.redact("https://user:\(key)@api.perplexity.ai/chat")
+        #expect(remote.redactedText == "https://user:\(kept)@api.perplexity.ai/chat")
+        #expect(remote.redactionCount == 1)
+        #expect(remote.redactedText.contains("api.perplexity.ai/chat"))
+        let remoteAgain = redactor.redact(remote.redactedText)
+        #expect(remoteAgain.redactionCount == 0)
+
+        let sentence = redactor.redact("saw \(key). next")
+        #expect(sentence.redactedText == "saw \(kept). next")
+        #expect(sentence.redactionCount == 1)
+        let noted = redactor.redact(key + "-note")
+        #expect(noted.redactedText == kept + "-note")
+        #expect(noted.redactionCount == 1)
+        #expect(!noted.redactedText.contains(body))
+        let hyphen = redactor.redact("my-\(key)")
+        #expect(hyphen.redactedText == "my-\(kept)")
+        #expect(hyphen.redactionCount == 1)
+
+        // `@` is still not the end of an ordinary assignment.
+        let leftover = redactor.redact("token=\(key)@leftoversecret")
+        #expect(leftover.redactedText == "token=[REDACTED]")
+        #expect(leftover.redactionCount == 2)
+        #expect(!leftover.redactedText.contains("leftoversecret"))
+        #expect(!leftover.redactedText.contains(body))
+
+        let keptLines = [
+            "models include pplx-70b and pplx-api",
+            "keys start with pplx-",
+            "pplx-" + String(repeating: "a", count: 47),
+            "pplx-" + String(repeating: "a", count: 49),
+            "pplx-" + body + "1",
+            "pplx-" + String(body.prefix(20)) + "-" + String(body.dropFirst(20)),
+            "PPLX-" + body,
+            "x" + key,
+            "_" + key,
+        ]
+        for line in keptLines {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line.prefix(80))")
+            #expect(result.redactedText == line)
+        }
+    }
 }
 
 // MARK: - DwellTracker Tests

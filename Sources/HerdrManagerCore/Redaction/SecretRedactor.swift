@@ -187,6 +187,22 @@ public final class SecretRedactor: Sendable {
                 "(?<![A-Za-z0-9_])gsk_[A-Za-z0-9]{52}(?![A-Za-z0-9])",
                 "gsk_[REDACTED]"
             ),
+            // Perplexity API keys. The body is exactly 48 alphanumeric
+            // characters: that is the length the issuer's keys have, and
+            // a shorter floor would take `pplx-` out of a model name
+            // (`pplx-70b`, `pplx-api`). An assignment named key already
+            // hides `PERPLEXITY_API_KEY`. A pane log and
+            // `Authorization: Bearer` print the key with this prefix and
+            // no keyword, and the key can spend the org's search quota.
+            // A shorter body stays, and a longer one stays whole, so a
+            // tail is not left behind. A letter, digit, or underscore
+            // glued to the front is not the prefix. The prefix is the
+            // lowercase form Perplexity issues. A hyphen is not in this
+            // alphabet.
+            (
+                "(?<![A-Za-z0-9_])pplx-[A-Za-z0-9]{48}(?![A-Za-z0-9])",
+                "pplx-[REDACTED]"
+            ),
             // Slack app-level tokens (`xapp-1-<app>-<id>-<secret>`). The
             // older `xox[baprs]` pattern does not name this prefix. The
             // version is the single digit Slack issues. Each later
