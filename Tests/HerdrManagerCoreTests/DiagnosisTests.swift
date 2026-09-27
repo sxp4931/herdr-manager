@@ -3910,6 +3910,248 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([denoPort, claude]) == 12)
         #expect(Diagnoser.cpuSamplePid([helper, denoPath]) == 20)
     }
+
+    @Test("a flag Python rejects is not the agent script")
+    func pythonRejectedFlagIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Python 3.13 exits. The path after the flag is not the script,
+        // and this python is not the group leader.
+        let require = process(
+            4,
+            "python3",
+            argv: ["python3", "--require", "preload.js", "/usr/local/bin/codex"]
+        )
+        let requireEquals = process(
+            4, "python3.11", argv: ["python3.11", "--require=preload.js", "/tmp/codex"]
+        )
+        let requireOnly = process(
+            4, "python3", argv: ["python3", "--require", "/usr/local/bin/codex"]
+        )
+        let loaderValue = process(
+            4,
+            "python3",
+            argv: ["python3", "--loader", "/usr/local/bin/codex", "server.js"]
+        )
+        let importFlag = process(
+            4, "Python.exe", argv: ["Python.exe", "--import", "mod", "/tmp/codex"]
+        )
+        let cwd = process(
+            4, "python3", argv: ["python3", "--cwd", "/tmp", "/usr/local/bin/codex"]
+        )
+        let cwdEquals = process(
+            4, "python3", argv: ["python3", "--cwd=/tmp", "/tmp/codex"]
+        )
+        let envFile = process(
+            4, "python3", argv: ["python3", "--env-file", ".env", "/tmp/codex"]
+        )
+        let filter = process(
+            4, "python3", argv: ["python3", "--filter", "pkg", "/usr/local/bin/codex"]
+        )
+        let preload = process(
+            4, "python3", argv: ["python3", "--preload", "pre.js", "/tmp/codex"]
+        )
+        let tsconfig = process(
+            4,
+            "python3",
+            argv: ["python3", "--tsconfig-override=tsconfig.json", "/usr/local/bin/codex"]
+        )
+        let experimental = process(
+            4,
+            "python3",
+            argv: ["python3", "--experimental-loader", "mod.js", "/tmp/codex"]
+        )
+        let unknown = process(
+            4, "python3", argv: ["python3", "--not-a-flag", "/usr/local/bin/codex"]
+        )
+        let help = process(
+            4, "python3", argv: ["python3", "--help", "/usr/local/bin/codex"]
+        )
+        let version = process(
+            4, "python3", argv: ["python3", "--version", "/tmp/codex"]
+        )
+        let helpEquals = process(
+            4, "python3", argv: ["python3", "--help=1", "/tmp/codex"]
+        )
+        let shortR = process(
+            4, "python3", argv: ["python3", "-r", "preload.js", "/usr/local/bin/codex"]
+        )
+        let gluedR = process(
+            4, "python3", argv: ["python3", "-rpreload.js", "/tmp/codex"]
+        )
+        let shortL = process(
+            4, "Python.exe", argv: ["Python.exe", "-L", "dir", "/usr/local/bin/codex"]
+        )
+        let gluedL = process(
+            4, "python3", argv: ["python3", "-Ldir", "/tmp/codex"]
+        )
+        let shortO = process(
+            4, "python3", argv: ["python3", "-o", "out", "/tmp/codex"]
+        )
+        let gluedO = process(
+            4, "python3.11", argv: ["python3.11", "-ofile", "/usr/local/bin/codex"]
+        )
+        let shortF = process(
+            4, "python3", argv: ["python3", "-F", "pkg", "/tmp/codex"]
+        )
+        let gluedF = process(
+            4, "python3", argv: ["python3", "-Fpkg", "/usr/local/bin/codex"]
+        )
+        let shortH = process(
+            4, "python3", argv: ["python3", "-h", "/usr/local/bin/codex"]
+        )
+        let gluedH = process(
+            4, "python3", argv: ["python3", "-help", "/tmp/codex"]
+        )
+        let shortV = process(
+            4, "python3", argv: ["python3", "-V", "/usr/local/bin/codex"]
+        )
+        let gluedV = process(
+            4, "python3", argv: ["python3", "-VV", "/tmp/codex"]
+        )
+        let question = process(
+            4, "python3", argv: ["python3", "-?", "/usr/local/bin/codex"]
+        )
+        let bare = process(4, "python3", argv: ["python3", "--require"])
+        let afterSite = process(
+            4,
+            "python3",
+            argv: ["python3", "-S", "--require", "pre.js", "/usr/local/bin/codex"]
+        )
+        let rejected = [
+            require, requireEquals, requireOnly, loaderValue, importFlag, cwd, cwdEquals,
+            envFile, filter, preload, tsconfig, experimental, unknown, help, version,
+            helpEquals, shortR, gluedR, shortL, gluedL, shortO, gluedO, shortF, gluedF,
+            shortH, gluedH, shortV, gluedV, question, bare, afterSite,
+        ]
+        for exited in rejected {
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12)
+        }
+        #expect(Diagnoser.cpuSamplePid([mcp, require], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([require]) == 4)
+
+        // A script written first still runs, and so do Python's own options.
+        // `--` ends the option list. `-O` is optimize, not the rejected `-o`.
+        let scriptFirst = process(
+            20,
+            "python3",
+            argv: ["python3", "/usr/local/bin/codex", "--require", "pre.js"]
+        )
+        let endOptions = process(
+            20, "python3", argv: ["python3", "--", "/usr/local/bin/codex"]
+        )
+        let warning = process(
+            20, "python3", argv: ["python3", "-W", "ignore", "/tmp/codex"]
+        )
+        let gluedWarning = process(
+            20, "python3", argv: ["python3", "-Wignore", "/usr/local/bin/codex"]
+        )
+        let option = process(
+            20, "Python.exe", argv: ["Python.exe", "-X", "dev", "/tmp/codex"]
+        )
+        let gluedOption = process(
+            20, "python3", argv: ["python3", "-Xdev", "/usr/local/bin/codex"]
+        )
+        let site = process(
+            20, "python3", argv: ["python3", "-S", "/usr/local/bin/codex"]
+        )
+        let optimize = process(
+            20, "python3", argv: ["python3", "-O", "/usr/local/bin/codex"]
+        )
+        let optimizeTwice = process(
+            20, "python3.11", argv: ["python3.11", "-OO", "/tmp/codex"]
+        )
+        let skipLine = process(
+            20, "python3", argv: ["python3", "-x", "/usr/local/bin/codex"]
+        )
+        let hashMode = process(
+            20,
+            "python3",
+            argv: ["python3", "--check-hash-based-pycs", "always", "/tmp/codex"]
+        )
+        let kept = [
+            scriptFirst, endOptions, warning, gluedWarning, option, gluedOption, site,
+            optimize, optimizeTwice, skipLine, hashMode,
+        ]
+        for running in kept {
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20)
+        }
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, scriptFirst], foregroundProcessGroupId: 20) == 20
+        )
+
+        // Bun and Node still run the script after the flags they accept.
+        // Node still exits on `--cwd` and on a glued `-r`. Deno still
+        // consumes `--require`.
+        let bunRequire = process(
+            20, "bun", argv: ["bun", "--require", "preload.js", "/usr/local/bin/codex"]
+        )
+        let bunCwd = process(
+            20, "bun.exe", argv: ["bun.exe", "--cwd", "/tmp", "/usr/local/bin/codex"]
+        )
+        let bunImport = process(
+            20, "bun", argv: ["bun", "--import", "mod.js", "/tmp/codex"]
+        )
+        let nodeRequire = process(
+            20, "node", argv: ["node", "--require", "preload.js", "/usr/local/bin/codex"]
+        )
+        let nodeImport = process(
+            20, "nodejs", argv: ["nodejs", "--import", "mod.js", "/tmp/codex"]
+        )
+        let nodeEnv = process(
+            20, "node", argv: ["node", "--env-file", ".env", "/usr/local/bin/codex"]
+        )
+        let nodeCwd = process(
+            4, "node", argv: ["node", "--cwd", "/tmp", "/usr/local/bin/codex"]
+        )
+        let nodeGlued = process(
+            4, "node", argv: ["node", "-rpreload.js", "/usr/local/bin/codex"]
+        )
+        let denoRequire = process(
+            20, "deno", argv: ["deno", "run", "--require", "preload.js", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, bunRequire]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bunCwd]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bunImport]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeRequire]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeImport]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeEnv]) == 20)
+        #expect(Diagnoser.cpuSamplePid([nodeCwd, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([nodeGlued, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, denoRequire]) == 20)
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, bunRequire], foregroundProcessGroupId: 20) == 20
+        )
+
+        // A rejected flag in front of a Letta path is not the TUI.
+        // `-W` in front of that path still is not: Python is not Letta's runtime.
+        let falseLetta = process(
+            8,
+            "python3",
+            argv: [
+                "python3", "--require", "pre.js",
+                "/home/user/node_modules/.bin/letta",
+            ]
+        )
+        let helpLetta = process(
+            8,
+            "python3",
+            argv: ["python3", "--help", "/home/user/node_modules/.bin/letta"]
+        )
+        let warningLetta = process(
+            40, "python3", argv: ["python3", "-W", "ignore", "/tmp/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([falseLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([falseLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([falseLetta]) == 8)
+        #expect(Diagnoser.cpuSamplePid([mcp, falseLetta], foregroundProcessGroupId: 8) == 10)
+        #expect(Diagnoser.cpuSamplePid([helpLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([helper, warningLetta]) == 10)
+        #expect(Diagnoser.cpuSamplePid([warningLetta, interactive]) == 30)
+    }
 }
 
 @Suite("Diagnoser finished vs process-gone")

@@ -1529,6 +1529,12 @@ private enum ShellForeground {
     /// including a glued short. Bun still runs `--cwd` and
     /// `--title --watch`. Bun rejects `-W`, `-X`, `-S`, `-L`, and
     /// `-o`. Python's `-W` and `-X` still take the next word.
+    /// Python 3.13's only long option that reaches a script is
+    /// `--check-hash-based-pycs`. Every other `--` word, including the
+    /// shared flags and `--help` / `--version`, exits, so the path after
+    /// it is not a script. `-r`, `-L`, `-o`, `-F`, `-h`, `-V`, and `-?`
+    /// exit too, including a longer word that starts with them. Bun,
+    /// Node, and Deno still consume the long flags they accept.
     /// Bun's own value flags are not that node rule. `--title --watch`
     /// and `--user-agent --watch` run the file. `--port`, `--shell`,
     /// `--install`, and the other flags in `bunDashRejectedFlags` exit
@@ -1565,8 +1571,11 @@ private enum ShellForeground {
     /// does not take a separate word for `--experimental-loader` or
     /// `--inspect-port` (`bunFlagNamesTheScript`); `--config` is
     /// `bunConfigFlagWidth`. Bun's `--loader` is `bunLoader`: a value
-    /// with no `:` makes bun exit. Python rejects both node flags and
-    /// `--config`. Deno still consumes this set, including `--loader`.
+    /// with no `:` makes bun exit. Python exits on every long option
+    /// except `--check-hash-based-pycs` (`pythonRejectsSharedFlag`),
+    /// and on the shorts in that check. Deno still consumes this set,
+    /// including `--loader`. `--env-file` as its own word is Deno's
+    /// boolean, not a separate value.
     /// `-S` is Python's own boolean and Deno's permission flag, handled
     /// before the set. Node rejects `--cwd`, `--filter`, `--preload`,
     /// `--tsconfig-override`, `-W`, `-X`, `-S`, `-L`, `-o`, and `-F`
@@ -1659,11 +1668,12 @@ private enum ShellForeground {
             if configFlagExits(runtime), arg == "--config" || arg.hasPrefix("--config=") {
                 return nil
             }
-            // Python rejects these two node flags and exits. Bun's space
-            // form was handled above. Node still consumes them from the
-            // shared set, and so does Deno. `--debug-port` is the same
-            // rejection; node consumes it in `nodeOption`.
-            if isPythonRuntime(runtime), pythonRejectsNodeFlag(arg) {
+            // Python 3.13 exits on every long option except
+            // `--check-hash-based-pycs`, and on the shorts it does not
+            // run. `-W` and `-X` still take the next word below.
+            // Bun, Node, and Deno still consume the long flags they
+            // accept. `--config` already returned.
+            if isPythonRuntime(runtime), pythonRejectsSharedFlag(arg) {
                 return nil
             }
             // Node 22.23 exits when a value is missing or starts with
@@ -2590,7 +2600,7 @@ private enum ShellForeground {
     /// keep the value in the flag word, so they are not this check.
     /// Node consumes both in `nodeOption`: a word that starts with `-`
     /// makes node exit, and any other word is the loader or the port.
-    /// Python rejects them in `pythonRejectsNodeFlag`.
+    /// Python rejects them in `pythonRejectsSharedFlag`.
     private static func bunFlagNamesTheScript(_ arg: String) -> Bool {
         arg == "--experimental-loader" || arg == "--inspect-port"
     }
@@ -2699,24 +2709,37 @@ private enum ShellForeground {
         return nil
     }
 
-    /// Python 3.13 has none of these flags. `python3 --experimental-loader x
-    /// /tmp/codex`, `python3 --inspect-port 9229 /tmp/codex`, and
-    /// `python3 --debug-port 9229 /tmp/codex` exit before any script runs,
-    /// including the `=` form. A script written before the flag is already
-    /// returned. Node consumes the first two from the shared set and
-    /// `--debug-port` in `nodeOption`. Bun's space form of each is the
-    /// script.
-    private static func pythonRejectsNodeFlag(_ arg: String) -> Bool {
-        if arg == "--experimental-loader" || arg.hasPrefix("--experimental-loader=") {
-            return true
+    /// Shorts Python 3.13 does not run a script after. Checked on this
+    /// runtime. `-r`, `-L`, `-o`, and `-F` are unknown. `-h` and `-?`
+    /// are help, and `-V` is the version; a longer word that starts
+    /// with one of them (`-help`, `-VV`, `-V3`) exits too. `-W` and
+    /// `-X` are not here.
+    private static let pythonRejectedShorts: Set<String> = [
+        "-r", "-L", "-o", "-F", "-h", "-V", "-?",
+    ]
+
+    /// Python 3.13 exits before the file after a foreign flag runs.
+    ///
+    /// The only long option that reaches a script is exactly
+    /// `--check-hash-based-pycs`. `python3 --require preload.js
+    /// /tmp/codex`, `python3 --cwd=/tmp /tmp/codex`, `python3 --help
+    /// /tmp/codex`, and `python3 --not-a-flag /tmp/codex` all exit, and
+    /// so does `--check-hash-based-pycs=always`. `-r`, `-L`, `-o`,
+    /// `-F`, `-h`, `-V`, and `-?` exit, including `-rpreload` and
+    /// `-help`. `-W` and `-X` still run the file. `--config` exits in
+    /// `configFlagExits` before this check. Bun still runs the script
+    /// after `--require` and `--cwd`. Node consumes `--require`,
+    /// `--loader`, `--import`, and `--env-file`. Deno still consumes
+    /// those long flags. A script written before the flag is already
+    /// returned. `--` is handled before this check, so the word after
+    /// it stays the script.
+    private static func pythonRejectsSharedFlag(_ arg: String) -> Bool {
+        if arg.hasPrefix("--") {
+            return arg != "--check-hash-based-pycs"
         }
-        if arg == "--inspect-port" || arg.hasPrefix("--inspect-port=") {
-            return true
-        }
-        if arg == "--debug-port" || arg.hasPrefix("--debug-port=") {
-            return true
-        }
-        return false
+        if pythonRejectedShorts.contains(arg) { return true }
+        guard arg.hasPrefix("-"), arg.count > 2 else { return false }
+        return pythonRejectedShorts.contains(String(arg.prefix(2)))
     }
 
     /// Deno flags whose next word is the script. `-r` is `--reload`.
