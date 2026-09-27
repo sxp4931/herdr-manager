@@ -1565,6 +1565,160 @@ struct DiagnoserCpuSamplePidTests {
         let pythonDebug = process(4, "python3", argv: ["python3", "-d", "/tmp/codex"])
         #expect(Diagnoser.cpuSamplePid([nodeDefine, claude]) == 4)
         #expect(Diagnoser.cpuSamplePid([pythonDebug, claude]) == 4)
+
+        // Bun 1.4.2 still consumes these. The value named codex is not the script.
+        let feature = process(4, "bun", argv: ["bun", "--feature", "codex", "server.js"])
+        let origin = process(4, "bun", argv: ["bun", "--origin", "https://example.com/codex", "server.js"])
+        let warnings = process(4, "bun", argv: ["bun", "--redirect-warnings", "codex", "server.js"])
+        let cron = process(
+            4,
+            "bun",
+            argv: ["bun", "--cron-title", "codex", "--cron-period", "* * * * *", "server.js"]
+        )
+        let profDir = process(
+            4,
+            "bun",
+            argv: ["bun", "--cpu-prof", "--cpu-prof-dir", "/tmp/codex", "server.js"]
+        )
+        #expect(Diagnoser.cpuSamplePid([feature, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([origin, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([warnings, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([cron, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([profDir, claude]) == 12)
+
+        let featureScript = process(20, "bun", argv: ["bun", "--feature", "FLAG", "/tmp/codex"])
+        let originScript = process(
+            20,
+            "bun",
+            argv: ["bun", "--origin", "https://example.com", "/tmp/codex"]
+        )
+        let attachedFeature = process(20, "bun", argv: ["bun", "--feature=FLAG", "/tmp/codex"])
+        let targetAttached = process(20, "bun", argv: ["bun", "--target=browser", "/tmp/codex"])
+        #expect(Diagnoser.cpuSamplePid([helper, featureScript]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, originScript]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, attachedFeature]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, targetAttached]) == 20)
+
+        // A separate word after these is the script on Bun 1.4.2.
+        let external = process(4, "bun", argv: ["bun", "--external", "react", "/tmp/codex"])
+        let packages = process(4, "bun", argv: ["bun", "--packages", "external", "/tmp/codex"])
+        let target = process(4, "bun", argv: ["bun", "--target", "browser", "/tmp/codex"])
+        #expect(Diagnoser.cpuSamplePid([external, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([packages, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([target, claude]) == 12)
+
+        let featureLetta = process(
+            30,
+            "bun",
+            argv: [
+                "bun", "--feature", "KEY",
+                "/home/user/node_modules/.bin/letta", "--conversation", "id",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, featureLetta]) == 30)
+    }
+
+    @Test("a node flag value is not the agent script")
+    func nodeFlagValueIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+
+        let title = process(4, "node", argv: ["node", "--title", "codex", "server.js"])
+        let nodejsTitle = process(4, "nodejs", argv: ["nodejs", "--title", "codex", "server.js"])
+        let warnings = process(
+            4, "node", argv: ["node", "--redirect-warnings", "codex", "server.js"]
+        )
+        let profName = process(
+            4,
+            "node",
+            argv: ["node", "--cpu-prof", "--cpu-prof-name", "codex", "server.js"]
+        )
+        let conditions = process(4, "node", argv: ["node", "-C", "codex", "server.js"])
+        let diagnostic = process(
+            4, "node", argv: ["node", "--diagnostic-dir", "/tmp/codex", "server.js"]
+        )
+        let inputType = process(
+            4, "node", argv: ["node", "--input-type", "module", "server.js"]
+        )
+        let allowRead = process(
+            4, "node", argv: ["node", "--allow-fs-read", "codex", "server.js"]
+        )
+        let testPattern = process(
+            4, "node", argv: ["node", "--test-name-pattern", "codex", "server.js"]
+        )
+        #expect(Diagnoser.cpuSamplePid([title, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([nodejsTitle, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([warnings, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([profName, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([conditions, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([diagnostic, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([inputType, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([allowRead, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([testPattern, claude]) == 12)
+
+        let titleScript = process(
+            20, "node", argv: ["node", "--title", "helper", "/usr/local/bin/codex"]
+        )
+        let interval = process(
+            20, "node.exe", argv: ["node.exe", "--cpu-prof-interval", "1000", "/tmp/codex"]
+        )
+        let attached = process(20, "node", argv: ["node", "--title=helper", "/tmp/codex"])
+        let rejections = process(
+            20,
+            "node",
+            argv: ["node", "--unhandled-rejections", "strict", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, titleScript]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, interval]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, attached]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, rejections]) == 20)
+
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let leader = process(
+            20,
+            "node",
+            argv: ["node", "--title", "helper", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, leader]) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+
+        let letta = process(
+            30,
+            "node",
+            argv: [
+                "node", "--title", "app",
+                "/home/user/node_modules/.bin/letta", "--conversation", "id",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, letta]) == 30)
+        let oneShot = process(
+            8,
+            "node",
+            argv: ["node", "--diagnostic-dir", "/tmp", "letta", "--prompt", "hello"]
+        )
+        let interactive = process(30, "letta", argv: ["letta"])
+        #expect(Diagnoser.cpuSamplePid([oneShot, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([oneShot]) == 8)
+        #expect(
+            Diagnoser.cpuSamplePid([oneShot, interactive], foregroundProcessGroupId: 8) == 30
+        )
+
+        // Python does not take node's flags. The next word is the script.
+        let pythonTitle = process(4, "python3", argv: ["python3", "--title", "/tmp/codex"])
+        #expect(Diagnoser.cpuSamplePid([pythonTitle, claude]) == 4)
+
+        // `node --run`'s word is the package script, so that name stays the program.
+        let packageRun = process(4, "node", argv: ["node", "--run", "codex"])
+        #expect(Diagnoser.cpuSamplePid([packageRun, claude]) == 4)
+
+        // Node's --inspect does not consume the next word. A port there is
+        // the script, so the agent path after it is not this process.
+        let nodeInspect = process(20, "node", argv: ["node", "--inspect", "./codex"])
+        let nodeInspectPort = process(
+            4, "node", argv: ["node", "--inspect", "9229", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, nodeInspect]) == 20)
+        #expect(Diagnoser.cpuSamplePid([nodeInspectPort, claude]) == 12)
     }
 
     @Test("The shell that is the agent interpreter is the sample when nothing else is")

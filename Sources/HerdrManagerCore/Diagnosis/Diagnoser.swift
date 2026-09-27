@@ -1189,7 +1189,7 @@ private enum ShellForeground {
             }
             if lettaEvalFlag(arg) { return nil }
             if arg.hasPrefix("-") {
-                if let width = bunFlagWidth(
+                if let width = valueFlagWidth(
                     arg,
                     runtime: runtimeName,
                     following: index + 1 < argv.count ? argv[index + 1] : nil
@@ -1409,9 +1409,12 @@ private enum ShellForeground {
     /// they are not the script. Bun's value flags take the next word,
     /// including `--define` / `-d` and the other `bun run` options that
     /// require one, so `bun --define codex server.js` stays a plain
-    /// runtime. `--inspect`, `--inspect-wait`, and `--inspect-brk` take
-    /// the next word only when it is a port or host:port.
-    /// `bun --inspect ./codex` keeps the path.
+    /// runtime. Node takes its own, including `--title`, so
+    /// `node --title codex server.js` stays a plain runtime too.
+    /// `--inspect`, `--inspect-wait`, and `--inspect-brk` take
+    /// the next word only when it is a port or host:port, and only on bun.
+    /// `bun --inspect ./codex` keeps the path. Node's `--inspect` does not
+    /// take that word: `node --inspect ./codex` is the script.
     private static func runtimeScriptIsAgent(_ process: ForegroundProcess) -> Bool {
         guard let argv = launchArguments(process), let script = runtimeScript(argv) else {
             return false
@@ -1467,7 +1470,7 @@ private enum ShellForeground {
                 index += 1
                 continue
             }
-            if let width = bunFlagWidth(
+            if let width = valueFlagWidth(
                 arg,
                 runtime: runtime,
                 following: index + 1 < argv.count ? argv[index + 1] : nil
@@ -1517,14 +1520,18 @@ private enum ShellForeground {
 
     /// `bun run` options whose next word is a value, not the script.
     ///
-    /// The list is the string and number options on the current `bun run`
-    /// help. `--loader`, `--require`, `--import`, `--preload`, `--cwd`,
-    /// `--env-file`, `--config`, `--filter`, and `--tsconfig-override`
-    /// are already `runtimeValueFlags`. `-e`, `-p`, and `-c` abandon the
-    /// walk before this set is consulted, so they are not `--external`,
-    /// `--port`, or `--config`. `-dVALUE` and `--define=KEY` keep the
-    /// value in the flag word. Node and python are not bun, so
-    /// `node --define` and `python -d` do not use this set.
+    /// The list is the string and number options on Bun 1.4.2's `bun run`
+    /// help, plus `--origin`, which that binary still consumes and the
+    /// help no longer prints. `--loader`, `--require`, `--import`,
+    /// `--preload`, `--cwd`, `--env-file`, `--config`, `--filter`, and
+    /// `--tsconfig-override` are already `runtimeValueFlags`. `-e`, `-p`,
+    /// and `-c` abandon the walk before this set is consulted, so they
+    /// are not `--external`, `--port`, or `--config`. `--external`,
+    /// `--target`, and `--packages` as their own word are not options on
+    /// that binary: the next word is the script. `-dVALUE` and
+    /// `--define=KEY` keep the value in the flag word. Node and python
+    /// are not bun, so `node --define` and `python -d` do not use this set.
+    /// Node's own value flags are `nodeRequiredValueFlags`.
     private static let bunRequiredValueFlags: Set<String> = [
         "--define", "-d",
         "--drop",
@@ -1548,6 +1555,96 @@ private enum ShellForeground {
         "--max-http-header-size",
         "--dns-result-order",
         "--user-agent",
+        "--cpu-prof-name",
+        "--cpu-prof-dir",
+        "--cpu-prof-interval",
+        "--heap-prof-name",
+        "--heap-prof-dir",
+        "--heap-prof-interval",
+        "--redirect-warnings",
+        "--disable-warning",
+        "--cron-title",
+        "--cron-period",
+        "--feature",
+        "--origin",
+        "--trace-event-categories",
+        "--trace-event-file-pattern",
+    ]
+
+    /// Node options whose next word is a value, not the script.
+    ///
+    /// Checked against Node 22.23's `--help`: each `=...` option consumes
+    /// the following word when that word is not the program. `--title`,
+    /// the profiler names, and `--redirect-warnings` are the same shape
+    /// bun already skipped, so `node --title codex server.js` was rank 4.
+    /// `-C` is `--conditions`; bun rejects that short form, so it stays
+    /// here. `--env-file`, `--require`, `--import`, and `--loader` are
+    /// already `runtimeValueFlags`. `-e` / `--eval` abandon the walk.
+    /// `--run`'s word is the package script, so it stays the program.
+    /// `--inspect` does not take the next word. `--define` is not a node
+    /// flag. Python and deno are not this runtime.
+    private static let nodeRequiredValueFlags: Set<String> = [
+        "--title",
+        "--unhandled-rejections",
+        "--max-http-header-size",
+        "--dns-result-order",
+        "--watch-kill-signal",
+        "--conditions",
+        "-C",
+        "--cpu-prof-name",
+        "--cpu-prof-dir",
+        "--cpu-prof-interval",
+        "--heap-prof-name",
+        "--heap-prof-dir",
+        "--heap-prof-interval",
+        "--redirect-warnings",
+        "--disable-warning",
+        "--trace-event-categories",
+        "--trace-event-file-pattern",
+        "--disable-proto",
+        "--experimental-default-type",
+        "--input-type",
+        "--icu-data-dir",
+        "--localstorage-file",
+        "--tls-keylog",
+        "--v8-pool-size",
+        "--use-largepages",
+        "--heapsnapshot-signal",
+        "--heapsnapshot-near-heap-limit",
+        "--report-signal",
+        "--report-dir",
+        "--report-directory",
+        "--report-filename",
+        "--inspect-publish-uid",
+        "--secure-heap",
+        "--secure-heap-min",
+        "--openssl-config",
+        "--diagnostic-dir",
+        "--env-file-if-exists",
+        "--watch-path",
+        "--allow-fs-read",
+        "--allow-fs-write",
+        "--experimental-config-file",
+        "--snapshot-blob",
+        "--build-snapshot-config",
+        "--experimental-sea-config",
+        "--experimental-test-isolation",
+        "--max-old-space-size-percentage",
+        "--tls-cipher-list",
+        "--trace-require-module",
+        "--test-reporter",
+        "--test-reporter-destination",
+        "--test-name-pattern",
+        "--test-skip-pattern",
+        "--test-timeout",
+        "--test-shard",
+        "--test-concurrency",
+        "--test-coverage-branches",
+        "--test-coverage-include",
+        "--test-coverage-exclude",
+        "--test-coverage-functions",
+        "--test-coverage-lines",
+        "--network-family-autoselection-attempt-timeout",
     ]
 
     /// Optional address. `bun --inspect ./codex` is the script. A separate
@@ -1557,14 +1654,28 @@ private enum ShellForeground {
     ]
 
     /// Words this flag occupies, including itself. Nil when `arg` is not
-    /// one of bun's value flags. A required value always takes the next
-    /// word. An inspect flag takes it only when that word is an address.
+    /// one of bun's or node's value flags. A required value always takes
+    /// the next word. An inspect flag takes it only when that word is an
+    /// address, and only on bun.
+    private static func valueFlagWidth(_ arg: String, runtime: String, following: String?) -> Int? {
+        if let width = bunFlagWidth(arg, runtime: runtime, following: following) {
+            return width
+        }
+        return nodeFlagWidth(arg, runtime: runtime)
+    }
+
     private static func bunFlagWidth(_ arg: String, runtime: String, following: String?) -> Int? {
         guard runtime == "bun" else { return nil }
         if bunRequiredValueFlags.contains(arg) { return 2 }
         guard bunInspectFlags.contains(arg) else { return nil }
         if let following, looksLikeInspectAddress(following) { return 2 }
         return 1
+    }
+
+    private static func nodeFlagWidth(_ arg: String, runtime: String) -> Int? {
+        guard runtime == "node" || runtime == "nodejs" else { return nil }
+        guard nodeRequiredValueFlags.contains(arg) else { return nil }
+        return 2
     }
 
     /// A port, `host:port`, `host:port/prefix`, or `[::1]:port`. A Windows
