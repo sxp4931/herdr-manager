@@ -172,6 +172,21 @@ public final class SecretRedactor: Sendable {
             ),
             // xAI API keys
             ("xai-[A-Za-z0-9]{20,}", "xai-[REDACTED]"),
+            // Groq API keys. The body is exactly 52 alphanumeric
+            // characters: that is the length the issuer's keys have, and
+            // a shorter floor would take `gsk_` out of a sentence. An
+            // assignment named key already hides `GROQ_API_KEY`. A pane
+            // log and `Authorization: Bearer` print the key with this
+            // prefix and no keyword, and the key can spend the org's
+            // inference quota. A shorter body stays, and a longer one
+            // stays whole, so a tail is not left behind. A letter,
+            // digit, or underscore glued to the front is not the
+            // prefix. The prefix is the lowercase form Groq issues.
+            // A hyphen is not in this alphabet.
+            (
+                "(?<![A-Za-z0-9_])gsk_[A-Za-z0-9]{52}(?![A-Za-z0-9])",
+                "gsk_[REDACTED]"
+            ),
             // Slack app-level tokens (`xapp-1-<app>-<id>-<secret>`). The
             // older `xox[baprs]` pattern does not name this prefix. The
             // version is the single digit Slack issues. Each later
