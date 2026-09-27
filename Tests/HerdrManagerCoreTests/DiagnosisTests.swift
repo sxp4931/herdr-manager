@@ -5072,6 +5072,145 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([helper, denoUnknown]) == 20)
         #expect(Diagnoser.cpuSamplePid([helper, denoHelp]) == 20)
     }
+
+    @Test("a node value the runtime rejects is not the agent script")
+    func nodeRejectedValueIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23 exits on these operands, so the path is not the script
+        // and that node is not the group leader.
+        let rejected: [(String, [String])] = [
+            ("rejections", ["node", "--unhandled-rejections", "nope", "/usr/local/bin/codex"]),
+            ("rejections-case", ["nodejs", "--unhandled-rejections", "Strict", "/tmp/codex"]),
+            ("rejections-eq", ["node", "--unhandled-rejections=nope", "/tmp/codex"]),
+            ("dns", ["node", "--dns-result-order", "Verbatim", "/usr/local/bin/codex"]),
+            ("proto", ["node.exe", "--disable-proto", "off", "/tmp/codex"]),
+            ("input", ["node", "--input-type", "nope", "/usr/local/bin/codex"]),
+            ("default-type", ["node", "--experimental-default-type", "module-typescript", "/tmp/codex"]),
+            ("trace", ["node", "--trace-require-module", "true", "/usr/local/bin/codex"]),
+            ("pages", ["node", "--use-largepages", "OFF", "/tmp/codex"]),
+            ("pages-eq", ["nodejs", "--use-largepages=default", "/tmp/codex"]),
+            ("uid", ["node", "--inspect-publish-uid", "STDERR", "/usr/local/bin/codex"]),
+            ("uid-tail", ["node", "--inspect-publish-uid", "stderr,nope", "/tmp/codex"]),
+            ("cpu-name", ["node", "--cpu-prof-name", "out", "/usr/local/bin/codex"]),
+            ("cpu-name-eq", ["node.exe", "--cpu-prof-name=out", "/tmp/codex"]),
+            ("cpu-dir", ["node", "--cpu-prof-dir", "/tmp", "/usr/local/bin/codex"]),
+            ("cpu-off", ["node", "--cpu-prof", "--no-cpu-prof", "--cpu-prof-name", "out", "/tmp/codex"]),
+            ("cpu-interval", ["node", "--cpu-prof-interval", "100", "/usr/local/bin/codex"]),
+            ("cpu-interval-eq", ["nodejs", "--cpu-prof-interval=1e3", "/tmp/codex"]),
+            ("heap-name", ["node", "--heap-prof-name", "out", "/usr/local/bin/codex"]),
+            ("heap-interval", ["node", "--heap-prof-interval", "1", "/tmp/codex"]),
+            ("heap-off", ["node", "--heap-prof", "--no-heap-prof", "--heap-prof-interval", "1", "/tmp/codex"]),
+            ("tls", ["node", "--tls-min-v1.3", "--tls-max-v1.2", "/usr/local/bin/codex"]),
+            ("tls-eq", ["node.exe", "--tls-min-v1.3=true", "--tls-max-v1.2", "/tmp/codex"]),
+            ("ca", ["node", "--use-openssl-ca", "--use-bundled-ca", "/usr/local/bin/codex"]),
+            ("ca-eq", ["nodejs", "--use-openssl-ca=true", "--use-bundled-ca", "/tmp/codex"]),
+            ("fs-read", ["node", "--allow-fs-read", "/tmp", "/usr/local/bin/codex"]),
+            ("fs-write", ["node.exe", "--allow-fs-write", "/tmp", "/tmp/codex"]),
+            ("fs-off", ["node", "--permission", "--no-permission", "--allow-fs-read", "/tmp", "/usr/local/bin/codex"]),
+            ("fs-no-eq", ["nodejs", "--no-permission=true", "--allow-fs-read=/tmp", "/tmp/codex"]),
+        ]
+        for (label, argv) in rejected {
+            let exited = process(4, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(label) ranked the path")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(label) took the sample from the leader slot"
+            )
+        }
+        #expect(
+            Diagnoser.cpuSamplePid([
+                process(4, "node", argv: ["node", "--unhandled-rejections", "nope", "/tmp/codex"])
+            ]) == 4
+        )
+
+        // The same flags with a value Node runs, including a default
+        // profiler interval and a companion that appears after the name.
+        let kept: [(String, [String])] = [
+            ("rejections", ["node", "--unhandled-rejections", "strict", "/usr/local/bin/codex"]),
+            ("rejections-eq", ["node", "--unhandled-rejections=none", "/tmp/codex"]),
+            ("rejections-long", ["nodejs", "--unhandled-rejections", "warn-with-error-code", "/tmp/codex"]),
+            ("dns", ["node", "--dns-result-order", "ipv4first", "/usr/local/bin/codex"]),
+            ("dns-eq", ["node", "--dns-result-order=verbatim", "/tmp/codex"]),
+            ("proto", ["node.exe", "--disable-proto", "delete", "/tmp/codex"]),
+            ("proto-throw", ["node", "--disable-proto=throw", "/usr/local/bin/codex"]),
+            ("input", ["node", "--input-type", "module-typescript", "/tmp/codex"]),
+            ("input-eq", ["node", "--input-type=commonjs", "/usr/local/bin/codex"]),
+            ("default-type", ["nodejs", "--experimental-default-type", "commonjs", "/tmp/codex"]),
+            ("trace", ["node", "--trace-require-module", "no-node-modules", "/usr/local/bin/codex"]),
+            ("trace-all", ["node", "--trace-require-module=all", "/tmp/codex"]),
+            ("pages", ["node", "--use-largepages", "silent", "/usr/local/bin/codex"]),
+            ("pages-eq", ["node.exe", "--use-largepages=off", "/tmp/codex"]),
+            ("uid", ["node", "--inspect-publish-uid", "stderr,http", "/usr/local/bin/codex"]),
+            ("uid-empty", ["node", "--inspect-publish-uid", ",", "/tmp/codex"]),
+            ("cpu-with", ["node", "--cpu-prof", "--cpu-prof-name", "out", "/usr/local/bin/codex"]),
+            ("cpu-after", ["node", "--cpu-prof-name", "out", "--cpu-prof", "/tmp/codex"]),
+            ("cpu-eq", ["nodejs", "--cpu-prof=false", "--cpu-prof-dir", "/tmp", "/usr/local/bin/codex"]),
+            ("cpu-back", ["node", "--no-cpu-prof", "--cpu-prof", "--cpu-prof-name", "out", "/tmp/codex"]),
+            ("cpu-1000", ["node", "--cpu-prof-interval", "1000", "/usr/local/bin/codex"]),
+            ("cpu-plus", ["node.exe", "--cpu-prof-interval", "+1000", "/tmp/codex"]),
+            ("cpu-zeros", ["node", "--cpu-prof-interval", "01000", "/usr/local/bin/codex"]),
+            ("cpu-tail", ["node", "--cpu-prof-interval", "1000abc", "/tmp/codex"]),
+            ("cpu-dot", ["nodejs", "--cpu-prof-interval=1000.5abc", "/tmp/codex"]),
+            ("cpu-space", ["node", "--cpu-prof-interval", " 1000", "/usr/local/bin/codex"]),
+            ("cpu-on-nope", ["node", "--cpu-prof", "--cpu-prof-interval", "nope", "/tmp/codex"]),
+            ("heap-default", ["node", "--heap-prof-interval", "524288", "/usr/local/bin/codex"]),
+            ("heap-plus", ["node.exe", "--heap-prof-interval", "+524288", "/tmp/codex"]),
+            ("heap-tail", ["node", "--heap-prof-interval", "524288.9", "/usr/local/bin/codex"]),
+            ("heap-with", ["node", "--heap-prof", "--heap-prof-name", "out", "/tmp/codex"]),
+            ("heap-on-one", ["nodejs", "--heap-prof", "--heap-prof-interval", "1", "/usr/local/bin/codex"]),
+            ("heap-default-off", ["node", "--heap-prof", "--no-heap-prof", "--heap-prof-interval", "524288", "/tmp/codex"]),
+            ("tls-one", ["node", "--tls-min-v1.3", "/usr/local/bin/codex"]),
+            ("tls-cleared", ["node", "--tls-min-v1.3", "--no-tls-min-v1.3", "--tls-max-v1.2", "/tmp/codex"]),
+            ("ca-one", ["node.exe", "--use-openssl-ca", "/usr/local/bin/codex"]),
+            ("script-first", ["node", "/usr/local/bin/codex", "--tls-min-v1.3", "--tls-max-v1.2"]),
+            ("script-first-ca", ["nodejs", "/tmp/codex", "--use-openssl-ca", "--use-bundled-ca"]),
+            ("fs-on", ["node", "--permission", "--allow-fs-read", "/tmp", "/usr/local/bin/codex"]),
+            ("fs-after", ["node", "--allow-fs-read", "/tmp", "--permission", "/tmp/codex"]),
+            ("fs-alias", ["nodejs", "--experimental-permission=true", "--allow-fs-write", "/tmp", "/usr/local/bin/codex"]),
+            ("fs-back", ["node.exe", "--no-experimental-permission", "--permission", "--allow-fs-read", "*", "/tmp/codex"]),
+        ]
+        for (label, argv) in kept {
+            let running = process(20, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(label) dropped the script")
+        }
+        let leader = process(
+            20,
+            "node",
+            argv: ["node", "--cpu-prof", "--cpu-prof-name", "out", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+
+        let badLetta = process(
+            8,
+            "node",
+            argv: ["node", "--unhandled-rejections", "nope", "/tmp/letta"]
+        )
+        let tlsLetta = process(
+            8,
+            "node",
+            argv: ["node", "--tls-min-v1.3", "--tls-max-v1.2", "/home/user/node_modules/.bin/letta"]
+        )
+        let keptLetta = process(
+            40,
+            "node",
+            argv: ["node", "--unhandled-rejections", "throw", "/tmp/letta"]
+        )
+        let profLetta = process(
+            40,
+            "nodejs",
+            argv: ["nodejs", "--cpu-prof-interval", "1000", "/tmp/letta", "--prompt"]
+        )
+        #expect(Diagnoser.cpuSamplePid([badLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([tlsLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([helper, keptLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, profLetta]) == 10)
+        #expect(Diagnoser.cpuSamplePid([profLetta, interactive]) == 30)
+    }
 }
 
 @Suite("Diagnoser finished vs process-gone")

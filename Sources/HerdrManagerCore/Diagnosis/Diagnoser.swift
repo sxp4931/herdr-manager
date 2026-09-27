@@ -1180,6 +1180,11 @@ private enum ShellForeground {
         }
         guard let runtime = argv.first, isNodeOrBunRuntime(runtime) else { return nil }
         let runtimeName = shellBase(runtime)
+        // The same pair that makes `runtimeScript` return nil. The path
+        // after it is not Letta, because node exits before the file.
+        if isNodeRuntime(runtimeName), nodePrefixFlags(argv).conflicts {
+            return nil
+        }
         var index = 1
         var skippedSubcommand = false
         while index < argv.count {
@@ -1249,7 +1254,8 @@ private enum ShellForeground {
                 if isNodeRuntime(runtimeName),
                    let option = nodeOption(
                     arg,
-                    following: index + 1 < argv.count ? argv[index + 1] : nil
+                    following: index + 1 < argv.count ? argv[index + 1] : nil,
+                    argv: argv
                    ) {
                     switch option {
                     case .skip(let width):
@@ -1642,6 +1648,12 @@ private enum ShellForeground {
 
     private static func runtimeScript(_ argv: [String]) -> String? {
         let runtime = argv.first.map { shellBase($0) } ?? ""
+        // Node exits before the file when two booleans cannot be set
+        // together. A script written first is already the program:
+        // options after it are arguments, and that prefix has no conflict.
+        if isNodeRuntime(runtime), nodePrefixFlags(argv).conflicts {
+            return nil
+        }
         var index = 1
         var skippedSubcommand = false
         while index < argv.count {
@@ -1727,7 +1739,7 @@ private enum ShellForeground {
             // Node 22.23 exits when a value is missing or starts with
             // `-`, and when the flag is one bun or Python owns. The
             // path after that flag is not a program.
-            if isNodeRuntime(runtime), let option = nodeOption(arg, following: following) {
+            if isNodeRuntime(runtime), let option = nodeOption(arg, following: following, argv: argv) {
                 switch option {
                 case .skip(let width):
                     index += width
@@ -2616,19 +2628,29 @@ private enum ShellForeground {
     /// the same exit. A long option that is not a Node boolean, a V8
     /// flag, or one of those value flags is `nodeLongOption`: Node
     /// exits, so `node --not-a-flag /tmp/codex` and `node --revision`
-    /// do not run the file. Bun does not use this check: `--title
-    /// --watch` runs the file, `--not-a-flag` is the script, and
-    /// `--cwd` takes the directory. Python's `-W` and `-X` still take
-    /// the next word.
-    private static func nodeOption(_ arg: String, following: String?) -> NodeOption? {
+    /// do not run the file. An enum value Node 22.23 rejects
+    /// (`--unhandled-rejections nope`, `--use-largepages OFF`) is the
+    /// same exit, and so is a profiler flag whose companion is off
+    /// (`--cpu-prof-name out` without `--cpu-prof`). Bun does not use
+    /// this check: `--title --watch` runs the file, `--not-a-flag` is
+    /// the script, and `--cwd` takes the directory. Python's `-W` and
+    /// `-X` still take the next word.
+    private static func nodeOption(
+        _ arg: String,
+        following: String?,
+        argv: [String]
+    ) -> NodeOption? {
         if nodeOptionExits(arg) { return .exits }
         if nodeTakesSeparateValue(arg) {
             if let following, !following.hasPrefix("-") {
+                if nodeRejectedOperand(name: arg, value: following, argv: argv) {
+                    return .exits
+                }
                 return .skip(2)
             }
             return .exits
         }
-        return nodeLongOption(arg)
+        return nodeLongOption(arg, argv: argv)
     }
 
     /// A Node long option after the value flags have been claimed.
@@ -2644,12 +2666,16 @@ private enum ShellForeground {
     /// value. `--help`, `--version`, `--v8-options`, and
     /// `--completion-bash` print and exit. Anything else, including
     /// `--not-a-flag` and `--revision`, exits before the file runs.
-    private static func nodeLongOption(_ arg: String) -> NodeOption? {
+    private static func nodeLongOption(_ arg: String, argv: [String]) -> NodeOption? {
         guard let (name, value) = splitNodeFlag(arg) else { return nil }
         if NodeRuntimeFlags.printFlags.contains(name) { return .exits }
         if nodeValueFlagName(name) {
             guard let value else { return nil }
-            return value.isEmpty ? .exits : .skip(1)
+            if value.isEmpty { return .exits }
+            if nodeRejectedOperand(name: name, value: String(value), argv: argv) {
+                return .exits
+            }
+            return .skip(1)
         }
         if NodeRuntimeFlags.v8Values.contains(name) {
             guard let value else { return .exits }
@@ -2736,6 +2762,216 @@ private enum ShellForeground {
         let short = String(arg.prefix(2))
         if short == "-r" || short == "-C" { return true }
         return nodeRejectedFlags.contains(short)
+    }
+
+    /// Node 22.23.2 values that do not run a script. The sets are the
+    /// checks in `EnvironmentOptions::CheckOptions` and `node.cc`. An
+    /// empty string is the unset default for every flag except
+    /// `--use-largepages`, whose default is the word `off` and whose
+    /// empty word is `invalid value`. `--disable-proto=` is still
+    /// `nodeEmptyEquals`: the `=` form with nothing after it exits
+    /// before this set is read.
+    private static let nodeEnumValues: [String: Set<String>] = [
+        "--unhandled-rejections": [
+            "", "strict", "throw", "warn", "none", "warn-with-error-code",
+        ],
+        "--dns-result-order": ["", "verbatim", "ipv4first", "ipv6first"],
+        "--disable-proto": ["", "delete", "throw"],
+        "--input-type": [
+            "", "module", "commonjs", "module-typescript", "commonjs-typescript",
+        ],
+        "--experimental-default-type": ["", "module", "commonjs"],
+        "--trace-require-module": ["", "all", "no-node-modules"],
+        "--use-largepages": ["off", "on", "silent"],
+    ]
+
+    /// True when this operand makes Node 22.23 exit. `name` has no `=`.
+    ///
+    /// `--cpu-prof-name` and `--cpu-prof-dir` need `--cpu-prof` somewhere
+    /// before the script. `--heap-prof-name`, `--heap-prof-dir`, and a
+    /// non-default `--heap-prof-interval` need `--heap-prof`. The CPU
+    /// interval's default is 1000 and the heap interval's is 524288
+    /// (`512 * 1024`). `--cpu-prof-interval 1000` runs with profiling
+    /// off, and so does `+1000`, `01000`, and `1000abc`: the integer
+    /// parser keeps the leading number and ignores the tail. With the
+    /// companion on, `nope` still runs. `--cpu-prof=false` turns
+    /// profiling on. `--no-cpu-prof` turns it off, and the later flag
+    /// wins. A script written first is not this check.
+    private static func nodeRejectedOperand(
+        name: String,
+        value: String,
+        argv: [String]
+    ) -> Bool {
+        if let allowed = nodeEnumValues[name] {
+            return !allowed.contains(value)
+        }
+        if name == "--inspect-publish-uid" {
+            return !nodePublishUID(value)
+        }
+        let prefix = nodePrefixFlags(argv)
+        switch name {
+        case "--cpu-prof-name", "--cpu-prof-dir":
+            return !value.isEmpty && !prefix.cpuProf
+        case "--heap-prof-name", "--heap-prof-dir":
+            return !value.isEmpty && !prefix.heapProf
+        case "--cpu-prof-interval":
+            return !prefix.cpuProf && !nodeIntegerPrefixEquals(value, 1000)
+        case "--heap-prof-interval":
+            return !prefix.heapProf && !nodeIntegerPrefixEquals(value, 524288)
+        case "--allow-fs-read", "--allow-fs-write":
+            // Both exit unless `--permission` (or its alias
+            // `--experimental-permission`) is on before the script.
+            // `--allow-addons` does not: it runs with the flag off.
+            return !prefix.permission
+        default:
+            return false
+        }
+    }
+
+    /// `stderr` and `http`, comma-separated. An empty segment is
+    /// ignored, so `,` and `stderr,` still run. `STDERR` and
+    /// `stderr,nope` do not. A space after the comma is part of the
+    /// token.
+    private static func nodePublishUID(_ value: String) -> Bool {
+        for token in value.split(separator: ",", omittingEmptySubsequences: false) {
+            if token.isEmpty { continue }
+            let word = String(token)
+            if word != "stderr" && word != "http" { return false }
+        }
+        return true
+    }
+
+    /// The leading integer `strtoll` would keep. Leading C whitespace
+    /// and one `+` or `-` are allowed. At least one digit is required.
+    /// The rest of the word is ignored, so `1000.5abc` is 1000. No
+    /// digit (`nope`, `+`) does not match. A value that does not fit in
+    /// `Int64` does not match.
+    private static func nodeIntegerPrefixEquals(_ value: String, _ target: Int64) -> Bool {
+        let scalars = Array(value.unicodeScalars)
+        var index = 0
+        while index < scalars.count, nodeIsCSpace(scalars[index]) {
+            index += 1
+        }
+        var negative = false
+        if index < scalars.count, scalars[index].value == 43 || scalars[index].value == 45 {
+            negative = scalars[index].value == 45
+            index += 1
+        }
+        var digits = 0
+        var number: Int64 = 0
+        while index < scalars.count {
+            let character = scalars[index]
+            guard character.value >= 48, character.value <= 57 else { break }
+            let digit = Int64(character.value - 48)
+            if number > (Int64.max - digit) / 10 { return false }
+            number = number * 10 + digit
+            digits += 1
+            index += 1
+        }
+        guard digits > 0 else { return false }
+        if negative {
+            if number == Int64.max { return false }
+            number = -number
+        }
+        return number == target
+    }
+
+    /// `isspace` in the C locale: space, tab, newline, vertical tab,
+    /// form feed, carriage return.
+    private static func nodeIsCSpace(_ character: Unicode.Scalar) -> Bool {
+        switch character.value {
+        case 9, 10, 11, 12, 13, 32:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Booleans read from the flags before the first positional. A
+    /// later `--no-` wins, and `--flag=false` is still on: Node's
+    /// boolean parser does not read the attached word. `--cpu-prof-name`
+    /// is not `--cpu-prof`.
+    private struct NodePrefix {
+        var cpuProf = false
+        var heapProf = false
+        var tlsMin13 = false
+        var tlsMax12 = false
+        var opensslCA = false
+        var bundledCA = false
+        var permission = false
+
+        var conflicts: Bool {
+            (tlsMin13 && tlsMax12) || (opensslCA && bundledCA)
+        }
+
+        mutating func set(_ flag: NodeBoolFlag, on: Bool) {
+            switch flag {
+            case .cpu: cpuProf = on
+            case .heap: heapProf = on
+            case .tlsMin: tlsMin13 = on
+            case .tlsMax: tlsMax12 = on
+            case .openssl: opensslCA = on
+            case .bundled: bundledCA = on
+            case .permission: permission = on
+            }
+        }
+    }
+
+    private enum NodeBoolFlag {
+        case cpu
+        case heap
+        case tlsMin
+        case tlsMax
+        case openssl
+        case bundled
+        case permission
+    }
+
+    private static func nodePrefixFlags(_ argv: [String]) -> NodePrefix {
+        var state = NodePrefix()
+        guard let first = argv.first, isNodeRuntime(shellBase(first)) else { return state }
+        var index = 1
+        while index < argv.count {
+            let arg = argv[index]
+            if arg == "--" || !arg.hasPrefix("-") { break }
+            if let (flag, on) = nodeBooleanUpdate(arg) {
+                state.set(flag, on: on)
+                index += 1
+                continue
+            }
+            let width = arg.contains("=") || !nodeTakesSeparateValue(arg) ? 1 : 2
+            index += width
+        }
+        return state
+    }
+
+    /// `--cpu-prof`, `--cpu-prof=false`, and `--no-cpu-prof=true`.
+    /// The word before `=` is the flag. Nil when `arg` is a different
+    /// option, including `--cpu-prof-name`.
+    private static func nodeBooleanUpdate(_ arg: String) -> (NodeBoolFlag, Bool)? {
+        let word = arg.split(separator: "=", maxSplits: 1).first.map(String.init) ?? arg
+        let negated = word.hasPrefix("--no-")
+        let name: String
+        if negated {
+            let rest = word.dropFirst(5)
+            guard !rest.isEmpty else { return nil }
+            name = "--" + String(rest)
+        } else {
+            name = word
+        }
+        let flag: NodeBoolFlag?
+        switch name {
+        case "--cpu-prof": flag = .cpu
+        case "--heap-prof": flag = .heap
+        case "--tls-min-v1.3": flag = .tlsMin
+        case "--tls-max-v1.2": flag = .tlsMax
+        case "--use-openssl-ca": flag = .openssl
+        case "--use-bundled-ca": flag = .bundled
+        case "--permission", "--experimental-permission": flag = .permission
+        default: flag = nil
+        }
+        guard let flag else { return nil }
+        return (flag, !negated)
     }
 
     /// Bun 1.4.2 rejects these shorts. `bun -W ignore /tmp/codex` exits
