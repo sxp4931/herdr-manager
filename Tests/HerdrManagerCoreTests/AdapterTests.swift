@@ -1086,6 +1086,40 @@ struct ResponseEnvelopeTests {
         let info = LiveHerdrAdapter.parseProcessInfo(response)
         #expect(info.shellPid == 42)
         #expect(info.foregroundProcesses.isEmpty)
+        #expect(info.foregroundProcessGroupId == nil)
+    }
+
+    @Test("pane.process_info keeps a positive foreground process group id")
+    func processInfoGroupId() throws {
+        let response: [String: Any] = [
+            "process_info": [
+                "shell_pid": 1,
+                "foreground_process_group_id": 42,
+                "foreground_processes": [] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        #expect(LiveHerdrAdapter.parseProcessInfo(response).foregroundProcessGroupId == 42)
+
+        let flat: [String: Any] = ["foreground_process_group_id": 7]
+        #expect(LiveHerdrAdapter.parseProcessInfo(flat).foregroundProcessGroupId == 7)
+
+        let missing: [String: Any] = ["process_info": ["shell_pid": 1] as [String: Any]]
+        #expect(LiveHerdrAdapter.parseProcessInfo(missing).foregroundProcessGroupId == nil)
+
+        let zero: [String: Any] = ["foreground_process_group_id": 0]
+        #expect(LiveHerdrAdapter.parseProcessInfo(zero).foregroundProcessGroupId == nil)
+
+        let negative: [String: Any] = ["foreground_process_group_id": -5]
+        #expect(LiveHerdrAdapter.parseProcessInfo(negative).foregroundProcessGroupId == nil)
+
+        let fraction: [String: Any] = ["foreground_process_group_id": 42.5]
+        #expect(LiveHerdrAdapter.parseProcessInfo(fraction).foregroundProcessGroupId == nil)
+
+        let flag: [String: Any] = ["foreground_process_group_id": true]
+        #expect(LiveHerdrAdapter.parseProcessInfo(flag).foregroundProcessGroupId == nil)
+
+        let overflow: [String: Any] = ["foreground_process_group_id": 2_147_483_648]
+        #expect(LiveHerdrAdapter.parseProcessInfo(overflow).foregroundProcessGroupId == nil)
     }
 }
 

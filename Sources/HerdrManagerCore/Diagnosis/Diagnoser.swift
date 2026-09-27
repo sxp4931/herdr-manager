@@ -272,7 +272,10 @@ public actor Diagnoser {
         let pid: Int32?
         do {
             let procInfo = try await adapter.processInfo(paneId: paneId)
-            pid = Self.cpuSamplePid(procInfo.foregroundProcesses)
+            pid = Self.cpuSamplePid(
+                procInfo.foregroundProcesses,
+                foregroundProcessGroupId: procInfo.foregroundProcessGroupId
+            )
         } catch {
             return .unknown
         }
@@ -324,9 +327,17 @@ public actor Diagnoser {
     }
 
     /// Pid whose CPU a silence reading should trust. Nil when the group
-    /// is empty or only a bare shell. See `ShellForeground.cpuSamplePid`.
-    static func cpuSamplePid(_ processes: [ForegroundProcess]) -> Int32? {
-        ShellForeground.cpuSamplePid(processes)
+    /// is empty or only a bare shell. `foregroundProcessGroupId` is
+    /// `pane.process_info`'s leader, when herdr sent one. See
+    /// `ShellForeground.cpuSamplePid`.
+    static func cpuSamplePid(
+        _ processes: [ForegroundProcess],
+        foregroundProcessGroupId: Int32? = nil
+    ) -> Int32? {
+        ShellForeground.cpuSamplePid(
+            processes,
+            foregroundProcessGroupId: foregroundProcessGroupId
+        )
     }
 
     /// Silent threshold for an agent kind.
@@ -1011,7 +1022,23 @@ private enum ShellForeground {
     /// outranks any other helper. The same rank prefers a runtime over a
     /// process that is not one, then the lower pid, so a helper spawned
     /// later does not hide the process that started the group.
-    static func cpuSamplePid(_ processes: [ForegroundProcess]) -> Int32? {
+    ///
+    /// That tie is wrong when herdr has already named the leader.
+    /// `foreground_process_group_id` is the pid herdr's job walk checks
+    /// first. When that process is the agent, it is the sample even if
+    /// an MCP `node …/codex` beside it is also rank 4 and has the lower
+    /// pid. A shell leader is not that process: the child is. A Letta
+    /// one-shot or server is not the interactive agent, so it is not the
+    /// leader herdr returns and it does not take rank 4. Two plain
+    /// runtimes still tie on the lower pid. The group id is omitted on
+    /// a herdr that does not send it, and the rank walk is unchanged.
+    static func cpuSamplePid(
+        _ processes: [ForegroundProcess],
+        foregroundProcessGroupId: Int32? = nil
+    ) -> Int32? {
+        if let leader = rankedAgentLeader(processes, groupId: foregroundProcessGroupId) {
+            return leader
+        }
         var best: (key: SampleKey, pid: Int32)?
         for process in processes {
             guard process.pid > 0, let key = sampleKey(process) else { continue }
@@ -1019,6 +1046,22 @@ private enum ShellForeground {
             best = (key, process.pid)
         }
         return best?.pid
+    }
+
+    /// The group leader when herdr's job walk would return that process
+    /// as the agent. Nil when the id is missing, not in the list, or the
+    /// leader is a shell or a Letta one-shot: the rank walk then picks
+    /// the child, and it does not treat the shell's idle CPU as the agent.
+    private static func rankedAgentLeader(
+        _ processes: [ForegroundProcess],
+        groupId: Int32?
+    ) -> Int32? {
+        guard let groupId, groupId > 0,
+              let leader = processes.first(where: { $0.pid == groupId }) else {
+            return nil
+        }
+        guard isRankedAgent(leader, runtime: isGenericRuntime(leader)) else { return nil }
+        return leader.pid
     }
 
     private struct SampleKey {
@@ -1036,9 +1079,7 @@ private enum ShellForeground {
     private static func sampleKey(_ process: ForegroundProcess) -> SampleKey? {
         let runtime = isGenericRuntime(process)
         let rank: Int
-        if runtime && (runtimeScriptIsAgent(process) || isCursorBundledNode(process)) {
-            rank = 4
-        } else if isDirectAgentProcess(process) {
+        if isRankedAgent(process, runtime: runtime) {
             rank = 4
         } else if isKnownAgentProcess(process) {
             rank = 3
@@ -1050,6 +1091,20 @@ private enum ShellForeground {
             return nil
         }
         return SampleKey(rank: rank, runtime: runtime, pid: process.pid)
+    }
+
+    /// Rank 4: the process herdr's job walk can return as the agent.
+    /// A runtime whose script is an agent, the Windows Cursor bundle, or
+    /// a process whose name, argv0, or argv[0] is the agent. A Letta
+    /// one-shot is the same binary and is not this rank: herdr skips it
+    /// and keeps looking. The shell that launched the agent stays at
+    /// rank 3, so this predicate is not the crash check.
+    private static func isRankedAgent(_ process: ForegroundProcess, runtime: Bool) -> Bool {
+        if isNonInteractiveLetta(process) { return false }
+        if runtime && (runtimeScriptIsAgent(process) || isCursorBundledNode(process)) {
+            return true
+        }
+        return isDirectAgentProcess(process)
     }
 
     /// The comm name, the argv0 field, or argv[0] is an agent program.
@@ -1068,6 +1123,167 @@ private enum ShellForeground {
             return true
         }
         return false
+    }
+
+    /// Letta's binary is also the one-shot CLI and the server. herdr
+    /// names only the interactive TUI: no one-shot flag, and no
+    /// positional after `--backend`. A `node`, `nodejs`, or `bun` script
+    /// is that entrypoint. `python` and `deno` are not, so a file named
+    /// `letta` under them is not rank 4. A shell whose program is
+    /// `letta` is not a runtime and not a direct agent, so it stays at
+    /// rank 3. The crash rule still uses `launchesKnownAgent`.
+    private enum LettaInvocation: Equatable {
+        case interactive
+        case noninteractive
+        case notLetta
+    }
+
+    private static func isNonInteractiveLetta(_ process: ForegroundProcess) -> Bool {
+        lettaInvocation(process) == .noninteractive
+    }
+
+    private static func lettaInvocation(_ process: ForegroundProcess) -> LettaInvocation {
+        guard let argv = launchArguments(process), !argv.isEmpty else {
+            if isLettaProgram(process.name) || process.argv0.map({ isLettaProgram($0) }) == true {
+                return .interactive
+            }
+            return .notLetta
+        }
+        if let index = lettaEntrypointIndex(argv) {
+            let cli = Array(argv.dropFirst(index + 1))
+            return lettaArgsAreInteractive(cli) ? .interactive : .noninteractive
+        }
+        // Identified as Letta without the node/bun entrypoint: a python
+        // or deno script, or a comm name that is Letta while argv[0] is
+        // not. herdr then judges the whole vector, and a runtime in
+        // argv[0] fails the "starts with -" check.
+        if runtimeScriptIsLetta(argv)
+            || isLettaProgram(process.name)
+            || process.argv0.map({ isLettaProgram($0) }) == true {
+            return lettaArgsAreInteractive(argv) ? .interactive : .noninteractive
+        }
+        return .notLetta
+    }
+
+    /// argv index of the Letta program. Zero when argv[0] is Letta.
+    /// Otherwise the script of `node` or `bun`, which is the walker
+    /// herdr uses. Eval, including `-e` glued to its code, is not a script.
+    private static func lettaEntrypointIndex(_ argv: [String]) -> Int? {
+        if let first = argv.first, isLettaProgram(first) {
+            return 0
+        }
+        guard let runtime = argv.first, isNodeOrBunRuntime(runtime) else { return nil }
+        var index = 1
+        while index < argv.count {
+            let arg = argv[index]
+            if arg == "--" {
+                guard index + 1 < argv.count, isLettaProgram(argv[index + 1]) else { return nil }
+                return index + 1
+            }
+            if lettaEvalFlag(arg) { return nil }
+            if arg.hasPrefix("-") {
+                index += lettaOptionTakesValue(arg) ? 2 : 1
+                continue
+            }
+            return isLettaProgram(arg) ? index : nil
+        }
+        return nil
+    }
+
+    private static func isNodeOrBunRuntime(_ name: String) -> Bool {
+        switch shellBase(name) {
+        case "node", "nodejs", "bun":
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// `-e` / `--eval` / `-p` / `--print`, including a value glued on.
+    /// herdr's Letta walker treats that word as eval and stops.
+    private static func lettaEvalFlag(_ arg: String) -> Bool {
+        let flags = ["-e", "--eval", "-p", "--print"]
+        for flag in flags {
+            if arg == flag { return true }
+            if flag.hasPrefix("--"), arg.hasPrefix(flag + "=") { return true }
+            if !flag.hasPrefix("--"), arg.hasPrefix(flag), arg.count > flag.count {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// The value-taking runtime flags, matched whole. `--require=mod`
+    /// keeps its value in the word, so the next word can be the script.
+    private static func lettaOptionTakesValue(_ arg: String) -> Bool {
+        runtimeValueFlags.contains(arg)
+    }
+
+    private static let lettaOneShotFlags: Set<String> = [
+        "-p", "--print", "--prompt", "--json", "--stream-json", "--run",
+        "--disable-memory-guard", "--output-format", "--input-format",
+        "--include-partial-messages", "--from-agent", "--environment", "--env",
+        "--pre-load-skills", "--tags", "--ephemeral", "--stateless",
+        "--max-turns", "--memfs-startup", "-h", "--help", "-v", "--version",
+        "--info", "--update", "--upgrade",
+    ]
+
+    /// True when the words after the Letta program are the TUI.
+    /// A one-shot flag anywhere says no. `--backend <name>` and
+    /// `--backend=<name>` are skipped; a positional after that is the
+    /// server or a subcommand, and that is not the TUI either.
+    private static func lettaArgsAreInteractive(_ args: [String]) -> Bool {
+        for arg in args {
+            let option = arg.split(
+                separator: "=",
+                maxSplits: 1,
+                omittingEmptySubsequences: false
+            ).first.map(String.init) ?? arg
+            if lettaOneShotFlags.contains(option) { return false }
+        }
+        return lettaFirstArgAfterBackend(args)?.hasPrefix("-") ?? true
+    }
+
+    private static func lettaFirstArgAfterBackend(_ args: [String]) -> String? {
+        var index = 0
+        while index < args.count {
+            let arg = args[index]
+            if arg == "--backend" {
+                index += 2
+                continue
+            }
+            if arg.hasPrefix("--backend=") {
+                index += 1
+                continue
+            }
+            return arg
+        }
+        return nil
+    }
+
+    private static func runtimeScriptIsLetta(_ argv: [String]) -> Bool {
+        guard let script = runtimeScript(argv) else { return false }
+        return isLettaProgram(script)
+    }
+
+    /// Basename herdr maps to Letta, or the `@letta-ai/letta-code`
+    /// package entrypoint. A longer name (`letta-helper`) is not it.
+    private static func isLettaProgram(_ token: String) -> Bool {
+        let trimmed = trimQuotes(token).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("-") else { return false }
+        if isLettaBasename(agentBase(trimmed)) { return true }
+        return isLettaPackage(trimmed)
+    }
+
+    private static func isLettaBasename(_ base: String) -> Bool {
+        base == "letta" || base == "letta-code" || base == "letta code"
+    }
+
+    private static func isLettaPackage(_ token: String) -> Bool {
+        let components = token.split(whereSeparator: { $0 == "/" || $0 == "\\" }).map(String.init)
+        guard !components.isEmpty else { return false }
+        let normalized = components.map { normalizedPathComponent($0) }
+        return packageWindow(normalized, ["node_modules", "@letta-ai", "letta-code", "letta"])
     }
 
     /// Windows Cursor's install is `node.exe` beside `index.js`, under

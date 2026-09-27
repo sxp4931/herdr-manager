@@ -510,11 +510,21 @@ public struct AgentExplainResult: Sendable {
 
 public struct ProcessInfoResult: Sendable {
     public let shellPid: Int32?
+    /// `pane.process_info`'s `foreground_process_group_id`, when herdr
+    /// sent a positive pid. The silence sample prefers this process when
+    /// it is the agent herdr would name. Nil when the field was absent,
+    /// not an integer, or not a positive pid.
+    public let foregroundProcessGroupId: Int32?
     public let foregroundProcesses: [ForegroundProcess]
 
-    public init(shellPid: Int32?, foregroundProcesses: [ForegroundProcess]) {
+    public init(
+        shellPid: Int32?,
+        foregroundProcesses: [ForegroundProcess],
+        foregroundProcessGroupId: Int32? = nil
+    ) {
         self.shellPid = shellPid
         self.foregroundProcesses = foregroundProcesses
+        self.foregroundProcessGroupId = foregroundProcessGroupId
     }
 }
 

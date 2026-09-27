@@ -1467,6 +1467,132 @@ struct DiagnoserCpuSamplePidTests {
         let script = process(4, "node", argv: ["node", "codex"])
         #expect(Diagnoser.cpuSamplePid([macNode, script]) == 4)
     }
+
+    @Test("The foreground group leader herdr calls the agent is the sample")
+    func groupLeaderIsTheSample() {
+        let claude = process(42, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        // No group id: same rank, and the runtime wins the tie.
+        #expect(Diagnoser.cpuSamplePid([claude, mcp]) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, claude]) == 10)
+        #expect(Diagnoser.cpuSamplePid([claude, mcp], foregroundProcessGroupId: 42) == 42)
+        #expect(Diagnoser.cpuSamplePid([mcp, claude], foregroundProcessGroupId: 42) == 42)
+
+        let codex = process(7, "codex", argv: ["codex"])
+        #expect(Diagnoser.cpuSamplePid([claude, codex]) == 7)
+        #expect(Diagnoser.cpuSamplePid([claude, codex], foregroundProcessGroupId: 42) == 42)
+
+        // The leader is the runtime herdr names, not the other agent.
+        #expect(Diagnoser.cpuSamplePid([claude, mcp], foregroundProcessGroupId: 10) == 10)
+
+        let shell = process(4, "bash", argv: ["bash"])
+        let node = process(43, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        #expect(Diagnoser.cpuSamplePid([shell, node], foregroundProcessGroupId: 4) == 43)
+
+        let interpreter = process(2, "sh", argv: ["sh", "claude"])
+        #expect(Diagnoser.cpuSamplePid([interpreter, claude], foregroundProcessGroupId: 2) == 42)
+
+        #expect(Diagnoser.cpuSamplePid([claude, mcp], foregroundProcessGroupId: 99) == 10)
+        #expect(Diagnoser.cpuSamplePid([claude, mcp], foregroundProcessGroupId: 0) == 10)
+
+        // Two plain runtimes are not agents. The leader does not break the tie.
+        let older = process(18, "node", argv: ["node", "a.js"])
+        let newer = process(22, "node", argv: ["node", "b.js"])
+        #expect(Diagnoser.cpuSamplePid([newer, older], foregroundProcessGroupId: 22) == 18)
+    }
+
+    @Test("A one-shot Letta is not the interactive agent")
+    func noninteractiveLettaIsNotTheAgent() {
+        let interactive = process(30, "letta", argv: ["letta", "--backend", "local"])
+        let helper = process(4, "node", argv: ["node", "server.js"])
+        #expect(Diagnoser.cpuSamplePid([helper, interactive]) == 30)
+
+        let equalsBackend = process(33, "letta", argv: ["letta", "--backend=local"])
+        #expect(Diagnoser.cpuSamplePid([helper, equalsBackend]) == 33)
+        let spaced = process(34, "Letta Code.exe", argv: ["Letta Code.exe", "--backend", "local"])
+        #expect(Diagnoser.cpuSamplePid([helper, spaced]) == 34)
+
+        // herdr's entrypoint walk is node/bun. python is not the TUI.
+        let python = process(40, "python3", argv: ["python3", "/tmp/letta", "--prompt", "hi"])
+        #expect(Diagnoser.cpuSamplePid([python, interactive]) == 30)
+        let pythonBare = process(41, "python3", argv: ["python3", "/tmp/letta"])
+        #expect(Diagnoser.cpuSamplePid([pythonBare, interactive]) == 30)
+
+        let bare = process(21, "letta", argv: ["letta"])
+        #expect(Diagnoser.cpuSamplePid([helper, bare]) == 21)
+        let named = process(23, "letta")
+        #expect(Diagnoser.cpuSamplePid([helper, named]) == 23)
+
+        let conversation = process(
+            31,
+            "node",
+            argv: ["node", "/home/user/project/node_modules/.bin/letta", "--conversation", "id"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, conversation]) == 31)
+
+        let windows = process(
+            32,
+            "node.exe",
+            argv: [
+                "node.exe",
+                #"C:\Users\user\AppData\Roaming\npm\node_modules\@letta-ai\letta-code\letta.js"#,
+                "--agent",
+                "agent-id",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, windows]) == 32)
+
+        let prompt = process(
+            5,
+            "node",
+            argv: ["node", "/home/user/project/node_modules/.bin/letta", "--prompt", "hello"]
+        )
+        #expect(Diagnoser.cpuSamplePid([prompt, interactive]) == 30)
+        // The only foreground process is still a sample.
+        #expect(Diagnoser.cpuSamplePid([prompt]) == 5)
+
+        let server = process(6, "letta", argv: ["letta", "server"])
+        #expect(Diagnoser.cpuSamplePid([server, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([server]) == 6)
+        #expect(Diagnoser.cpuSamplePid([server, interactive], foregroundProcessGroupId: 6) == 30)
+
+        let leaderPrompt = process(8, "letta", argv: ["letta", "--prompt", "hello"])
+        #expect(Diagnoser.cpuSamplePid([leaderPrompt, interactive], foregroundProcessGroupId: 8) == 30)
+
+        let turns = process(9, "letta", argv: ["letta", "--max-turns=1"])
+        #expect(Diagnoser.cpuSamplePid([turns, interactive]) == 30)
+        let format = process(11, "node", argv: ["node", "letta", "--output-format", "json"])
+        #expect(Diagnoser.cpuSamplePid([format, interactive]) == 30)
+        let inputFormat = process(15, "letta", argv: ["letta", "--input-format=stream-json"])
+        #expect(Diagnoser.cpuSamplePid([inputFormat, interactive]) == 30)
+        let ephemeral = process(12, "letta", argv: ["letta", "--ephemeral"])
+        #expect(Diagnoser.cpuSamplePid([ephemeral, interactive]) == 30)
+        let backendServer = process(13, "letta", argv: ["letta", "--backend", "local", "server"])
+        #expect(Diagnoser.cpuSamplePid([backendServer, interactive]) == 30)
+        let positional = process(14, "letta", argv: ["letta", "fix"])
+        #expect(Diagnoser.cpuSamplePid([positional, interactive]) == 30)
+        let help = process(17, "letta", argv: ["letta", "--help"])
+        #expect(Diagnoser.cpuSamplePid([help, interactive]) == 30)
+
+        let unrelated = process(3, "node", argv: ["node", "/tmp/server.js", "letta"])
+        #expect(Diagnoser.cpuSamplePid([unrelated, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([unrelated, helper]) == 3)
+
+        let checkout = process(
+            16,
+            "node",
+            argv: ["node", "/home/user/src/letta-code/letta/build.js"]
+        )
+        #expect(Diagnoser.cpuSamplePid([checkout, interactive]) == 30)
+
+        let eval = process(19, "node", argv: ["node", "-e", "letta"])
+        #expect(Diagnoser.cpuSamplePid([eval, interactive]) == 30)
+
+        // The shell that is launching Letta stays the sample when it is alone.
+        let shell = process(2, "sh", argv: ["sh", "letta"])
+        #expect(Diagnoser.cpuSamplePid([shell]) == 2)
+        #expect(Diagnoser.cpuSamplePid([shell, interactive]) == 30)
+    }
 }
 
 @Suite("Diagnoser finished vs process-gone")

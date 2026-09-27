@@ -354,6 +354,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     internal static func parseProcessInfo(_ dict: [String: Any]) -> ProcessInfoResult {
         let payload = (dict["process_info"] as? [String: Any]) ?? dict
         let shellPid = JSONNumber.int(payload["shell_pid"]).map(Int32.init(truncatingIfNeeded:))
+        let groupId = Self.parseProcessGroupId(payload["foreground_process_group_id"])
         var procs: [ForegroundProcess] = []
         if let fgList = payload["foreground_processes"] as? [[String: Any]] {
             for p in fgList {
@@ -367,7 +368,22 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                 ))
             }
         }
-        return ProcessInfoResult(shellPid: shellPid, foregroundProcesses: procs)
+        return ProcessInfoResult(
+            shellPid: shellPid,
+            foregroundProcesses: procs,
+            foregroundProcessGroupId: groupId
+        )
+    }
+
+    /// A positive pid. Zero, a fraction, and a boolean are not a group
+    /// leader: `JSONNumber` already rejects booleans, and a value that
+    /// does not fit in `pid_t` is dropped instead of truncated onto
+    /// another process.
+    private static func parseProcessGroupId(_ value: Any?) -> Int32? {
+        guard let raw = JSONNumber.int(value), let pid = Int32(exactly: raw), pid > 0 else {
+            return nil
+        }
+        return pid
     }
 
     /// `argv` is an array of strings. A fixture stores `[String]`; the
