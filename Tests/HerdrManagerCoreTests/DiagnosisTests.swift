@@ -1332,6 +1332,116 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([shell, git, attached]) == 4)
     }
 
+    @Test("bun run, bun x, and deno run name the agent, and a program named run does not")
+    func runtimeSubcommandIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let bunRun = process(20, "bun", argv: ["bun", "run", "codex"])
+        #expect(Diagnoser.cpuSamplePid([helper, bunRun]) == 20)
+        #expect(Diagnoser.cpuSamplePid([bunRun, helper]) == 20)
+
+        let bunX = process(21, "bun", argv: ["bun", "x", "codex", "--model", "gpt-5"])
+        #expect(Diagnoser.cpuSamplePid([helper, bunX]) == 21)
+        let bunExe = process(
+            22,
+            "bun.exe",
+            argv: ["bun.exe", "--bun", "run", "--watch", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, bunExe]) == 22)
+        let attachedCwd = process(
+            23,
+            "bun",
+            argv: ["bun", "run", "--cwd=/home/user/src/codex", "codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, attachedCwd]) == 23)
+
+        let deno = process(24, "deno", argv: ["deno", "run", "--allow-all", "/tmp/codex"])
+        #expect(Diagnoser.cpuSamplePid([helper, deno]) == 24)
+        let denoExe = process(25, "deno.exe", argv: ["deno.exe", "run", "-A", "claude.js"])
+        #expect(Diagnoser.cpuSamplePid([helper, denoExe]) == 25)
+
+        let omp = process(
+            26,
+            "bun",
+            argv: [
+                "bun", "run",
+                "/home/user/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, omp]) == 26)
+
+        // The directory, the env file, and the filter are not the program.
+        let withCwd = process(
+            4,
+            "bun",
+            argv: ["bun", "run", "--cwd", "/home/user/codex", "dev"]
+        )
+        let withEnv = process(
+            4,
+            "bun",
+            argv: ["bun", "run", "--env-file", "/home/user/codex", "dev"]
+        )
+        let withFilter = process(
+            4,
+            "bun",
+            argv: ["bun", "run", "--filter", "codex", "dev"]
+        )
+        let withFilterShort = process(4, "bun", argv: ["bun", "run", "-F", "codex", "dev"])
+        let withPreload = process(
+            4,
+            "bun",
+            argv: ["bun", "run", "--preload", "/home/user/codex", "dev"]
+        )
+        let withConfig = process(
+            4,
+            "bun",
+            argv: ["bun", "run", "--config", "/home/user/codex", "dev"]
+        )
+        #expect(Diagnoser.cpuSamplePid([withCwd, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([withEnv, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([withFilter, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([withFilterShort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([withPreload, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([withConfig, claude]) == 12)
+
+        // A program named run stays the script. The later agent path is its argument.
+        let namedRun = process(4, "bun", argv: ["bun", "./run", "/tmp/codex"])
+        let nodeRun = process(4, "node", argv: ["node", "run", "/tmp/codex"])
+        let pythonRun = process(4, "python3.12", argv: ["python3.12", "run", "/tmp/codex"])
+        let afterDash = process(4, "bun", argv: ["bun", "--", "run", "/tmp/codex"])
+        let scriptNamedX = process(4, "bun", argv: ["bun", "run", "x", "/tmp/codex"])
+        #expect(Diagnoser.cpuSamplePid([namedRun, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([nodeRun, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([pythonRun, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([afterDash, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([scriptNamedX, claude]) == 12)
+
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let leader = process(20, "bun", argv: ["bun", "run", "/usr/local/bin/codex"])
+        #expect(Diagnoser.cpuSamplePid([mcp, leader]) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+
+        let letta = process(
+            30,
+            "bun",
+            argv: ["bun", "run", "/home/user/node_modules/.bin/letta", "--conversation", "id"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, letta]) == 30)
+        let viaX = process(31, "bun", argv: ["bun", "x", "letta", "--backend", "local"])
+        #expect(Diagnoser.cpuSamplePid([helper, viaX]) == 31)
+        let lettaPrompt = process(8, "bun", argv: ["bun", "run", "letta", "--prompt", "hello"])
+        let interactive = process(30, "letta", argv: ["letta"])
+        #expect(Diagnoser.cpuSamplePid([lettaPrompt, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([lettaPrompt]) == 8)
+        #expect(Diagnoser.cpuSamplePid([lettaPrompt, interactive], foregroundProcessGroupId: 8) == 30)
+
+        let denoLetta = process(4, "deno", argv: ["deno", "run", "--allow-all", "/tmp/letta"])
+        #expect(Diagnoser.cpuSamplePid([denoLetta, interactive]) == 30)
+
+        let eval = process(9, "bun", argv: ["bun", "run", "-e", "code", "/tmp/codex"])
+        #expect(Diagnoser.cpuSamplePid([eval, claude]) == 12)
+    }
+
     @Test("The shell that is the agent interpreter is the sample when nothing else is")
     func interpreterShellIsTheSample() {
         let shell = process(2, "sh", argv: ["sh", "codex"])

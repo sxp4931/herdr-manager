@@ -1016,12 +1016,15 @@ private enum ShellForeground {
     /// Cursor bundle (`node.exe` and `index.js` in the same
     /// `cursor-agent/versions/<version>` directory), or a process whose
     /// name, argv0, or argv[0] is the agent. The last of those is a nix
-    /// wrapper whose comm name is `.codex-wrapped`. A shell that is only
-    /// launching the agent stays below those, so its idle CPU is not the
-    /// reading while the agent is in the group. A plain runtime still
-    /// outranks any other helper. The same rank prefers a runtime over a
-    /// process that is not one, then the lower pid, so a helper spawned
-    /// later does not hide the process that started the group.
+    /// wrapper whose comm name is `.codex-wrapped`. `bun run`, `bun x`,
+    /// and `deno run` are subcommands, so the script is the program after
+    /// them; a path, or the word after `--`, is still that program when
+    /// its name is `run`. A shell that is only launching the agent stays
+    /// below those, so its idle CPU is not the reading while the agent
+    /// is in the group. A plain runtime still outranks any other helper.
+    /// The same rank prefers a runtime over a process that is not one,
+    /// then the lower pid, so a helper spawned later does not hide the
+    /// process that started the group.
     ///
     /// That tie is wrong when herdr has already named the leader.
     /// `foreground_process_group_id` is the pid herdr's job walk checks
@@ -1168,12 +1171,16 @@ private enum ShellForeground {
     /// argv index of the Letta program. Zero when argv[0] is Letta.
     /// Otherwise the script of `node` or `bun`, which is the walker
     /// herdr uses. Eval, including `-e` glued to its code, is not a script.
+    /// `bun run` and `bun x` are subcommands, so the entrypoint is the
+    /// word after them. `node run` is a program named `run`.
     private static func lettaEntrypointIndex(_ argv: [String]) -> Int? {
         if let first = argv.first, isLettaProgram(first) {
             return 0
         }
         guard let runtime = argv.first, isNodeOrBunRuntime(runtime) else { return nil }
+        let runtimeName = shellBase(runtime)
         var index = 1
+        var skippedSubcommand = false
         while index < argv.count {
             let arg = argv[index]
             if arg == "--" {
@@ -1183,6 +1190,11 @@ private enum ShellForeground {
             if lettaEvalFlag(arg) { return nil }
             if arg.hasPrefix("-") {
                 index += lettaOptionTakesValue(arg) ? 2 : 1
+                continue
+            }
+            if !skippedSubcommand, runtimeSubcommand(arg, runtime: runtimeName) {
+                skippedSubcommand = true
+                index += 1
                 continue
             }
             return isLettaProgram(arg) ? index : nil
@@ -1385,7 +1397,11 @@ private enum ShellForeground {
     /// The script argument of a node-like runtime, when that script is an
     /// agent. Eval and module flags are not a path, including a value
     /// glued onto the flag. A flag that takes a value is not the script
-    /// either.
+    /// either. `bun run`, `bun x`, and `deno run` are subcommands, so
+    /// they are not the script. Bun's value flags (`--cwd`, `--env-file`,
+    /// `--filter` / `-F`, `--preload`, `--config`, `--tsconfig-override`)
+    /// take the next word, so `bun run --cwd ~/src/codex dev` stays a
+    /// plain runtime.
     private static func runtimeScriptIsAgent(_ process: ForegroundProcess) -> Bool {
         guard let argv = launchArguments(process), let script = runtimeScript(argv) else {
             return false
@@ -1400,10 +1416,30 @@ private enum ShellForeground {
     private static let runtimeValueFlags: Set<String> = [
         "-r", "--require", "--loader", "--import", "--experimental-loader",
         "--inspect-port", "-W", "-X", "-S", "-L", "-o",
+        "--cwd", "--env-file", "--filter", "-F", "--preload",
+        "--config", "--tsconfig-override",
     ]
 
+    /// `bun run` / `bun x` / `deno run` are not the program. The word is
+    /// exactly that subcommand: `./run`, `run.js`, and the token after
+    /// `--` are a program named `run`, and `node` / `python` have no such
+    /// subcommand. One subcommand is skipped, so `bun run x` is a script
+    /// named `x`.
+    private static func runtimeSubcommand(_ arg: String, runtime: String) -> Bool {
+        switch runtime {
+        case "bun":
+            return arg == "run" || arg == "x"
+        case "deno":
+            return arg == "run"
+        default:
+            return false
+        }
+    }
+
     private static func runtimeScript(_ argv: [String]) -> String? {
+        let runtime = argv.first.map { shellBase($0) } ?? ""
         var index = 1
+        var skippedSubcommand = false
         while index < argv.count {
             let arg = argv[index]
             if arg == "--" {
@@ -1422,6 +1458,11 @@ private enum ShellForeground {
                 continue
             }
             if arg.hasPrefix("-") {
+                index += 1
+                continue
+            }
+            if !skippedSubcommand, runtimeSubcommand(arg, runtime: runtime) {
+                skippedSubcommand = true
                 index += 1
                 continue
             }
