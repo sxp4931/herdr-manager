@@ -316,6 +316,86 @@ struct SecretRedactorTests {
         #expect(redactor.redact(#""token": "[REDACTED]""#).redactionCount == 0)
         #expect(redactor.redact("The token is not a secret.").redactionCount == 0)
     }
+
+    @Test("Redacts secret_key and AWS_SECRET_ACCESS_KEY without taking neighboring names")
+    func redactsSecretKeyAndSecretAccessKey() {
+        let redactor = SecretRedactor()
+        let mixed = "abcd" + "+efg/" + "hijklmnop"
+        let env = redactor.redact(
+            "export SECRET_KEY=supersecretvalue AWS_SECRET_ACCESS_KEY=\(mixed)"
+        )
+        #expect(env.redactedText == "export SECRET_KEY=[REDACTED] AWS_SECRET_ACCESS_KEY=[REDACTED]")
+        #expect(env.redactionCount == 2)
+        #expect(!env.redactedText.contains("supersecretvalue"))
+        #expect(!env.redactedText.contains("+efg/"))
+        let envAgain = redactor.redact(env.redactedText)
+        #expect(envAgain.redactedText == env.redactedText)
+        #expect(envAgain.redactionCount == 0)
+
+        let json = redactor.redact(
+            #"{"aws_secret_access_key": "supersecretvalue", "secret_key": "anothersecretvalue", "secret_name": "keepthisvalue", "token_count": 12345678}"#
+        )
+        #expect(
+            json.redactedText
+                == #"{"aws_secret_access_key=[REDACTED]", "secret_key=[REDACTED]", "secret_name": "keepthisvalue", "token_count": 12345678}"#
+        )
+        #expect(json.redactionCount == 2)
+        #expect(!json.redactedText.contains("supersecretvalue"))
+        #expect(!json.redactedText.contains("anothersecretvalue"))
+        #expect(json.redactedText.contains("keepthisvalue"))
+        let jsonAgain = redactor.redact(json.redactedText)
+        #expect(jsonAgain.redactedText == json.redactedText)
+        #expect(jsonAgain.redactionCount == 0)
+
+        // A hyphen is the same separator api_key already accepts. A prefix
+        // before secret_key stays on the label, and the captured name keeps
+        // its case.
+        #expect(
+            redactor.redact("secret-key=supersecretvalue secret-access-key=anothersecretvalue").redactedText
+                == "secret-key=[REDACTED] secret-access-key=[REDACTED]"
+        )
+        #expect(
+            redactor.redact("my_secret_key=supersecretvalue").redactedText
+                == "my_secret_key=[REDACTED]"
+        )
+        #expect(redactor.redact("secret_key=12345678").redactedText == "secret_key=[REDACTED]")
+        #expect(
+            redactor.redact("Secret_Access_Key=supersecretvalue").redactedText
+                == "Secret_Access_Key=[REDACTED]"
+        )
+        #expect(
+            redactor.redact(#"{"secret_key": "correct horse's battery"}"#).redactedText
+                == #"{"secret_key=[REDACTED]"}"#
+        )
+
+        // The name has to end on the keyword. A longer identifier, a plural,
+        // a different word, and a 7-character value stay.
+        let kept = [
+            "secret_name=supersecretvalue",
+            "secret_keys=supersecretvalue",
+            "AWS_SECRET_ACCESS_KEY_ID=supersecretvalue",
+            "secretary=supersecretvalue",
+            "token_count: 12345678",
+            "secret_key=1234567",
+            #"{"secret_name": "supersecretvalue"}"#,
+        ]
+        for line in kept {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line)")
+            #expect(result.redactedText == line)
+        }
+
+        // A recognized token keeps its own label. The compound name does
+        // not take a second count off the placeholder.
+        let key = "xai-abcdefghijklmnopqrstuvwxyz0123456789"
+        let labeled = redactor.redact(#"{"secret_key": "\#(key)"}"#)
+        #expect(labeled.redactedText == #"{"secret_key": "xai-[REDACTED]"}"#)
+        #expect(labeled.redactionCount == 1)
+        #expect(!labeled.redactedText.contains("abcdefghijklmnopqrstuvwxyz0123456789"))
+        let labeledAgain = redactor.redact(labeled.redactedText)
+        #expect(labeledAgain.redactedText == labeled.redactedText)
+        #expect(labeledAgain.redactionCount == 0)
+    }
 }
 
 // MARK: - DwellTracker Tests

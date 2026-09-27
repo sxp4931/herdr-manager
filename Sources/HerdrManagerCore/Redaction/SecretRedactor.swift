@@ -65,14 +65,20 @@ public final class SecretRedactor: Sendable {
         let defs = labeled + [
             // Generic assignments. A JSON key has a quote between the name
             // and the colon (`"api_key": "…"`); an env assignment does not
-            // (`api_key=…`, `token: "…"`). A double-quoted value keeps
-            // spaces and apostrophes, and a single-quoted value keeps
-            // spaces. The closing quote stays put: MCP redacts again on
-            // the way out, and `}` is not a boundary the placeholder
-            // recognizes, so eating the quote would count `[REDACTED]`
-            // a second time and swallow the brace. An unquoted value
-            // stays one token and still stops at whitespace or `&`.
-            ("(?i)(api[_-]?key|secret|token|password)['\"]?\\s*[=:]\\s*(?:\"(?!\(placeholder))[^\"\\n]{8,}|'(?!\(placeholder))[^'\\n]{8,}|(?!\(placeholder))[^\\s'\"&]{8,})", "$1=[REDACTED]"),
+            // (`api_key=…`, `token: "…"`). `secret_key` and
+            // `secret_access_key` (the suffix of `AWS_SECRET_ACCESS_KEY`)
+            // are the same kind of name: the keyword is not the end until
+            // `_key` or `_access_key`. A hyphen is the separator `api_key`
+            // already accepts. The name still has to end there, so
+            // `secret_name`, `secret_keys`, and `SECRET_ACCESS_KEY_ID` are
+            // not assignments. A double-quoted value keeps spaces and
+            // apostrophes, and a single-quoted value keeps spaces. The
+            // closing quote stays put: MCP redacts again on the way out,
+            // and `}` is not a boundary the placeholder recognizes, so
+            // eating the quote would count `[REDACTED]` a second time and
+            // swallow the brace. An unquoted value stays one token and
+            // still stops at whitespace or `&`.
+            ("(?i)(api[_-]?key|secret(?:[_-]access)?[_-]key|secret|token|password)['\"]?\\s*[=:]\\s*(?:\"(?!\(placeholder))[^\"\\n]{8,}|'(?!\(placeholder))[^'\\n]{8,}|(?!\(placeholder))[^\\s'\"&]{8,})", "$1=[REDACTED]"),
         ]
 
         var result: [(NSRegularExpression, String)] = []
