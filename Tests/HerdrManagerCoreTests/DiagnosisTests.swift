@@ -169,6 +169,81 @@ struct BlockKindFromRuleIdTests {
     func unknown() {
         #expect(BlockKind.from(ruleId: "some_new_rule") == .unknownBlock)
         #expect(BlockKind.from(ruleId: "") == .unknownBlock)
+        // A password prompt and a shell waiting for input stay unnamed.
+        // Sending Enter there would submit whatever is in the field.
+        #expect(BlockKind.from(ruleId: "credential_prompt") == .unknownBlock)
+        #expect(BlockKind.from(ruleId: "confirmation_or_input_blocker") == .unknownBlock)
+    }
+
+    @Test("Enter-to-confirm rules are a confirmation, and accept_once is refused")
+    func confirmationPrompts() {
+        let rules = [
+            "permission_required", "opencode_permission", "mcp_elicitation_prompt",
+            "trust_directory", "startup_update", "apply_or_allow_change",
+            "current_approval_panel", "legacy_approval_panel",
+            "dangerous_command_approval", "clarification_prompt", "tool_confirmation",
+            "permission_scope_selector", "workspace_trust_blocked", "blocked_approval",
+            "plan_complete_form"
+        ]
+        for rule in rules {
+            let kind = BlockKind.from(ruleId: rule)
+            #expect(kind == .confirmation)
+            #expect(kind.summary == "confirmation prompt")
+            #expect(kind.answerKeys(forChoice: "approve", index: nil) == ["enter"])
+            #expect(kind.answerKeys(forChoice: "deny", index: nil) == ["esc"])
+            #expect(kind.answerKeys(forChoice: "cancel", index: nil) == ["esc"])
+            #expect(kind.answerKeys(forChoice: "accept_once", index: nil) == nil)
+            #expect(kind.answerKeys(forChoice: "select", index: 0) == ["enter"])
+            #expect(kind.answerKeys(forChoice: "select", index: 2) == ["down", "down", "enter"])
+        }
+    }
+
+    @Test("Enter-to-select rules stay a selection form")
+    func selectionPrompts() {
+        let rules = [
+            "execute_selection_blocker", "selection_menu_blocker", "selection_blocker",
+            "question_panel", "question_dialog", "command_approval"
+        ]
+        for rule in rules {
+            let kind = BlockKind.from(ruleId: rule)
+            #expect(kind == .selectionForm)
+            #expect(kind.answerKeys(forChoice: "approve", index: nil) == ["enter"])
+            #expect(kind.answerKeys(forChoice: "select", index: 1) == ["down", "enter"])
+            #expect(kind.answerKeys(forChoice: "accept_once", index: nil) == nil)
+        }
+    }
+
+    @Test("Prompts whose Enter key disagrees stay read-only")
+    func readOnlyPrompts() {
+        // permission_prompt is one id for three agents. On one of them Enter denies.
+        // Cursor asks for y. Grok's cancel on these screens is not Esc.
+        let rules = [
+            "permission_prompt", "write_file_approval", "approval_prompt",
+            "legacy_no_prompt_blocker", "permission_hints_blocked",
+            "question_dialog_hints_blocked", "option_dialog_blocked",
+            "folder_trust_dialog", "inline_tool_permission"
+        ]
+        for rule in rules {
+            let kind = BlockKind.from(ruleId: rule)
+            #expect(kind == .probableApproval)
+            #expect(kind.answerKeys(forChoice: "approve", index: nil) == nil)
+            #expect(kind.answerKeys(forChoice: "deny", index: nil) == nil)
+            #expect(kind.answerKeys(forChoice: "select", index: 0) == nil)
+        }
+    }
+
+    @Test("The yes / don't-ask-again / no stack still takes accept_once")
+    func acceptOnceStaysOnThePermissionStack() {
+        for kind in [BlockKind.bashPermission, .toolPermission, .approval, .workflowConfirm] {
+            #expect(kind.answerKeys(forChoice: "approve", index: nil) == ["enter"])
+            #expect(kind.answerKeys(forChoice: "accept_once", index: nil) == ["down", "enter"])
+            #expect(kind.answerKeys(forChoice: "deny", index: nil) == ["esc"])
+            #expect(kind.answerKeys(forChoice: "select", index: 1) == nil)
+        }
+        #expect(BlockKind.menu.answerKeys(forChoice: "select", index: nil) == ["enter"])
+        #expect(BlockKind.menu.answerKeys(forChoice: "accept_once", index: nil) == nil)
+        #expect(BlockKind.unknownBlock.answerKeys(forChoice: "approve", index: nil) == nil)
+        #expect(BlockKind.selectionForm.answerKeys(forChoice: "select", index: -1) == nil)
     }
 }
 

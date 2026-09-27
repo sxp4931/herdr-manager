@@ -1851,39 +1851,9 @@ actor MCPServer {
 
     /// Map an answer choice to keystrokes, gated on the detected block kind.
     /// Returns nil when the choice is not valid for the kind (or the kind is
-    /// unknown/weak), so unrecognized prompts stay read-only and we never send
-    /// a global hardcoded keystroke that the detected prompt does not warrant.
+    /// unknown or only probable), so those prompts stay read-only.
     private static func keys(forChoice choice: String, index: Int?, blockKind: BlockKind) -> [String]? {
-        // Weak or unknown blocks: never send input.
-        switch blockKind {
-        case .unknownBlock, .probableApproval:
-            return nil
-        default:
-            break
-        }
-
-        let permissionKinds: Set<BlockKind> = [.bashPermission, .toolPermission, .approval, .workflowConfirm]
-        let selectionKinds: Set<BlockKind> = [.selectionForm, .menu]
-
-        if permissionKinds.contains(blockKind) {
-            switch choice {
-            case "approve": return ["enter"]
-            case "accept_once": return ["down", "enter"]
-            case "deny", "cancel": return ["esc"]
-            default: return nil  // 'select' is meaningless on a yes/no prompt
-            }
-        }
-        if selectionKinds.contains(blockKind) {
-            switch choice {
-            case "select":
-                let idx = index ?? 0
-                return Array(repeating: "down", count: idx) + ["enter"]
-            case "approve": return ["enter"]  // accept the highlighted default
-            case "cancel", "deny": return ["esc"]
-            default: return nil  // 'accept_once' is meaningless on a list
-            }
-        }
-        return nil
+        blockKind.answerKeys(forChoice: choice, index: index)
     }
 
     // MARK: - Occupant Fingerprint & Revalidation
@@ -2367,7 +2337,7 @@ actor MCPServer {
         // MARK: Write Tools
         [
             "name": "agent.answer",
-            "description": "Reply to a blocked agent's prompt with a bounded choice. Requires status=blocked. Maps choice to key sequences: approve→enter, deny→esc, accept_once→down+enter, select→arrows+enter, cancel→esc. Max 3 consecutive answers without a status change. The same agent session keeps that cap when its pane id changes.",
+            "description": "Reply to a blocked agent's prompt with a bounded choice. Requires status=blocked. approve sends Enter and deny or cancel sends Esc. accept_once (Down, then Enter) is only for a yes / don't-ask-again / no stack. select sends that many Downs, then Enter, on a menu or a highlighted confirmation. Unknown and probable blocks stay read-only. Max 3 consecutive answers without a status change. The same agent session keeps that cap when its pane id changes.",
             "inputSchema": [
                 "type": "object",
                 "properties": [

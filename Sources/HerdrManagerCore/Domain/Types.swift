@@ -83,10 +83,20 @@ public enum BlockKind: String, Codable, Sendable, CaseIterable {
     case workflowConfirm = "workflow_confirm"
     case menu
     case approval
+    /// Enter accepts the highlighted row and Esc cancels. The next row is
+    /// not "don't ask again", so `accept_once` does not apply.
+    case confirmation
     case probableApproval = "probable_approval"
     case unknownBlock = "unknown_block"
 
-    /// Map from herdr matched_rule.id strings to BlockKind.
+    /// Map from herdr `matched_rule.id` to the prompt shape.
+    ///
+    /// A rule whose screen says Enter accepts the highlighted row and Esc
+    /// cancels is `.confirmation`. `accept_once` (Down, then Enter) stays
+    /// on the yes / don't-ask-again / no stack, where that next row is the
+    /// remembered yes. A rule that says Enter selects is `.selectionForm`.
+    /// A block whose key is `y` or Ctrl+C, or whose id is shared by screens
+    /// that disagree about Enter, is `.probableApproval` and sends nothing.
     public static func from(ruleId: String) -> BlockKind {
         switch ruleId {
         case "bash_permission_prompt": return .bashPermission
@@ -96,7 +106,65 @@ public enum BlockKind: String, Codable, Sendable, CaseIterable {
         case "model_picker_menu": return .menu
         case "live_strong_blocker", "osc_title_blocked": return .approval
         case "weak_blocker": return .probableApproval
+
+        // Enter confirms the highlighted row. Esc cancels.
+        case "permission_required", "opencode_permission",
+             "mcp_elicitation_prompt", "trust_directory", "startup_update",
+             "apply_or_allow_change", "current_approval_panel", "legacy_approval_panel",
+             "dangerous_command_approval", "clarification_prompt", "tool_confirmation",
+             "permission_scope_selector", "workspace_trust_blocked", "blocked_approval",
+             "plan_complete_form":
+            return .confirmation
+
+        // Enter selects. Esc cancels. `question_panel` is both Kimi and Kiro.
+        case "execute_selection_blocker", "selection_menu_blocker", "selection_blocker",
+             "question_panel", "question_dialog", "command_approval":
+            return .selectionForm
+
+        // Read-only. `permission_prompt` is one id for three agents, and on
+        // one of them Enter denies. Cursor's key is `y`. Grok's cancel on
+        // these screens is Ctrl+C, and Esc unselects the question dialog.
+        case "legacy_no_prompt_blocker",
+             "write_file_approval", "approval_prompt",
+             "option_dialog_blocked", "permission_hints_blocked", "question_dialog_hints_blocked",
+             "waiting_for_confirmation", "folder_trust_dialog", "confirmation_prompt",
+             "permission_prompt", "pick_request_blocked", "workspace_trust_prompt",
+             "approval_footer", "osc_title_plugin_confirmation_blocked",
+             "tool_approval", "tool_approval_edit", "crew_approval",
+             "tool_permission", "inline_tool_permission":
+            return .probableApproval
+
         default: return .unknownBlock
+        }
+    }
+
+    /// Keystrokes for one MCP `agent.answer` choice, or nil when this
+    /// prompt shape does not take that choice. Nil sends nothing.
+    ///
+    /// `select` repeats Down `index` times, then Enter. A missing index is
+    /// the highlighted row. A negative index is refused: `Array(repeating:count:)`
+    /// traps on a negative count, and it is not a menu position.
+    public func answerKeys(forChoice choice: String, index: Int?) -> [String]? {
+        switch self {
+        case .unknownBlock, .probableApproval:
+            return nil
+        case .bashPermission, .toolPermission, .approval, .workflowConfirm:
+            switch choice {
+            case "approve": return ["enter"]
+            case "accept_once": return ["down", "enter"]
+            case "deny", "cancel": return ["esc"]
+            default: return nil
+            }
+        case .selectionForm, .menu, .confirmation:
+            switch choice {
+            case "select":
+                let idx = index ?? 0
+                guard idx >= 0 else { return nil }
+                return Array(repeating: "down", count: idx) + ["enter"]
+            case "approve": return ["enter"]
+            case "cancel", "deny": return ["esc"]
+            default: return nil
+            }
         }
     }
 
@@ -109,6 +177,7 @@ public enum BlockKind: String, Codable, Sendable, CaseIterable {
         case .workflowConfirm: return "workflow confirmation"
         case .menu: return "menu selection"
         case .approval: return "approval prompt"
+        case .confirmation: return "confirmation prompt"
         case .probableApproval: return "probable approval"
         case .unknownBlock: return "unknown block"
         }
