@@ -2945,7 +2945,7 @@ struct SamePaneSessionTests {
         #expect(store.sessionIdentity(for: id) == identity("abc|extra"))
     }
 
-    @Test("The first session value, and a list that omits one, keep the episode")
+    @Test("The first session value, and a list that omits one, keep the episode, and the next occupant still opens one")
     @MainActor
     func firstOrMissingSessionKeepsTheEpisode() throws {
         let store = AgentStore()
@@ -2976,6 +2976,24 @@ struct SamePaneSessionTests {
         ]), requestedAtEpoch: again.epoch, requestedAtSerial: again.serial)
         #expect(omitted.isEmpty)
         #expect(store.agents[id]?.enteredAt == entered)
+        #expect(store.agents[id]?.verdict.isSilent == true)
+        // The omitting list must not clear the occupant. If it does, the
+        // next session is the first one this pane has named, and the
+        // silence stays on that person.
+        #expect(store.sessionIdentity(for: id) == identity("abc"))
+
+        let followed = store.captureHerdRequest()
+        let replaced = store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: session("other")),
+        ]), requestedAtEpoch: followed.epoch, requestedAtSerial: followed.serial)
+        #expect(replaced.count == 1)
+        #expect(replaced.first?.from == .blocked)
+        #expect(replaced.first?.to == .blocked)
+        let row = try #require(store.agents[id])
+        #expect(row.enteredAt != entered)
+        #expect(row.verdict.isSilent == false)
+        #expect(row.stateChangeSeq == 5)
+        #expect(store.sessionIdentity(for: id) == identity("other"))
     }
 
     @Test("pane_updated naming a new session opens the episode, and the earlier list cannot put it back")

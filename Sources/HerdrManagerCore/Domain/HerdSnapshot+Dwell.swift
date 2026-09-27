@@ -238,11 +238,20 @@ public struct HerdLiveTable: Sendable {
         }
     }
 
-    /// Sessions named by `herd`. Panes a burst is still restoring keep the
-    /// identity they had before the refetch, so the move can tell a new
+    /// Sessions named by `herd`, plus an identity a pane that is still
+    /// showing left off this list. A layout refetch is `agent.list`.
+    /// Leaving `agent_session` off is not a new occupant, and forgetting
+    /// it made the next session look like the first one. Panes a burst is
+    /// still restoring keep the identity they had before the refetch even
+    /// after that row has already moved, so the move can tell a new
     /// session from the one that left.
     private mutating func adoptSessions(from herd: HerdSnapshot, previous: [String: String]) {
         var next = Self.sessions(in: herd)
+        for agent in agents where next[agent.id.raw] == nil {
+            if let session = previous[agent.id.raw] {
+                next[agent.id.raw] = session
+            }
+        }
         if let saved = rowsBeforeLayout {
             for agent in saved where next[agent.id.raw] == nil {
                 if let session = previous[agent.id.raw] {

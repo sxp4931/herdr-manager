@@ -524,29 +524,27 @@ public final class AgentStore {
         return priors
     }
 
-    /// Remember who `agent.list` says is in each kept pane. A listed pane
-    /// with no session value forgets any identity it used to have, so a
-    /// later move cannot carry that occupant onto the wrong row. A pane
-    /// held over from an earlier event is not in this list; its identity
-    /// stays until a list names the pane.
-    /// `holding` is the panes whose row this snapshot was not allowed to
-    /// replace. The list still names whoever was there when it was captured,
-    /// and adopting that session makes the occupant the event just stored
-    /// look replaced on the next read.
+    /// Remember who is in each kept pane.
+    ///
+    /// A payload that names a session replaces the one stored for that
+    /// pane, except while `holding` it. That list was captured before an
+    /// event this snapshot was not allowed to paint over, and storing its
+    /// occupant would make the next read look like another replacement.
+    /// A list that leaves `agent_session` off keeps the identity already
+    /// stored. The field is absent on a seq-less update and is not on
+    /// every `agent.list`. Forgetting it made the next session look like
+    /// the first one this pane had ever named, so the dwell, the silence,
+    /// and the crash stayed with the new person. A pane that left the
+    /// herd is not in `keptIds`, and its identity goes with it.
     private func rememberSessions(
         from snapshot: HerdSnapshot,
         keptIds: some Sequence<AgentID>,
         holding: Set<AgentID> = []
     ) {
         var incoming: [AgentID: String] = [:]
-        var listed: Set<AgentID> = []
         for info in snapshot.agents {
-            guard !info.paneId.isEmpty else { continue }
-            let id = AgentID(info.paneId)
-            listed.insert(id)
-            if let session = info.sessionIdentity {
-                incoming[id] = session
-            }
+            guard !info.paneId.isEmpty, let session = info.sessionIdentity else { continue }
+            incoming[AgentID(info.paneId)] = session
         }
         var next: [AgentID: String] = [:]
         for id in keptIds {
@@ -554,7 +552,7 @@ public final class AgentStore {
                 next[id] = kept
             } else if let session = incoming[id] {
                 next[id] = session
-            } else if !listed.contains(id), let kept = sessionByPane[id] {
+            } else if let kept = sessionByPane[id] {
                 next[id] = kept
             }
         }

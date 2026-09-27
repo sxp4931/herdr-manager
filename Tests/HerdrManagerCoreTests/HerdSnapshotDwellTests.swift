@@ -574,4 +574,42 @@ struct HerdLiveTableDwellTests {
         #expect(kept?.enteredAt == started)
         #expect(kept?.verdict == .processGone(lastLine: "zsh (pid 1)"))
     }
+
+    @Test("A refetch that omits the session still opens a dwell for the next occupant")
+    func omittedRefreshDoesNotHideTheNextSession() {
+        let same = HerdrSnapshot.AgentSession(source: "agent", agent: "claude", kind: "session", value: "abc")
+        let other = HerdrSnapshot.AgentSession(source: "agent", agent: "claude", kind: "session", value: "other")
+        let first = snapshot([
+            makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: same),
+            makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 3)
+        ])
+        var rows = first.displayAgents(now: started)
+        if let index = rows.firstIndex(where: { $0.id.raw == "wA:p1" }) {
+            rows[index].verdict = .processGone(lastLine: "zsh (pid 1)")
+        }
+        var live = HerdLiveTable(herd: first, agents: rows)
+        live.noteLayoutRefresh(
+            snapshot([
+                makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5),
+                makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 3)
+            ]),
+            now: refreshedAt
+        )
+        let held = live.agents.first { $0.id.raw == "wA:p1" }
+        #expect(held?.enteredAt == started)
+        #expect(held?.verdict == .processGone(lastLine: "zsh (pid 1)"))
+        #expect(live.agents.first { $0.id.raw == "wA:p2" }?.enteredAt == started)
+
+        let later = Date(timeIntervalSince1970: 9_800)
+        live.apply(
+            .paneUpdated(makeDwellAgentInfo(
+                paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0, session: other
+            )),
+            now: later
+        )
+        let opened = live.agents.first { $0.id.raw == "wA:p1" }
+        #expect(opened?.enteredAt == later)
+        #expect(opened?.verdict.isProcessGone == false)
+        #expect(live.agents.first { $0.id.raw == "wA:p2" }?.enteredAt == started)
+    }
 }
