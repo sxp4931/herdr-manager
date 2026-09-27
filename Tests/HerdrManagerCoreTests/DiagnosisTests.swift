@@ -6003,6 +6003,281 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([helper, bunNear]) == 20)
         #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
     }
+
+    @Test("a node test-runner value the harness rejects is not the agent script")
+    func nodeTestHarnessRejectionIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23's test harness throws before the file when `--test`
+        // is on and a shard, timeout, concurrency, coverage threshold,
+        // or reporter list is one `parseCommandLine` / `run` reject.
+        // The last scalar wins. `0` is the unset timeout and concurrency.
+        let rejected: [(String, [String])] = [
+            ("shard", ["node", "--test", "--test-shard", "nope", "/usr/local/bin/codex"]),
+            ("shard-eq", ["nodejs", "--test", "--test-shard=0/2", "/tmp/codex"]),
+            ("shard-zero", ["node.exe", "--test", "--test-shard", "0/2", "/usr/local/bin/codex"]),
+            ("shard-over", ["node", "--test", "--test-shard", "2/1", "/tmp/codex"]),
+            ("shard-lead", ["nodejs", "--test", "--test-shard", "00/01", "/usr/local/bin/codex"]),
+            ("shard-total", ["node.exe", "--test", "--test-shard=1/00", "/tmp/codex"]),
+            ("shard-plus", ["node", "--test", "--test-shard", "+1/2", "/usr/local/bin/codex"]),
+            ("shard-extra", ["nodejs", "--test", "--test-shard", "1/2/3", "/tmp/codex"]),
+            ("shard-space", ["node.exe", "--test", "--test-shard", "1/2 ", "/usr/local/bin/codex"]),
+            ("shard-huge", [
+                "node", "--test", "--test-shard", "1/9007199254740993", "/tmp/codex",
+            ]),
+            ("shard-esc", ["nodejs", "--test", "--test-shard", "\\-1/2", "/usr/local/bin/codex"]),
+            ("shard-last", [
+                "node.exe", "--test", "--test-shard", "1/1", "--test-shard", "0/2", "/tmp/codex",
+            ]),
+            ("shard-then-test", [
+                "node", "--test-shard", "0/2", "--test", "/usr/local/bin/codex",
+            ]),
+            ("shard-no-then-test", [
+                "nodejs", "--no-test", "--test-shard", "0/2", "--test", "/tmp/codex",
+            ]),
+            ("lines", [
+                "nodejs", "--test", "--experimental-test-coverage", "--test-coverage-lines", "101",
+                "/usr/local/bin/codex",
+            ]),
+            ("lines-eq", [
+                "node.exe", "--test", "--experimental-test-coverage", "--test-coverage-lines=101",
+                "/tmp/codex",
+            ]),
+            ("lines-tail", [
+                "node", "--test", "--experimental-test-coverage", "--test-coverage-lines", "101abc",
+                "/usr/local/bin/codex",
+            ]),
+            ("lines-neg", [
+                "nodejs", "--test", "--experimental-test-coverage", "--test-coverage-lines=-1",
+                "/tmp/codex",
+            ]),
+            ("lines-esc", [
+                "node.exe", "--test", "--experimental-test-coverage", "--test-coverage-lines",
+                "\\-1", "/usr/local/bin/codex",
+            ]),
+            ("lines-space", [
+                "node", "--test", "--experimental-test-coverage", "--test-coverage-lines", " 101",
+                "/tmp/codex",
+            ]),
+            ("lines-false", [
+                "nodejs", "--test", "--experimental-test-coverage=false",
+                "--test-coverage-lines", "101", "/usr/local/bin/codex",
+            ]),
+            ("lines-last", [
+                "node.exe", "--test", "--experimental-test-coverage",
+                "--test-coverage-lines", "50", "--test-coverage-lines", "101", "/tmp/codex",
+            ]),
+            ("branches", [
+                "node", "--test", "--experimental-test-coverage", "--test-coverage-branches", "101",
+                "/usr/local/bin/codex",
+            ]),
+            ("functions", [
+                "nodejs", "--test", "--experimental-test-coverage",
+                "--test-coverage-functions=-1", "/tmp/codex",
+            ]),
+            ("timeout", ["node.exe", "--test", "--test-timeout=-1", "/usr/local/bin/codex"]),
+            ("timeout-esc", ["node", "--test", "--test-timeout", "\\-1", "/tmp/codex"]),
+            ("timeout-max", [
+                "nodejs", "--test", "--test-timeout", "2147483648", "/usr/local/bin/codex",
+            ]),
+            ("timeout-plus", ["node.exe", "--test", "--test-timeout=+2147483648", "/tmp/codex"]),
+            ("timeout-form", [
+                "node", "--test", "--test-timeout", "\u{000C}2147483648", "/usr/local/bin/codex",
+            ]),
+            ("timeout-last", [
+                "nodejs", "--test", "--test-timeout", "1000", "--test-timeout=-1", "/tmp/codex",
+            ]),
+            ("concurrency", ["node.exe", "--test", "--test-concurrency=-1", "/usr/local/bin/codex"]),
+            ("concurrency-esc", ["node", "--test", "--test-concurrency", "\\-1", "/tmp/codex"]),
+            ("concurrency-max", [
+                "nodejs", "--test", "--test-concurrency", "4294967296", "/usr/local/bin/codex",
+            ]),
+            ("concurrency-last", [
+                "node.exe", "--test", "--test-concurrency", "1", "--test-concurrency=-1",
+                "/tmp/codex",
+            ]),
+            ("reporters", [
+                "node", "--test", "--test-reporter", "spec", "--test-reporter", "tap",
+                "/usr/local/bin/codex",
+            ]),
+            ("destination", [
+                "nodejs", "--test", "--test-reporter-destination", "stdout", "/tmp/codex",
+            ]),
+            ("reporter-mismatch", [
+                "node.exe", "--test", "--test-reporter", "spec",
+                "--test-reporter-destination", "/tmp/out", "--test-reporter", "tap",
+                "/usr/local/bin/codex",
+            ]),
+            ("title", [
+                "node", "--title", "helper", "--test", "--test-shard", "0/2", "/tmp/codex",
+            ]),
+        ]
+        for (label, argv) in rejected {
+            let exited = process(4, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(label) ranked the path")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(label) took the sample from the leader slot"
+            )
+        }
+        #expect(
+            Diagnoser.cpuSamplePid([
+                process(4, "node", argv: ["node", "--test", "--test-shard", "0/2", "/usr/local/bin/codex"])
+            ]) == 4
+        )
+
+        // A shard in range still names the file, including `2/2`: the
+        // harness accepts it. Coverage outside 0...100 is ignored while
+        // the flag is off. A non-builtin reporter still names the file,
+        // because the pane may be able to load that module.
+        let kept: [(String, [String])] = [
+            ("shard", ["node", "--test", "--test-shard", "1/2", "/usr/local/bin/codex"]),
+            ("shard-one", ["nodejs", "--test", "--test-shard=1/1", "/tmp/codex"]),
+            ("shard-lead", ["node.exe", "--test", "--test-shard", "01/02", "/usr/local/bin/codex"]),
+            ("shard-second", ["node", "--test", "--test-shard", "2/2", "/tmp/codex"]),
+            ("shard-safe", [
+                "nodejs", "--test", "--test-shard", "1/9007199254740991", "/usr/local/bin/codex",
+            ]),
+            ("shard-last", [
+                "node.exe", "--test", "--test-shard", "0/2", "--test-shard", "1/1", "/tmp/codex",
+            ]),
+            ("shard-off", ["node", "--test-shard", "0/2", "/usr/local/bin/codex"]),
+            ("shard-no-test", ["nodejs", "--test", "--no-test", "--test-shard", "nope", "/tmp/codex"]),
+            ("script-first", ["node", "/usr/local/bin/codex", "--test", "--test-shard", "0/2"]),
+            ("flag-after", [
+                "nodejs", "--test", "--test-shard", "1/1", "/tmp/codex", "--test-shard", "0/2",
+            ]),
+            ("lines-off", ["node.exe", "--test", "--test-coverage-lines", "101", "/usr/local/bin/codex"]),
+            ("lines-zero", [
+                "node", "--test", "--experimental-test-coverage", "--test-coverage-lines", "0",
+                "/tmp/codex",
+            ]),
+            ("lines-hundred", [
+                "nodejs", "--test", "--experimental-test-coverage", "--test-coverage-lines=100",
+                "/usr/local/bin/codex",
+            ]),
+            ("lines-word", [
+                "node.exe", "--test", "--experimental-test-coverage", "--test-coverage-lines",
+                "nope", "/tmp/codex",
+            ]),
+            ("lines-trunc", [
+                "node", "--test", "--experimental-test-coverage", "--test-coverage-lines", "100.5",
+                "/usr/local/bin/codex",
+            ]),
+            ("lines-hex", [
+                "nodejs", "--test", "--experimental-test-coverage", "--test-coverage-lines", "0x10",
+                "/tmp/codex",
+            ]),
+            ("lines-exp", [
+                "node.exe", "--test", "--experimental-test-coverage", "--test-coverage-lines", "1e2",
+                "/usr/local/bin/codex",
+            ]),
+            ("lines-esc", [
+                "node", "--test", "--experimental-test-coverage", "--test-coverage-lines=\\-1",
+                "/tmp/codex",
+            ]),
+            ("lines-cleared", [
+                "nodejs", "--test", "--experimental-test-coverage",
+                "--no-experimental-test-coverage", "--test-coverage-lines", "101",
+                "/usr/local/bin/codex",
+            ]),
+            ("lines-last", [
+                "node.exe", "--test", "--experimental-test-coverage",
+                "--test-coverage-lines", "101", "--test-coverage-lines", "50", "/tmp/codex",
+            ]),
+            ("branches", [
+                "node", "--test", "--experimental-test-coverage", "--test-coverage-branches", "100",
+                "/usr/local/bin/codex",
+            ]),
+            ("timeout-zero", ["nodejs", "--test", "--test-timeout", "0", "/tmp/codex"]),
+            ("timeout-ok", ["node.exe", "--test", "--test-timeout=1000", "/usr/local/bin/codex"]),
+            ("timeout-limit", ["node", "--test", "--test-timeout", "2147483647", "/tmp/codex"]),
+            ("timeout-word", ["nodejs", "--test", "--test-timeout", "nope", "/usr/local/bin/codex"]),
+            ("timeout-tail", ["node.exe", "--test", "--test-timeout", "10abc", "/tmp/codex"]),
+            ("timeout-short", ["node", "--test", "--test-timeout", "10", "/usr/local/bin/codex"]),
+            ("timeout-esc", ["nodejs", "--test", "--test-timeout=\\-1", "/tmp/codex"]),
+            ("timeout-neg-zero", ["node.exe", "--test", "--test-timeout=-0", "/usr/local/bin/codex"]),
+            ("timeout-plus-plus", ["node", "--test", "--test-timeout", "++1", "/tmp/codex"]),
+            ("timeout-last", [
+                "nodejs", "--test", "--test-timeout=-1", "--test-timeout", "1000",
+                "/usr/local/bin/codex",
+            ]),
+            ("timeout-off", ["node.exe", "--test-timeout=-1", "/tmp/codex"]),
+            ("concurrency-zero", ["node", "--test", "--test-concurrency", "0", "/usr/local/bin/codex"]),
+            ("concurrency-max", [
+                "nodejs", "--test", "--test-concurrency", "4294967295", "/tmp/codex",
+            ]),
+            ("concurrency-word", ["node.exe", "--test", "--test-concurrency", "nope", "/usr/local/bin/codex"]),
+            ("concurrency-esc", ["node", "--test", "--test-concurrency=\\-1", "/tmp/codex"]),
+            ("concurrency-last", [
+                "nodejs", "--test", "--test-concurrency=-1", "--test-concurrency", "1",
+                "/usr/local/bin/codex",
+            ]),
+            ("reporter-spec", ["node.exe", "--test", "--test-reporter", "spec", "/usr/local/bin/codex"]),
+            ("reporter-tap", ["node", "--test", "--test-reporter=tap", "/tmp/codex"]),
+            ("reporter-dot", ["nodejs", "--test", "--test-reporter", "dot", "/usr/local/bin/codex"]),
+            ("reporter-junit", ["node.exe", "--test", "--test-reporter", "junit", "/tmp/codex"]),
+            ("reporter-lcov", ["node", "--test", "--test-reporter", "lcov", "/usr/local/bin/codex"]),
+            ("reporter-two", [
+                "nodejs", "--test", "--test-reporter", "spec", "--test-reporter", "tap",
+                "--test-reporter-destination", "stdout", "--test-reporter-destination", "stderr",
+                "/tmp/codex",
+            ]),
+            ("reporter-unknown", ["node.exe", "--test", "--test-reporter", "nope", "/usr/local/bin/codex"]),
+            ("title", ["node", "--test", "--test-shard", "1/1", "--title", "helper", "/tmp/codex"]),
+        ]
+        for (label, argv) in kept {
+            let running = process(20, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(label) dropped the script")
+        }
+        let leader = process(
+            20,
+            "node",
+            argv: ["node", "--test", "--test-shard", "1/2", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+
+        let badShard = process(
+            8, "node", argv: ["node", "--test", "--test-shard", "0/2", "/tmp/letta"]
+        )
+        let badTimeout = process(
+            8, "nodejs", argv: ["nodejs", "--test", "--test-timeout=-1", "/tmp/letta"]
+        )
+        let keptLetta = process(
+            40, "node.exe", argv: ["node.exe", "--test", "--test-shard", "1/1", "/tmp/letta"]
+        )
+        let keptReporter = process(
+            40, "node", argv: ["node", "--test", "--test-reporter", "spec", "/tmp/letta"]
+        )
+        let oneShot = process(
+            40,
+            "nodejs",
+            argv: ["nodejs", "--test", "--test-shard", "1/1", "/tmp/letta", "--prompt"]
+        )
+        #expect(Diagnoser.cpuSamplePid([badShard, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badShard, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([badTimeout, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badTimeout, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, keptLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, keptReporter]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, oneShot]) == 10)
+        #expect(Diagnoser.cpuSamplePid([oneShot, interactive]) == 30)
+
+        // Bun does not take `--test-shard`'s next word, so `0/2` is the
+        // script. Python exits on the unknown option.
+        let bun = process(
+            20, "bun", argv: ["bun", "--test", "--test-shard", "0/2", "/usr/local/bin/codex"]
+        )
+        let python = process(
+            4, "python3", argv: ["python3", "--test", "--test-shard", "0/2", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([bun]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)
+        #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
+    }
 }
 
 @Suite("Diagnoser finished vs process-gone")

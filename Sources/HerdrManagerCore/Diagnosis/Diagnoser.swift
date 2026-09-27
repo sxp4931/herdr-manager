@@ -1230,7 +1230,11 @@ private enum ShellForeground {
                 // not a power of two once that heap is on. `0`, `1`,
                 // and a power of two still are Letta. A negative
                 // `--heapsnapshot-near-heap-limit` is not; `0` and
-                // `abc` still are.
+                // `abc` still are. `--test` with a shard, timeout,
+                // concurrency, coverage threshold, or reporter list
+                // the harness rejects is not Letta. `1/2`, a timeout
+                // of `2147483647`, and `--test-reporter spec` still
+                // are. `--no-test` leaves a bad shard as Letta.
                 // Bun rejects `-W`,
                 // `-X`, `-S`, `-L`, and `-o`; the path after one is
                 // not Letta. A bun value that starts with `-` is not
@@ -1687,7 +1691,8 @@ private enum ShellForeground {
         // script written first is already the program: options after
         // it are arguments, and that prefix has no conflict. `--watch`
         // without a path still runs beside `--test`. A later `--no-`
-        // wins.
+        // wins. A test-runner operand the harness rejects is
+        // `nodeOption`, and only while the final `--test` state is on.
         if isNodeRuntime(runtime), nodePrefixFlags(argv).conflicts {
             return nil
         }
@@ -2680,8 +2685,15 @@ private enum ShellForeground {
     /// `--secure-heap` below 0 aborts inside OpenSSL, and a value of
     /// at least 2 that is not a power of two is `CheckOptions`.
     /// `--secure-heap-min` is checked only once that heap is on, after
-    /// Node clamps it. `0`, `1`, `4`, and `4abc` still run. Bun does
-    /// not use this check: `--title --watch` runs the file,
+    /// Node clamps it. `0`, `1`, `4`, and `4abc` still run.
+    /// With `--test` still on, the harness also rejects a
+    /// `--test-shard` that is not `<index>/<total>` in range, a
+    /// `--test-timeout` above 2147483647, a `--test-concurrency`
+    /// above 4294967295, a coverage threshold outside 0...100 while
+    /// coverage is on, and a reporter list whose length differs from
+    /// its destinations. `0` is the unset timeout and concurrency.
+    /// The last scalar wins. `--no-test` leaves those flags ignored.
+    /// Bun does not use this check: `--title --watch` runs the file,
     /// `--not-a-flag` is the script, and `--cwd` takes the directory.
     /// Python's `-W` and `-X` still take the next word.
     private static func nodeOption(
@@ -2860,6 +2872,10 @@ private enum ShellForeground {
     /// `--secure-heap-min` is read only then, after the clamp in
     /// `PerProcessOptions::CheckOptions`. The last operand of each
     /// flag wins, so an earlier `3` does not hide a later `4`.
+    /// `--test-shard`, `--test-timeout`, `--test-concurrency`, the
+    /// coverage thresholds, and the reporter list are
+    /// `nodeTestHarnessRejects`. They throw inside the test runner,
+    /// and only when the final `--test` state is on.
     private static func nodeRejectedOperand(
         name: String,
         value: String,
@@ -2877,6 +2893,9 @@ private enum ShellForeground {
             return NodePercentage.rejects(value)
         }
         let prefix = nodePrefixFlags(argv)
+        if nodeTestHarnessRejects(name, prefix: prefix) {
+            return true
+        }
         if name == "--heapsnapshot-near-heap-limit" {
             // The last operand, not this word. `=-1` and a separate
             // `\-1` are negative. `abc` is 0. A separate `-1` never
@@ -3095,6 +3114,190 @@ private enum ShellForeground {
         value > 0 && value & (value - 1) == 0
     }
 
+    /// `std::strtoull` base 10. Leading C whitespace, one optional
+    /// sign, then digits. The rest of the word is ignored, so `10abc`
+    /// is 10, `1e2` is 1, and `0x10` is 0. No digit is 0. A value past
+    /// `UInt64` saturates, including a negative whose magnitude
+    /// overflows. `-1` wraps to `UInt64.max`. An attached `\-1` keeps
+    /// the backslash, so this reads 0; the caller strips that prefix
+    /// only for a separate word.
+    private static func nodeStrtoull(_ value: String) -> UInt64 {
+        let scalars = Array(value.unicodeScalars)
+        var index = 0
+        while index < scalars.count, nodeIsCSpace(scalars[index]) {
+            index += 1
+        }
+        var negative = false
+        if index < scalars.count {
+            let sign = scalars[index].value
+            if sign == 43 || sign == 45 {
+                negative = sign == 45
+                index += 1
+            }
+        }
+        var magnitude: UInt64 = 0
+        var digits = 0
+        var overflow = false
+        while index < scalars.count {
+            let character = scalars[index]
+            guard character.value >= 48, character.value <= 57 else { break }
+            let digit = UInt64(character.value - 48)
+            if magnitude > (UInt64.max - digit) / 10 {
+                overflow = true
+                break
+            }
+            magnitude = magnitude * 10 + digit
+            digits += 1
+            index += 1
+        }
+        if digits == 0 { return 0 }
+        if overflow { return UInt64.max }
+        if negative { return 0 &- magnitude }
+        return magnitude
+    }
+
+    /// One test-runner option and the value Node keeps. Nil for every
+    /// other word. Longer names are matched first so
+    /// `--test-reporter-destination` is not `--test-reporter`.
+    ///
+    /// A separate word is unescaped when it starts with `\-`. An
+    /// attached value keeps that backslash. A missing word is empty;
+    /// the walk already treats a dash word and an empty `--flag=` as
+    /// a missing argument and does not name a script.
+    private enum NodeTestValue {
+        case reporter
+        case destination
+        case shard(String)
+        case timeout(UInt64)
+        case concurrency(UInt64)
+        case lines(UInt64)
+        case branches(UInt64)
+        case functions(UInt64)
+    }
+
+    private struct NodeTestOperand {
+        var value: NodeTestValue
+        var width: Int
+    }
+
+    private static func nodeTestOperand(
+        _ arg: String,
+        argv: [String],
+        index: Int
+    ) -> NodeTestOperand? {
+        let flags: [(String, (String) -> NodeTestValue)] = [
+            ("--test-reporter-destination", { _ in .destination }),
+            ("--test-reporter", { _ in .reporter }),
+            ("--test-shard", { .shard($0) }),
+            ("--test-timeout", { .timeout(nodeStrtoull($0)) }),
+            ("--test-concurrency", { .concurrency(nodeStrtoull($0)) }),
+            ("--test-coverage-lines", { .lines(nodeStrtoull($0)) }),
+            ("--test-coverage-branches", { .branches(nodeStrtoull($0)) }),
+            ("--test-coverage-functions", { .functions(nodeStrtoull($0)) }),
+        ]
+        for (name, make) in flags {
+            if arg == name {
+                let raw = index + 1 < argv.count ? argv[index + 1] : ""
+                return NodeTestOperand(value: make(nodeUnescapedDash(raw)), width: 2)
+            }
+            let attached = name + "="
+            if arg.hasPrefix(attached) {
+                let text = String(arg.dropFirst(attached.count))
+                return NodeTestOperand(value: make(text), width: 1)
+            }
+        }
+        return nil
+    }
+
+    /// True when Node 22.23's test harness throws this flag before the
+    /// file runs. `name` has no `=`. The decision is the final prefix,
+    /// so a later good operand replaces an earlier bad one.
+    ///
+    /// `--test-shard` has to match `^\d+/\d+$`. Each side is
+    /// `parseInt` and has to be a safe integer from 1 through the
+    /// total. `--test-timeout` uses `strtoull`; `0` is falsy and
+    /// becomes the default, and any other value above 2147483647
+    /// throws. `--test-concurrency` is the same with 4294967295.
+    /// The three coverage thresholds throw only while
+    /// `--experimental-test-coverage` is on, and only outside 0...100.
+    /// Reporter and destination counts have to match after one missing
+    /// destination is filled in for a single reporter. `--no-test`
+    /// leaves every one of these ignored. A reporter name that is not
+    /// a builtin is not this check: the pane may be able to load it.
+    private static func nodeTestHarnessRejects(_ name: String, prefix: NodePrefix) -> Bool {
+        guard prefix.testRunner else { return false }
+        switch name {
+        case "--test-shard":
+            guard let shard = prefix.shard else { return false }
+            return nodeShardExits(shard)
+        case "--test-timeout":
+            return prefix.timeout > 2_147_483_647
+        case "--test-concurrency":
+            return prefix.concurrency > 4_294_967_295
+        case "--test-coverage-lines", "--test-coverage-branches", "--test-coverage-functions":
+            guard prefix.coverage else { return false }
+            return prefix.coverageLines > 100
+                || prefix.coverageBranches > 100
+                || prefix.coverageFunctions > 100
+        case "--test-reporter", "--test-reporter-destination":
+            return nodeReporterCountRejects(
+                reporters: prefix.reporterCount,
+                destinations: prefix.destinationCount
+            )
+        default:
+            return false
+        }
+    }
+
+    /// `parseInt` of a digit string, when the result is a safe integer.
+    /// Nil when a character is not a digit, or the value is above
+    /// `Number.MAX_SAFE_INTEGER`. Leading zeros do not change it.
+    /// `0` is returned: the shard range rejects it afterwards.
+    private static func nodeSafeInteger(_ digits: Substring) -> Int64? {
+        var magnitude: UInt64 = 0
+        var digitsSeen = 0
+        for character in digits {
+            guard isASCIIDigit(character),
+                  let scalar = character.unicodeScalars.first else {
+                return nil
+            }
+            let digit = UInt64(scalar.value - 48)
+            if magnitude > (UInt64.max - digit) / 10 { return nil }
+            magnitude = magnitude * 10 + digit
+            digitsSeen += 1
+        }
+        guard digitsSeen > 0, magnitude <= 9_007_199_254_740_991 else { return nil }
+        return Int64(magnitude)
+    }
+
+    /// The shard grammar and range in `parseCommandLine` and `run`.
+    /// Anything that is not `<index>/<total>`, or whose index is
+    /// outside `1...total`, throws before the file. `01/02` is `1/2`.
+    /// `2/2` is in range: the harness accepts it, and which file runs
+    /// depends on the list.
+    private static func nodeShardExits(_ shard: String) -> Bool {
+        let parts = shard.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              let index = nodeSafeInteger(parts[0]),
+              let total = nodeSafeInteger(parts[1]) else {
+            return true
+        }
+        return index < 1 || total < 1 || index > total
+    }
+
+    /// Reporter and destination vectors have to be the same length.
+    /// No flags is the default reporter. One reporter and no
+    /// destination is stdout. Every other mismatch throws before the
+    /// files run, including two reporters and no destination.
+    private static func nodeReporterCountRejects(reporters: Int, destinations: Int) -> Bool {
+        var destinations = destinations
+        if reporters == 0 && destinations == 0 { return false }
+        if reporters == 1 && destinations == 0 {
+            destinations = 1
+        }
+        return destinations != reporters
+    }
+
     /// Booleans and the last integer operands, read from the flags
     /// before the first positional. A later `--no-` wins, and
     /// `--flag=false` is still on: Node's boolean parser does not read
@@ -3141,6 +3344,27 @@ private enum ShellForeground {
         /// Last `--heapsnapshot-near-heap-limit`. The default is 0.
         /// A negative value exits in `CheckOptions`.
         var nearHeapLimit: Int64 = 0
+        /// Final `--experimental-test-coverage` state.
+        /// `--experimental-test-coverage=false` is still on.
+        var coverage = false
+        /// How many `--test-reporter` values appear before the script.
+        var reporterCount = 0
+        /// How many `--test-reporter-destination` values appear.
+        var destinationCount = 0
+        /// Last `--test-shard` text, after a separate `\-` is stripped.
+        /// Nil when the flag was not set. An empty word is still set.
+        var shard: String?
+        /// Last `--test-timeout`. `strtoull`. `0` is the unset default
+        /// and does not throw. A value above 2147483647 does.
+        var timeout: UInt64 = 0
+        /// Last `--test-concurrency`. `0` is the unset default. A value
+        /// above 4294967295 throws.
+        var concurrency: UInt64 = 0
+        /// Last coverage thresholds. `strtoull`, default 0. Checked
+        /// only when `coverage` is on, and only outside 0...100.
+        var coverageLines: UInt64 = 0
+        var coverageBranches: UInt64 = 0
+        var coverageFunctions: UInt64 = 0
 
         /// TLS pair, CA pair, `--test` with `--interactive` / `-i` or
         /// with `--watch-path`, or `--watch` with `--interactive` /
@@ -3170,6 +3394,7 @@ private enum ShellForeground {
             case .interactive: interactive = on
             case .watch: watch = on
             case .testForceExit: testForceExit = on
+            case .coverage: coverage = on
             }
         }
     }
@@ -3186,6 +3411,7 @@ private enum ShellForeground {
         case interactive
         case watch
         case testForceExit
+        case coverage
     }
 
     private static func nodePrefixFlags(_ argv: [String]) -> NodePrefix {
@@ -3236,6 +3462,31 @@ private enum ShellForeground {
                     state.nearHeapLimit = integer.value
                 }
                 index += integer.width
+                continue
+            }
+            // The harness reads these after option parsing. The width
+            // matches `nodeTakesSeparateValue`, so the script is still
+            // the word after the operand. A later flag replaces a scalar.
+            if let testOperand = nodeTestOperand(arg, argv: argv, index: index) {
+                switch testOperand.value {
+                case .reporter:
+                    state.reporterCount += 1
+                case .destination:
+                    state.destinationCount += 1
+                case .shard(let shard):
+                    state.shard = shard
+                case .timeout(let value):
+                    state.timeout = value
+                case .concurrency(let value):
+                    state.concurrency = value
+                case .lines(let value):
+                    state.coverageLines = value
+                case .branches(let value):
+                    state.coverageBranches = value
+                case .functions(let value):
+                    state.coverageFunctions = value
+                }
+                index += testOperand.width
                 continue
             }
             let width = arg.contains("=") || !nodeTakesSeparateValue(arg) ? 1 : 2
@@ -3291,6 +3542,7 @@ private enum ShellForeground {
         case "--permission", "--experimental-permission": flag = .permission
         case "--test": flag = .test
         case "--test-force-exit": flag = .testForceExit
+        case "--experimental-test-coverage": flag = .coverage
         case "--interactive": flag = .interactive
         case "--watch": flag = .watch
         default: flag = nil
