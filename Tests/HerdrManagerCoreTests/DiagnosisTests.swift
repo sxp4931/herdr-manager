@@ -1823,6 +1823,241 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([helper, definedLetta]) == 30)
     }
 
+    @Test("a bun value the runtime rejects is not the agent script")
+    func bunRejectedValueIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Bun 1.4.2 exits. The path after the rejected value does not run,
+        // so this bun is not the group leader.
+        let portWord = process(
+            4, "bun", argv: ["bun", "--port", "codex", "/usr/local/bin/codex"]
+        )
+        let portRange = process(
+            4, "bun", argv: ["bun", "--port", "65536", "/usr/local/bin/codex"]
+        )
+        let portEquals = process(
+            4, "bun", argv: ["bun", "--port=bun", "/tmp/codex"]
+        )
+        let install = process(
+            4, "bun", argv: ["bun", "run", "--install", "nope", "/tmp/codex"]
+        )
+        let shell = process(
+            4, "bun", argv: ["bun", "--shell", "bash", "/usr/local/bin/codex"]
+        )
+        let shellBun = process(
+            4, "bun.exe", argv: ["bun.exe", "--shell", "bun", "/tmp/codex"]
+        )
+        let depth = process(
+            4, "bun", argv: ["bun", "--console-depth", "65536", "/tmp/codex"]
+        )
+        let elide = process(
+            4, "bun", argv: ["bun", "--elide-lines", "abc", "/usr/local/bin/codex"]
+        )
+        let jsx = process(
+            4, "bun", argv: ["bun", "--jsx-runtime", "nope", "/tmp/codex"]
+        )
+        let dns = process(
+            4, "bun", argv: ["bun", "--dns-result-order", "nope", "/tmp/codex"]
+        )
+        let rejections = process(
+            4, "bun", argv: ["bun", "--unhandled-rejections", "nope", "/tmp/codex"]
+        )
+        let preconnect = process(
+            4, "bun", argv: ["bun", "--fetch-preconnect", "https://example.com", "/tmp/codex"]
+        )
+        let header = process(
+            4, "bun", argv: ["bun", "--max-http-header-size", "abc", "/tmp/codex"]
+        )
+        let titleBun = process(
+            4, "bun", argv: ["bun", "--title", "bun", "/usr/local/bin/codex"]
+        )
+        let profName = process(
+            4, "bun", argv: ["bun", "--cpu-prof-name", "out.cpuprofile", "/tmp/codex"]
+        )
+        let heapInterval = process(
+            4, "bun", argv: ["bun", "--heap-prof-interval", "1000", "/tmp/codex"]
+        )
+        let interval = process(
+            4, "bun", argv: ["bun", "--cpu-prof-interval", "1", "/usr/local/bin/codex"]
+        )
+        let cron = process(
+            4, "bun", argv: ["bun", "--cron-title", "hello", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([portWord, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([portRange, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([portEquals, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([install, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([shell, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([shellBun, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([depth, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([elide, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([jsx, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([dns, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([rejections, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([preconnect, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([header, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([titleBun, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([profName, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([heapInterval, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([interval, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([cron, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([mcp, portWord], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([portWord]) == 4)
+
+        // A value bun accepts still names the script, including `=`,
+        // `bun run`, and a script written before the flag.
+        let portScript = process(
+            20, "bun", argv: ["bun", "--port", "0", "/usr/local/bin/codex"]
+        )
+        let portPlus = process(20, "bun", argv: ["bun", "--port", "+80", "/tmp/codex"])
+        let portPadded = process(20, "bun.exe", argv: ["bun.exe", "--port=03000", "/tmp/codex"])
+        let installed = process(
+            20, "bun", argv: ["bun", "--install", "disable", "/usr/local/bin/codex"]
+        )
+        let shellEquals = process(20, "bun", argv: ["bun", "--shell=bun", "/tmp/codex"])
+        let depthZero = process(20, "bun", argv: ["bun", "--console-depth", "0", "/tmp/codex"])
+        let depthTop = process(
+            20, "bun", argv: ["bun", "--console-depth", "+65535", "/usr/local/bin/codex"]
+        )
+        let elideNumber = process(20, "bun", argv: ["bun", "--elide-lines", "+2", "/tmp/codex"])
+        let jsxClassic = process(
+            20, "bun", argv: ["bun", "--jsx-runtime=classic", "/tmp/codex"]
+        )
+        let dnsOrder = process(
+            20, "bun", argv: ["bun", "--dns-result-order", "ipv6first", "/tmp/codex"]
+        )
+        let rejectionMode = process(
+            20,
+            "bun",
+            argv: ["bun", "--unhandled-rejections", "warn-with-error-code", "/tmp/codex"]
+        )
+        let preconnected = process(
+            20,
+            "bun",
+            argv: ["bun", "--fetch-preconnect", "https://example.com:443/path", "/tmp/codex"]
+        )
+        let preconnectV6 = process(
+            20, "bun", argv: ["bun", "--fetch-preconnect", "https://[::1]:443", "/tmp/codex"]
+        )
+        let headerZero = process(
+            20, "bun", argv: ["bun", "--max-http-header-size", "0", "/tmp/codex"]
+        )
+        let titleEquals = process(20, "bun", argv: ["bun", "--title=bun", "/usr/local/bin/codex"])
+        let defaultInterval = process(
+            20, "bun", argv: ["bun", "--cpu-prof-interval", "01000", "/tmp/codex"]
+        )
+        let namedProfile = process(
+            20,
+            "bun",
+            argv: ["bun", "--cpu-prof-name", "out.cpuprofile", "--cpu-prof", "/tmp/codex"]
+        )
+        let markdownProfile = process(
+            20,
+            "bun",
+            argv: ["bun", "--cpu-prof-md", "--cpu-prof-interval", "abc", "/tmp/codex"]
+        )
+        let heapMarkdown = process(
+            20,
+            "bun",
+            argv: ["bun", "--heap-prof-md", "--heap-prof-name", "out", "/usr/local/bin/codex"]
+        )
+        let heapAny = process(
+            20,
+            "bun",
+            argv: ["bun", "--heap-prof", "--heap-prof-interval", "abc", "/tmp/codex"]
+        )
+        let cronBoth = process(
+            20,
+            "bun",
+            argv: [
+                "bun", "run", "--cron-title=hello", "--cron-period", "1s",
+                "/usr/local/bin/codex",
+            ]
+        )
+        let scriptFirst = process(
+            20, "bun", argv: ["bun", "/usr/local/bin/codex", "--port", "codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, portScript]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, portPlus]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, portPadded]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, installed]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, shellEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, depthZero]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, depthTop]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, elideNumber]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, jsxClassic]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, dnsOrder]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, rejectionMode]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, preconnected]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, preconnectV6]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, headerZero]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, titleEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, defaultInterval]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, namedProfile]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, markdownProfile]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, heapMarkdown]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, heapAny]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, cronBoth]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, scriptFirst]) == 20)
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, shellEquals], foregroundProcessGroupId: 20) == 20
+        )
+
+        // Node does not use bun's value lists. `--port` is an unknown
+        // flag, so the next word `codex` is the script. `--title bun`
+        // is a title, and the path after it is the script.
+        let nodePort = process(
+            20, "node", argv: ["node", "--port", "codex", "server.js"]
+        )
+        let nodeTitle = process(
+            20, "node", argv: ["node", "--title", "bun", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, nodePort]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeTitle]) == 20)
+
+        // A rejected value in front of Letta is not the TUI. An attached
+        // `--shell=bun` still is.
+        let falseLetta = process(
+            8,
+            "bun",
+            argv: ["bun", "--port", "65536", "/home/user/node_modules/.bin/letta"]
+        )
+        let titleLetta = process(
+            8,
+            "bun",
+            argv: [
+                "bun", "--title", "bun",
+                "/home/user/node_modules/.bin/letta", "--prompt", "hi",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([falseLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([falseLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([falseLetta]) == 8)
+        #expect(Diagnoser.cpuSamplePid([mcp, falseLetta], foregroundProcessGroupId: 8) == 10)
+        #expect(Diagnoser.cpuSamplePid([titleLetta, interactive]) == 30)
+        let shellLetta = process(
+            30,
+            "bun",
+            argv: [
+                "bun", "--shell=bun",
+                "/home/user/node_modules/.bin/letta", "--conversation", "id",
+            ]
+        )
+        let portLetta = process(
+            30,
+            "bun",
+            argv: [
+                "bun", "--port", "3000",
+                "/home/user/node_modules/.bin/letta", "--conversation", "id",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, shellLetta]) == 30)
+        #expect(Diagnoser.cpuSamplePid([helper, portLetta]) == 30)
+    }
+
     @Test("bun's --config word is the script, and the other runtimes keep theirs")
     func bunConfigWordIsTheScript() {
         let helper = process(10, "node", argv: ["node", "server.js"])

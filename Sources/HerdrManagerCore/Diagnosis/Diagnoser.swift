@@ -1256,12 +1256,12 @@ private enum ShellForeground {
                     }
                     continue
                 }
-                if runtimeName == "bun",
-                   bunValueExits(
-                    arg,
-                    following: index + 1 < argv.count ? argv[index + 1] : nil
-                   ) {
-                    return nil
+                if runtimeName == "bun" {
+                    let following = index + 1 < argv.count ? argv[index + 1] : nil
+                    if bunSeparateValueIsTheWordBun(arg, following: following)
+                        || bunValueExits(arg, following: following, argv: argv) {
+                        return nil
+                    }
                 }
                 if let width = valueFlagWidth(arg, runtime: runtimeName) {
                     index += width
@@ -1536,6 +1536,20 @@ private enum ShellForeground {
     /// `--port=--watch` or an empty `--port=`. `--define` exits unless
     /// the value contains `:` or `=`, so `KEY` and `--watch` are not a
     /// value and `KEY:1` is. `--elide-lines=` and `--install=` still run.
+    /// A non-dash value can exit too. `--port` is 0...65535, `--install`
+    /// is `auto`, `fallback`, `force`, or `disable`, `--shell` is
+    /// `system` or an attached `bun`, and the enum flags take only the
+    /// words Bun 1.4.2 prints. `--console-depth` is 0...65535.
+    /// `--elide-lines` and `--max-http-header-size` are non-negative
+    /// integers. `--fetch-preconnect` needs an `http` or `https` URL
+    /// with a port. A separate word `bun` is not a value: bun prints
+    /// the file. `--shell=bun` and `--title=bun` still run.
+    /// `--cpu-prof-name` and `--cpu-prof-dir` exit unless `--cpu-prof`
+    /// or `--cpu-prof-md` appears before the script, and the heap flags
+    /// exit unless `--heap-prof` or `--heap-prof-md` does.
+    /// `--cpu-prof-interval` without either flag runs only when the
+    /// value is 1000. `--cron-title` and `--cron-period` exit unless
+    /// both are set and neither value is empty.
     private static func runtimeScriptIsAgent(_ process: ForegroundProcess) -> Bool {
         guard let argv = launchArguments(process), let script = runtimeScript(argv) else {
             return false
@@ -1676,6 +1690,12 @@ private enum ShellForeground {
                 }
                 continue
             }
+            if runtime == "bun", bunSeparateValueIsTheWordBun(arg, following: following) {
+                // A separate argv word `bun` is not the value. Bun prints
+                // the file or switches to the bundler and does not run it.
+                // `--shell=bun` keeps the word in the flag and still runs.
+                return nil
+            }
             if runtimeValueFlags.contains(arg) {
                 // Deno's `-r` is `--reload` with no separate value, and
                 // `-W` / `-S` / `--env-file` are the same shape. Node's
@@ -1696,7 +1716,7 @@ private enum ShellForeground {
             // Bun exits before the path after a rejected value runs.
             // Node's dash-word rule is `nodeOption`, above. A value bun
             // accepts still falls through to `valueFlagWidth`.
-            if runtime == "bun", bunValueExits(arg, following: following) {
+            if runtime == "bun", bunValueExits(arg, following: following, argv: argv) {
                 return nil
             }
             if let width = valueFlagWidth(arg, runtime: runtime) {
@@ -1975,23 +1995,46 @@ private enum ShellForeground {
     /// script after it.
     ///
     /// `--port --watch /tmp/codex`, `--port=--watch`, `--port=`, and
-    /// `--shell --watch` exit. `--port 3000` and `--port=3000` do not:
-    /// the word that does not start with `-` is still the value.
-    /// `--define KEY` and `--define --watch` exit because the value has
-    /// no `:` or `=`. `--define KEY:1`, `--define --watch=1`, and
-    /// `--define=KEY:1` run the file. `-d=A` is the same missing
-    /// separator (`=` only attaches the short flag). `-dKEY:1` and
-    /// `-d--watch=1` keep the separator in the value and run. `--title
-    /// --watch` is not this check.
-    private static func bunValueExits(_ arg: String, following: String?) -> Bool {
+    /// `--shell --watch` exit. `--port 3000` and `--port=3000` do not.
+    /// `--port codex`, `--port 65536`, `--install nope`, `--shell bash`,
+    /// and `--fetch-preconnect https://example.com` exit too: a word
+    /// that does not start with `-` can still be a value bun rejects.
+    /// `--define KEY` exits because the value has no `:` or `=`.
+    /// `KEY:1` runs. A separate word `bun` is not a value (`--shell bun`
+    /// prints the file). `--shell=bun` and `--title=bun` still run.
+    /// `--title --watch` is not an exit.
+    private static func bunValueExits(
+        _ arg: String,
+        following: String?,
+        argv: [String]
+    ) -> Bool {
+        if bunSeparateValueIsTheWordBun(arg, following: following) {
+            return true
+        }
         if let define = bunDefineOperand(arg, following: following) {
             return !define.contains(":") && !define.contains("=")
+        }
+        if let rejected = bunConstrainedExit(arg, following: following, argv: argv) {
+            return rejected
         }
         if bunDashRejectedFlags.contains(arg) {
             guard let following else { return false }
             return following.hasPrefix("-")
         }
         return bunAttachedDashExits(arg)
+    }
+
+    /// A separate argv word whose text is `bun`. Bun 1.4.2 does not take
+    /// that word as the value of a flag that consumes one: it prints the
+    /// next file or treats the words as bundle entry points. The `=`
+    /// form (`--title=bun`, `--shell=bun`) is a different word and is
+    /// not this check. `--config` and the flags whose next word is the
+    /// script are not value flags.
+    private static func bunSeparateValueIsTheWordBun(_ arg: String, following: String?) -> Bool {
+        guard following == "bun" else { return false }
+        if bunFlagNamesTheScript(arg) || bunConfigFlagWidth(arg) != nil { return false }
+        if bunRequiredValueFlags.contains(arg) { return true }
+        return runtimeValueFlags.contains(arg)
     }
 
     /// The `--define` / `-d` value. Nil when `arg` is not that flag, so
@@ -2026,6 +2069,405 @@ private enum ShellForeground {
             return value.isEmpty && bunEmptyAttachedExits.contains(flag)
         }
         return false
+    }
+
+    /// A long flag's operand. `missing` is the flag with no following
+    /// word. The `=` form is `.value`, including an empty one.
+    private enum BunOperand {
+        case missing
+        case value(String)
+    }
+
+    /// The operand of an exact long flag or its `--flag=` form.
+    /// Nil when `arg` is a different flag. `--flag=value` keeps the
+    /// value in the word; a separate word is `following`.
+    private static func bunLongOperand(
+        _ arg: String,
+        following: String?,
+        name: String
+    ) -> BunOperand? {
+        if arg == name {
+            if let following { return .value(following) }
+            return .missing
+        }
+        let prefix = name + "="
+        guard arg.hasPrefix(prefix) else { return nil }
+        return .value(String(arg.dropFirst(prefix.count)))
+    }
+
+    /// True when this flag's value makes Bun 1.4.2 exit. Nil when `arg`
+    /// is not one of the flags checked here.
+    private static func bunConstrainedExit(
+        _ arg: String,
+        following: String?,
+        argv: [String]
+    ) -> Bool? {
+        if let exit = bunPortExit(arg, following: following) { return exit }
+        if let exit = bunInstallExit(arg, following: following) { return exit }
+        if let exit = bunShellExit(arg, following: following) { return exit }
+        if let exit = bunChoiceExit(
+            arg, following: following, name: "--unhandled-rejections", choices: bunRejectionModes
+        ) { return exit }
+        if let exit = bunChoiceExit(
+            arg, following: following, name: "--jsx-runtime", choices: bunJSXRuntimes
+        ) { return exit }
+        if let exit = bunChoiceExit(
+            arg, following: following, name: "--dns-result-order", choices: bunDNSOrders
+        ) { return exit }
+        if let exit = bunRangedIntegerExit(
+            arg, following: following, name: "--console-depth", maximum: 65535
+        ) { return exit }
+        if let exit = bunElideExit(arg, following: following) { return exit }
+        if let exit = bunHeaderExit(arg, following: following) { return exit }
+        if let exit = bunPreconnectExit(arg, following: following) { return exit }
+        if let exit = bunProfilerExit(arg, following: following, argv: argv) { return exit }
+        if let exit = bunCronExit(arg, following: following, argv: argv) { return exit }
+        return nil
+    }
+
+    /// `--port` is an integer 0...65535. `+80` and `03000` are that
+    /// integer. A word, an empty `=`, and a dash word are not.
+    private static func bunPortExit(_ arg: String, following: String?) -> Bool? {
+        guard let operand = bunLongOperand(arg, following: following, name: "--port") else {
+            return nil
+        }
+        switch operand {
+        case .missing:
+            return false
+        case .value(let value):
+            guard let number = bunUnsignedInteger(value) else { return true }
+            return number > 65535
+        }
+    }
+
+    private static let bunInstallValues: Set<String> = [
+        "auto", "fallback", "force", "disable",
+    ]
+
+    /// `--install=` and a separate empty word still run. `auto`,
+    /// `fallback`, `force`, and `disable` run. Any other word exits.
+    /// The match is case-sensitive.
+    private static func bunInstallExit(_ arg: String, following: String?) -> Bool? {
+        guard let operand = bunLongOperand(arg, following: following, name: "--install") else {
+            return nil
+        }
+        switch operand {
+        case .missing:
+            return false
+        case .value(let value):
+            if value.isEmpty { return false }
+            return !bunInstallValues.contains(value)
+        }
+    }
+
+    /// `system` runs. An attached `bun` runs. A separate word `bun`
+    /// prints the file, and every other word exits, including an empty `=`.
+    private static func bunShellExit(_ arg: String, following: String?) -> Bool? {
+        guard let operand = bunLongOperand(arg, following: following, name: "--shell") else {
+            return nil
+        }
+        switch operand {
+        case .missing:
+            return false
+        case .value(let value):
+            if arg == "--shell", value == "bun" { return true }
+            return value != "bun" && value != "system"
+        }
+    }
+
+    private static let bunRejectionModes: Set<String> = [
+        "strict", "throw", "warn", "none", "warn-with-error-code",
+    ]
+
+    private static let bunJSXRuntimes: Set<String> = ["automatic", "classic"]
+
+    private static let bunDNSOrders: Set<String> = ["verbatim", "ipv4first", "ipv6first"]
+
+    /// An enum bun prints in `--help`. Any other word, including a
+    /// different case or an empty `=`, exits.
+    private static func bunChoiceExit(
+        _ arg: String,
+        following: String?,
+        name: String,
+        choices: Set<String>
+    ) -> Bool? {
+        guard let operand = bunLongOperand(arg, following: following, name: name) else {
+            return nil
+        }
+        switch operand {
+        case .missing:
+            return false
+        case .value(let value):
+            return !choices.contains(value)
+        }
+    }
+
+    /// `--console-depth` is 0...65535. `+2` and `00` count. A larger
+    /// number, a word, and an empty `=` exit.
+    private static func bunRangedIntegerExit(
+        _ arg: String,
+        following: String?,
+        name: String,
+        maximum: UInt64
+    ) -> Bool? {
+        guard let operand = bunLongOperand(arg, following: following, name: name) else {
+            return nil
+        }
+        switch operand {
+        case .missing:
+            return false
+        case .value(let value):
+            guard let number = bunUnsignedInteger(value) else { return true }
+            return number > maximum
+        }
+    }
+
+    /// `--elide-lines=` is empty and still runs. A non-negative integer,
+    /// including `+2`, runs. A word, a dash word, and a value past
+    /// `UInt64` exit.
+    private static func bunElideExit(_ arg: String, following: String?) -> Bool? {
+        guard let operand = bunLongOperand(arg, following: following, name: "--elide-lines") else {
+            return nil
+        }
+        switch operand {
+        case .missing:
+            return false
+        case .value(let value):
+            if arg.hasPrefix("--elide-lines="), value.isEmpty { return false }
+            return bunUnsignedInteger(value) == nil
+        }
+    }
+
+    /// `--max-http-header-size` is a non-negative integer. `0` and `+16`
+    /// run. An empty `=` and a word exit.
+    private static func bunHeaderExit(_ arg: String, following: String?) -> Bool? {
+        guard let operand = bunLongOperand(
+            arg, following: following, name: "--max-http-header-size"
+        ) else {
+            return nil
+        }
+        switch operand {
+        case .missing:
+            return false
+        case .value(let value):
+            return bunUnsignedInteger(value) == nil
+        }
+    }
+
+    /// `--fetch-preconnect` needs `http://` or `https://` and a port in
+    /// 1...65535. `https://example.com` has no port and exits.
+    /// `https://example.com:443` runs. A dash word exits.
+    private static func bunPreconnectExit(_ arg: String, following: String?) -> Bool? {
+        guard let operand = bunLongOperand(
+            arg, following: following, name: "--fetch-preconnect"
+        ) else {
+            return nil
+        }
+        switch operand {
+        case .missing:
+            return false
+        case .value(let value):
+            return !bunPreconnectURL(value)
+        }
+    }
+
+    /// `--cpu-prof-name` and `--cpu-prof-dir` exit unless `--cpu-prof`
+    /// or `--cpu-prof-md` is its own word before the script. The heap
+    /// name, directory, and interval exit unless `--heap-prof` or
+    /// `--heap-prof-md` is. `--cpu-prof-interval` without either flag
+    /// runs only when the value is 1000 (`+1000` and `01000` too).
+    /// With either flag, any other value runs, including a dash word.
+    /// `--cpu-prof=true` is not the flag, and a copy after the script
+    /// does not count.
+    private static func bunProfilerExit(
+        _ arg: String,
+        following: String?,
+        argv: [String]
+    ) -> Bool? {
+        if let operand = bunLongOperand(arg, following: following, name: "--cpu-prof-interval") {
+            if bunCPUProfiling(argv) {
+                return false
+            }
+            switch operand {
+            case .missing:
+                return true
+            case .value(let value):
+                return !bunIntegerEquals(value, 1000)
+            }
+        }
+        for name in ["--cpu-prof-name", "--cpu-prof-dir"] {
+            if bunLongOperand(arg, following: following, name: name) != nil {
+                return !bunCPUProfiling(argv)
+            }
+        }
+        for name in ["--heap-prof-name", "--heap-prof-dir", "--heap-prof-interval"] {
+            if bunLongOperand(arg, following: following, name: name) != nil {
+                return !bunHeapProfiling(argv)
+            }
+        }
+        return nil
+    }
+
+    /// `--cpu-prof` or `--cpu-prof-md` before the script. The markdown
+    /// flag writes a profile on its own, and it also enables the name,
+    /// directory, and interval flags.
+    private static func bunCPUProfiling(_ argv: [String]) -> Bool {
+        bunBooleanFlagBeforeScript("--cpu-prof", argv: argv)
+            || bunBooleanFlagBeforeScript("--cpu-prof-md", argv: argv)
+    }
+
+    /// `--heap-prof` or `--heap-prof-md` before the script.
+    private static func bunHeapProfiling(_ argv: [String]) -> Bool {
+        bunBooleanFlagBeforeScript("--heap-prof", argv: argv)
+            || bunBooleanFlagBeforeScript("--heap-prof-md", argv: argv)
+    }
+
+    /// `--cron-title` and `--cron-period` exit unless the other flag is
+    /// also set before the script and this value is not empty. A bad
+    /// period still imports the file, so the script is that path.
+    /// A flag after the script does not count.
+    private static func bunCronExit(
+        _ arg: String,
+        following: String?,
+        argv: [String]
+    ) -> Bool? {
+        let pair: (String, String)?
+        if bunLongOperand(arg, following: following, name: "--cron-title") != nil {
+            pair = ("--cron-title", "--cron-period")
+        } else if bunLongOperand(arg, following: following, name: "--cron-period") != nil {
+            pair = ("--cron-period", "--cron-title")
+        } else {
+            pair = nil
+        }
+        guard let (name, other) = pair,
+              let operand = bunLongOperand(arg, following: following, name: name) else {
+            return nil
+        }
+        switch operand {
+        case .missing:
+            return true
+        case .value(let value):
+            if value.isEmpty { return true }
+            return !bunNamedFlagBeforeScript(other, argv: argv)
+        }
+    }
+
+    /// Optional leading `+`, then digits. `03000` is 3000. A word, a
+    /// dash, an empty string, and a number past `UInt64.max` are nil.
+    private static func bunUnsignedInteger(_ value: String) -> UInt64? {
+        var digits = Substring(value)
+        if digits.first == "+" {
+            digits = digits.dropFirst()
+        }
+        guard !digits.isEmpty else { return nil }
+        for character in digits where !isASCIIDigit(character) {
+            return nil
+        }
+        return UInt64(String(digits))
+    }
+
+    private static func bunIntegerEquals(_ value: String, _ target: UInt64) -> Bool {
+        bunUnsignedInteger(value) == target
+    }
+
+    /// True when `flag` is its own argv word before the first positional
+    /// script. A value of an earlier flag does not count, and a copy
+    /// after the script does not either. `--` ends the flag region.
+    private static func bunBooleanFlagBeforeScript(_ flag: String, argv: [String]) -> Bool {
+        bunFlagBeforeScript(argv: argv) { $0 == flag }
+    }
+
+    /// `name` or `name=value`, before the script. `--cron-period=1s`
+    /// is the flag. The value of `--cron-title` is not.
+    private static func bunNamedFlagBeforeScript(_ name: String, argv: [String]) -> Bool {
+        let attached = name + "="
+        return bunFlagBeforeScript(argv: argv) { $0 == name || $0.hasPrefix(attached) }
+    }
+
+    private static func bunFlagBeforeScript(
+        argv: [String],
+        matches: (String) -> Bool
+    ) -> Bool {
+        guard argv.first.map({ shellBase($0) }) == "bun" else { return false }
+        var index = 1
+        var skippedSubcommand = false
+        while index < argv.count {
+            let arg = argv[index]
+            if arg == "--" { return false }
+            if matches(arg) { return true }
+            if arg.hasPrefix("-") {
+                let width = bunFlagWordWidth(arg)
+                if width > 1, index + 1 < argv.count {
+                    index += width
+                } else {
+                    index += 1
+                }
+                continue
+            }
+            if !skippedSubcommand, runtimeSubcommand(arg, runtime: "bun") {
+                skippedSubcommand = true
+                index += 1
+                continue
+            }
+            return false
+        }
+        return false
+    }
+
+    /// Words this flag occupies when scanning for a later flag. Value
+    /// flags take the next word. `--config` and the flags whose next
+    /// word is the script occupy one.
+    private static func bunFlagWordWidth(_ arg: String) -> Int {
+        if bunFlagNamesTheScript(arg) || bunConfigFlagWidth(arg) != nil { return 1 }
+        if bunInspectFlags.contains(arg) { return 1 }
+        if bunRequiredValueFlags.contains(arg) { return 2 }
+        if arg == "--loader" || arg == "-l" { return 2 }
+        if runtimeValueFlags.contains(arg) { return 2 }
+        return 1
+    }
+
+    /// `http://host:80`, `https://example.com:443/path`, and
+    /// `https://[::1]:443`. The scheme is either case. The port is
+    /// 1...65535. A missing port, a port of 0, and a `#` glued to the
+    /// port exit. A `#` after `/` stays.
+    private static func bunPreconnectURL(_ value: String) -> Bool {
+        guard let scheme = bunHTTPSchemeLength(value) else { return false }
+        var rest = value.dropFirst(scheme)
+        let limit = rest.firstIndex(where: { $0 == "/" || $0 == "?" }) ?? rest.endIndex
+        if let at = rest[..<limit].lastIndex(of: "@") {
+            rest = rest[rest.index(after: at)...]
+        }
+        guard !rest.isEmpty else { return false }
+        let portAndMore: Substring
+        if rest.first == "[" {
+            guard let close = rest.firstIndex(of: "]") else { return false }
+            let host = rest[rest.index(after: rest.startIndex)..<close]
+            guard !host.isEmpty else { return false }
+            let afterBracket = rest.index(after: close)
+            guard afterBracket < rest.endIndex, rest[afterBracket] == ":" else { return false }
+            portAndMore = rest[rest.index(after: afterBracket)...]
+        } else {
+            guard let colon = rest.firstIndex(of: ":") else { return false }
+            let host = rest[..<colon]
+            guard !host.isEmpty, !host.contains("/") else { return false }
+            portAndMore = rest[rest.index(after: colon)...]
+        }
+        var digitEnd = portAndMore.startIndex
+        while digitEnd < portAndMore.endIndex, isASCIIDigit(portAndMore[digitEnd]) {
+            digitEnd = portAndMore.index(after: digitEnd)
+        }
+        let digits = portAndMore[..<digitEnd]
+        guard let port = UInt64(String(digits)), port >= 1, port <= 65535 else { return false }
+        let tail = portAndMore[digitEnd...]
+        if tail.isEmpty { return true }
+        let first = tail[tail.startIndex]
+        return first == "/" || first == "?"
+    }
+
+    private static func bunHTTPSchemeLength(_ value: String) -> Int? {
+        if value.count >= 8, value.prefix(8).lowercased() == "https://" { return 8 }
+        if value.count >= 7, value.prefix(7).lowercased() == "http://" { return 7 }
+        return nil
     }
 
     private static func nodeFlagWidth(_ arg: String, runtime: String) -> Int? {
