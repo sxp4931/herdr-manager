@@ -2225,13 +2225,24 @@ struct DiagnoserFinishedClassificationTests {
         )
         try Data().write(to: cli)
         let cliLink = try link(named: "pi-shim", to: cli)
+        let bin = root.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: bin.appendingPathComponent("launcher"),
+            withDestinationURL: muse
+        )
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("sub", isDirectory: true),
+            withIntermediateDirectories: true
+        )
 
         let working = Agent(id: AgentID("w1:p1"), kind: .custom("cursor"), status: .working)
         let diagnoser = Diagnoser()
         func observe(
             _ argv: [String],
             pid: Int32,
-            name: String
+            name: String,
+            cwd: String? = nil
         ) async -> ProcessGoneObservation {
             await diagnoser.observeProcessGone(
                 agent: working,
@@ -2239,7 +2250,7 @@ struct DiagnoserFinishedClassificationTests {
                     shellPid: 10,
                     foregroundProcesses: [
                         ForegroundProcess(
-                            pid: pid, name: name, argv0: nil, cmdline: nil, cwd: nil,
+                            pid: pid, name: name, argv0: nil, cmdline: nil, cwd: cwd,
                             argv: argv
                         )
                     ]
@@ -2279,17 +2290,75 @@ struct DiagnoserFinishedClassificationTests {
             ["sh", cliLink.path], pid: 96, name: "sh"
         )
         #expect(packageAfterLink == .gone(lastLine: "sh (pid 96)"))
-        // A relative path is not resolved against this process's directory.
-        let relative = await observe(
-            ["sh", "agent"], pid: 97, name: "sh"
+        // `./agent` is the same link, joined to the cwd herdr reported
+        // for this pid. A bare name is a PATH lookup, so the cwd is not
+        // searched. No cwd leaves the relative path unresolved.
+        let relativeCursor = await observe(
+            ["sh", "./agent"], pid: 97, name: "sh", cwd: root.path
         )
-        #expect(relative == .gone(lastLine: "sh (pid 97)"))
+        #expect(relativeCursor == .running)
+        let relativeBin = await observe(
+            ["/bin/bash", "bin/launcher"], pid: 98, name: "bash", cwd: root.path
+        )
+        #expect(relativeBin == .running)
+        let relativeSuffix = await observe(
+            ["pwsh", "-File", "./wrapper"], pid: 99, name: "pwsh", cwd: root.path
+        )
+        #expect(relativeSuffix == .running)
+        let relativeSpaced = await observe(
+            ["zsh", "./tool"], pid: 100, name: "zsh", cwd: root.path + "/"
+        )
+        #expect(relativeSpaced == .running)
+        let relativeNotes = await observe(
+            ["sh", "./helper"], pid: 101, name: "sh", cwd: root.path
+        )
+        #expect(relativeNotes == .gone(lastLine: "sh (pid 101)"))
+        let relativePackage = await observe(
+            ["sh", "./pi-shim"], pid: 102, name: "sh", cwd: root.path
+        )
+        #expect(relativePackage == .gone(lastLine: "sh (pid 102)"))
+        // A bare name is not joined onto the cwd, even when that file
+        // is the link above.
+        let bareName = await observe(
+            ["sh", "agent"], pid: 103, name: "sh", cwd: root.path
+        )
+        #expect(bareName == .gone(lastLine: "sh (pid 103)"))
+        let noCwd = await observe(
+            ["sh", "./agent"], pid: 104, name: "sh"
+        )
+        #expect(noCwd == .gone(lastLine: "sh (pid 104)"))
         let missing = await observe(
             ["sh", root.appendingPathComponent("missing-helper").path],
-            pid: 98,
+            pid: 105,
             name: "sh"
         )
-        #expect(missing == .gone(lastLine: "sh (pid 98)"))
+        #expect(missing == .gone(lastLine: "sh (pid 105)"))
+        let missingRelative = await observe(
+            ["sh", "./missing-helper"], pid: 106, name: "sh", cwd: root.path
+        )
+        #expect(missingRelative == .gone(lastLine: "sh (pid 106)"))
+        // A Windows path is not a file here, and neither is a cwd that
+        // is not absolute.
+        let windowsRelative = await observe(
+            ["pwsh", "-File", ".\\agent"], pid: 107, name: "pwsh", cwd: root.path
+        )
+        #expect(windowsRelative == .gone(lastLine: "pwsh (pid 107)"))
+        let relativeCwd = await observe(
+            ["sh", "./agent"], pid: 108, name: "sh", cwd: "relative"
+        )
+        #expect(relativeCwd == .gone(lastLine: "sh (pid 108)"))
+        let throughParent = await observe(
+            ["sh", "sub/../agent"], pid: 109, name: "sh", cwd: root.path
+        )
+        #expect(throughParent == .running)
+        let afterDashDash = await observe(
+            ["sh", "--", "./agent"], pid: 110, name: "sh", cwd: root.path
+        )
+        #expect(afterDashDash == .running)
+        let relativeCmd = await observe(
+            ["cmd.exe", "/C", "./agent"], pid: 111, name: "cmd.exe", cwd: root.path
+        )
+        #expect(relativeCmd == .running)
     }
 
     @Test("Blocked with a bare shell is process-gone, not awaiting input")

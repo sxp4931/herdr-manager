@@ -376,6 +376,8 @@ public actor Diagnoser {
 /// path whose own basename is not an agent is still that agent when the
 /// file is a symlink to one: herdr canonicalizes it, and a `#!/bin/sh`
 /// wrapper stays `sh` in the foreground with the link as its program.
+/// A relative path is resolved from that process's `cwd`, which
+/// `pane.process_info` reports, so `sh ./agent` is the same link.
 /// `cmd` is a shell only when an argument vector is present, so a payload that
 /// omits `argv` and `cmdline` does not start calling every `cmd.exe` a
 /// crash. One
@@ -436,13 +438,14 @@ private enum ShellForeground {
         guard let kind = unwrappingKind(process), let args = launchArguments(process) else {
             return false
         }
+        let cwd = process.cwd
         switch kind {
         case .posix:
-            return posixLaunchesAgent(args)
+            return posixLaunchesAgent(args, cwd: cwd)
         case .powershell:
-            return powershellLaunchesAgent(args)
+            return powershellLaunchesAgent(args, cwd: cwd)
         case .cmd:
-            return cmdLaunchesAgent(args)
+            return cmdLaunchesAgent(args, cwd: cwd)
         }
     }
 
@@ -505,14 +508,14 @@ private enum ShellForeground {
     /// no option flag that takes a value, so `-o` there is only a flag
     /// and the next word can still be the program. `ash` and `mksh` take
     /// `-o` and `+o`, and not `-O`.
-    private static func posixLaunchesAgent(_ args: [String]) -> Bool {
+    private static func posixLaunchesAgent(_ args: [String], cwd: String?) -> Bool {
         let shell = args.first.map { shellBase($0) } ?? ""
         var index = 1
         while index < args.count {
             let arg = args[index]
             if arg == "--" {
                 guard index + 1 < args.count else { return false }
-                return isKnownAgentProgram(args[index + 1])
+                return isKnownAgentProgram(args[index + 1], cwd: cwd)
             }
             if isPosixEval(arg) { return false }
             if posixOptionTakesValue(arg, shell: shell) {
@@ -527,7 +530,7 @@ private enum ShellForeground {
                 index += 1
                 continue
             }
-            return isKnownAgentProgram(arg)
+            return isKnownAgentProgram(arg, cwd: cwd)
         }
         return false
     }
@@ -667,7 +670,7 @@ private enum ShellForeground {
     /// `/File` from cmd.exe is the same flag as `-File`. A path that is
     /// already an agent program counts before a leading `/` is treated
     /// as a switch.
-    private static func powershellLaunchesAgent(_ args: [String]) -> Bool {
+    private static func powershellLaunchesAgent(_ args: [String], cwd: String?) -> Bool {
         let valueFlags: Set<String> = [
             "-configurationname", "-config",
             "-configurationfile",
@@ -685,21 +688,21 @@ private enum ShellForeground {
         var index = 1
         while index < args.count {
             let raw = trimQuotes(args[index])
-            if isKnownAgentProgram(raw) { return true }
+            if isKnownAgentProgram(raw, cwd: cwd) { return true }
             let (name, attached) = powershellParameter(raw)
             switch name {
             case "-file", "-f":
                 if let attached {
-                    return isKnownAgentProgram(attached)
+                    return isKnownAgentProgram(attached, cwd: cwd)
                 }
                 guard index + 1 < args.count else { return false }
-                return isKnownAgentProgram(args[index + 1])
+                return isKnownAgentProgram(args[index + 1], cwd: cwd)
             case "-command", "-c", "-commandwithargs", "-cwa":
                 if let attached {
-                    return commandTextIsAgent(attached)
+                    return commandTextIsAgent(attached, cwd: cwd)
                 }
                 guard index + 1 < args.count else { return false }
-                return commandTextIsAgent(args[index + 1])
+                return commandTextIsAgent(args[index + 1], cwd: cwd)
             case "-encodedcommand", "-enc", "-e", "-ec":
                 return false
             default:
@@ -758,7 +761,7 @@ private enum ShellForeground {
     /// `/C` and `/K` are the command. The other switches herdr skips are
     /// not a program. A word that is neither is not an agent either:
     /// `cmd` does not take a positional script path.
-    private static func cmdLaunchesAgent(_ args: [String]) -> Bool {
+    private static func cmdLaunchesAgent(_ args: [String], cwd: String?) -> Bool {
         let skipped: Set<String> = [
             "/d", "/s", "/q", "/a", "/u",
             "/e:on", "/e:off", "/f:on", "/f:off", "/v:on", "/v:off",
@@ -768,7 +771,7 @@ private enum ShellForeground {
             let flag = trimQuotes(args[index]).lowercased()
             if flag == "/c" || flag == "/k" {
                 guard index + 1 < args.count else { return false }
-                return commandTextIsAgent(args[index + 1])
+                return commandTextIsAgent(args[index + 1], cwd: cwd)
             }
             if skipped.contains(flag) {
                 index += 1
@@ -781,7 +784,7 @@ private enum ShellForeground {
 
     /// The first program word of a `-Command` or `/C` string. `&`, `.`,
     /// and `call` are invocation noise. A quoted word stays one token.
-    private static func commandTextIsAgent(_ command: String) -> Bool {
+    private static func commandTextIsAgent(_ command: String, cwd: String?) -> Bool {
         var rest = command.trimmingCharacters(in: .whitespacesAndNewlines)
         while !rest.isEmpty {
             let (token, next) = commandToken(rest)
@@ -795,7 +798,7 @@ private enum ShellForeground {
                 rest = trimmedNext
                 continue
             }
-            return isKnownAgentProgram(bare)
+            return isKnownAgentProgram(bare, cwd: cwd)
         }
         return false
     }
@@ -817,12 +820,12 @@ private enum ShellForeground {
         return (input, "")
     }
 
-    private static func isKnownAgentProgram(_ token: String) -> Bool {
+    private static func isKnownAgentProgram(_ token: String, cwd: String?) -> Bool {
         let trimmed = trimQuotes(token).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !trimmed.hasPrefix("-") else { return false }
         if isKnownAgentBasename(agentBase(trimmed)) { return true }
         if isKnownPackageEntrypoint(trimmed) { return true }
-        return isCanonicalAgentBasename(trimmed)
+        return isCanonicalAgentBasename(trimmed, cwd: cwd)
     }
 
     /// Basename herdr's lookup accepts, including `muse-bin-<version>`.
@@ -834,22 +837,40 @@ private enum ShellForeground {
         return scalar.value >= 48 && scalar.value <= 57
     }
 
-    /// Absolute path herdr would `canonicalize` before the basename check.
+    /// Path herdr would `canonicalize` before the basename check.
     ///
     /// The link's own name is not the agent (`agent` → `cursor-agent`).
     /// A shebang script stays the shell in `pane.process_info`, with the
     /// link as the program argument, so the basename check alone called
-    /// that pane a crash. A relative path is left alone: resolving it
-    /// would use this process's directory, not the pane's. A missing
-    /// path does not change its basename, and that name was already
-    /// refused. The package-path check stays on the path herdr sent;
-    /// canonicalizing does not search `node_modules` in the target.
-    private static func isCanonicalAgentBasename(_ token: String) -> Bool {
-        guard token.hasPrefix("/") else { return false }
-        let resolved = URL(fileURLWithPath: token).resolvingSymlinksInPath().path
+    /// that pane a crash. An absolute path is that file. A relative path
+    /// with a slash (`./agent`, `bin/agent`) is joined to this process's
+    /// `cwd`, which is the directory herdr read for that pid, not
+    /// Shepherd's. A bare name is a `PATH` lookup and is left alone. A
+    /// missing path does not change its basename, and that name was
+    /// already refused. The package-path check stays on the path herdr
+    /// sent; canonicalizing does not search `node_modules` in the target.
+    private static func isCanonicalAgentBasename(_ token: String, cwd: String?) -> Bool {
+        guard let path = canonicalPath(token, cwd: cwd) else { return false }
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
         let base = agentBase(resolved)
         guard base != agentBase(token) else { return false }
         return isKnownAgentBasename(base)
+    }
+
+    /// Absolute path, or a relative path joined to an absolute process
+    /// cwd. A Windows path is not a file on this Mac. A name with no
+    /// slash is not joined: `sh claude` is the basename check, and
+    /// `cwd/claude` would be a different file.
+    private static func canonicalPath(_ token: String, cwd: String?) -> String? {
+        if token.hasPrefix("/") { return token }
+        guard token.contains("/"), let cwd, cwd.hasPrefix("/") else { return nil }
+        if token.contains(":") { return nil }
+        var relative = token
+        while relative.hasSuffix("/") { relative.removeLast() }
+        let leaf = pathBase(relative)
+        guard !leaf.isEmpty, leaf != ".", leaf != ".." else { return nil }
+        let prefix = cwd.hasSuffix("/") ? String(cwd.dropLast()) : cwd
+        return prefix + "/" + relative
     }
 
     /// npm entrypoints whose basename is not the agent name.
