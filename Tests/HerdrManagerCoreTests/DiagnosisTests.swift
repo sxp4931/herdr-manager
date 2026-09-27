@@ -1986,6 +1986,123 @@ struct DiagnoserFinishedClassificationTests {
 struct ProcessGoneStampTests {
     private let now = Date(timeIntervalSince1970: 8_000)
 
+    @Test("A PowerShell parameter value is not the program")
+    func powershellParameterValueIsNotTheProgram() async {
+        let working = Agent(id: AgentID("w1:p1"), kind: .claude, status: .working)
+        let diagnoser = Diagnoser()
+
+        func observe(_ argv: [String], pid: Int32 = 90, name: String = "pwsh") async -> ProcessGoneObservation {
+            await diagnoser.observeProcessGone(
+                agent: working,
+                adapter: MockHerdrAdapter(processInfoResult: ProcessInfoResult(
+                    shellPid: 10,
+                    foregroundProcesses: [
+                        ForegroundProcess(
+                            pid: pid, name: name, argv0: nil, cmdline: nil, cwd: nil,
+                            argv: argv
+                        )
+                    ]
+                ))
+            )
+        }
+
+        // `-InputFormat Text` used to be the program, so the `-File` script
+        // never got looked at and a live agent was gone.
+        let inputFormat = await observe([
+            "pwsh", "-NoProfile", "-InputFormat", "Text", "-File", "claude.ps1",
+        ])
+        #expect(inputFormat == .running)
+        let shortInput = await observe([
+            "pwsh", "-if", "XML", "-File", "/usr/local/bin/claude",
+        ])
+        #expect(shortInput == .running)
+        let outputFormat = await observe([
+            "pwsh", "-o", "XML", "-c", "& claude",
+        ])
+        #expect(outputFormat == .running)
+        let policy = await observe([
+            "pwsh", "-ep", "Bypass", "-File", "C:\\Scripts\\claude.ps1",
+        ])
+        #expect(policy == .running)
+        let directory = await observe([
+            "pwsh", "-wd", "C:\\repo", "-w", "Hidden", "-File", "codex.ps1",
+        ])
+        #expect(directory == .running)
+        let settings = await observe([
+            "pwsh", "-SettingsFile", "C:\\cfg\\powershell.config.json",
+            "-CustomPipeName", "MyDebugPipe", "-config", "AdminRoles",
+            "-File", "claude.ps1",
+        ])
+        #expect(settings == .running)
+
+        // Windows PowerShell 5.1 uses the long names. cmd.exe uses `/`.
+        let windows = await observe(
+            [
+                "powershell.exe", "-Version", "5.1", "-InputFormat", "Text",
+                "-OutputFormat", "XML", "-File", "claude.ps1",
+            ],
+            pid: 91,
+            name: "powershell.exe"
+        )
+        #expect(windows == .running)
+        let slash = await observe(
+            [
+                "powershell.exe", "/InputFormat", "Text", "/File",
+                "C:\\Scripts\\claude.ps1",
+            ],
+            pid: 92,
+            name: "powershell.exe"
+        )
+        #expect(slash == .running)
+
+        // The value may be glued on with a colon. The format is still not
+        // the program, and `-File:claude.ps1` is still the script.
+        let colonFormat = await observe([
+            "pwsh", "-InputFormat:Text", "-File", "claude.ps1",
+        ])
+        #expect(colonFormat == .running)
+        let colonFile = await observe([
+            "pwsh", "-NoProfile", "-File:C:\\Scripts\\claude.ps1",
+        ])
+        #expect(colonFile == .running)
+        let colonCommand = await observe([
+            "pwsh", "-c:& claude",
+        ])
+        #expect(colonCommand == .running)
+
+        // `-CommandWithArgs` is a command. The words after that string are
+        // arguments, so a later `claude` does not make an echo the agent.
+        let commandWithArgs = await observe([
+            "pwsh", "-cwa", "claude --resume", "extra",
+        ])
+        #expect(commandWithArgs == .running)
+        let commandIsEcho = await observe([
+            "pwsh", "-CommandWithArgs", "echo hi", "claude",
+        ], pid: 93)
+        #expect(commandIsEcho == .gone(lastLine: "pwsh (pid 93)"))
+
+        // `-e` / `-ec` are encoded commands. The next word is the blob,
+        // even when that word is an agent name.
+        let encodedShort = await observe(["pwsh", "-e", "claude"], pid: 94)
+        #expect(encodedShort == .gone(lastLine: "pwsh (pid 94)"))
+        let encodedEC = await observe(["pwsh", "-ec", "claude"], pid: 95)
+        #expect(encodedEC == .gone(lastLine: "pwsh (pid 95)"))
+
+        // A format with no script is still a shell. A script that is not
+        // an agent is still a shell. `/usr/bin/claude` is a path, not a
+        // switch, including when another slash-flag sits beside it.
+        let formatOnly = await observe(["pwsh", "-InputFormat", "Text"], pid: 96)
+        #expect(formatOnly == .gone(lastLine: "pwsh (pid 96)"))
+        let notAgent = await observe([
+            "pwsh", "-ep", "Bypass", "-File", "C:\\Scripts\\readme.txt",
+        ], pid: 97)
+        #expect(notAgent == .gone(lastLine: "pwsh (pid 97)"))
+        let pathProgram = await observe([
+            "pwsh", "-NoProfile", "/usr/local/bin/claude",
+        ])
+        #expect(pathProgram == .running)
+    }
+
     @Test("A crash replaces the status verdict and a running read clears only that crash")
     func stampSetsAndClears() {
         let working = Agent(id: AgentID("w1:p1"), status: .working, verdict: .healthy)

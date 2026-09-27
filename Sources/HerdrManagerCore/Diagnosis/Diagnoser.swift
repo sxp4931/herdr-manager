@@ -353,8 +353,10 @@ public actor Diagnoser {
 /// A shell is not bare when its argument vector is launching an agent.
 /// herdr identifies `sh /path/to/pi` as Pi and `powershell -File claude.ps1`
 /// as Claude. The comm on both is the shell, so a name-only check marked
-/// a live agent gone. `argv` is that vector. `cmdline` is used only when
-/// `argv` was not sent. `dash`, `ksh`, `csh`, `tcsh`, `ash`, and `mksh`
+/// a live agent gone. `pwsh -InputFormat Text -File claude.ps1` is that
+/// same launch: `Text` is the format, not the program, and so are
+/// `-ep Bypass`, `-o XML`, and `-wd C:\repo`. `argv` is that vector.
+/// `cmdline` is used only when `argv` was not sent. `dash`, `ksh`, `csh`, `tcsh`, `ash`, and `mksh`
 /// run a script the same way `sh` does. `bash -o` and `bash -O` take the
 /// next word as the option name, including inside `-euo pipefail`, and
 /// `bash --rcfile` takes a file. Treating that word as the program marked
@@ -636,36 +638,61 @@ private enum ShellForeground {
     }
 
     /// `-File` is the script. `-Command` / `-c` is a command line, and the
-    /// first program token of that line is the agent. `-EncodedCommand`
-    /// stays a shell: the blob is not decoded. A flag herdr treats as
-    /// taking a value consumes the next word, so the directory is not the
-    /// program. A path that is already an agent program counts before a
-    /// leading `/` is treated as a switch.
+    /// first program token of that line is the agent. `-CommandWithArgs`
+    /// (`-cwa`) is that command: the words after it are arguments, not a
+    /// second program. `-EncodedCommand` stays a shell, including `-e` and
+    /// `-ec`: the blob is not decoded. A parameter that takes a value
+    /// consumes the next word, so `Text`, `Bypass`, `XML`, and a directory
+    /// are not the program. That includes `-InputFormat` (`-if`, `-inp`),
+    /// `-OutputFormat` (`-o`, `-of`), `-ExecutionPolicy` (`-ep`, `-ex`),
+    /// `-WindowStyle` (`-w`), `-WorkingDirectory` (`-wd`, `-wo`),
+    /// `-SettingsFile` (`-settings`), `-ConfigurationName` (`-config`),
+    /// `-ConfigurationFile`, and `-CustomPipeName`. A colon attaches the
+    /// value to the flag (`-InputFormat:Text`, `-File:claude.ps1`). A
+    /// `/File` from cmd.exe is the same flag as `-File`. A path that is
+    /// already an agent program counts before a leading `/` is treated
+    /// as a switch.
     private static func powershellLaunchesAgent(_ args: [String]) -> Bool {
         let valueFlags: Set<String> = [
-            "-configurationname", "-executionpolicy", "-outputformat",
-            "-psconsolefile", "-version", "-windowstyle", "-workingdirectory",
+            "-configurationname", "-config",
+            "-configurationfile",
+            "-custompipename",
+            "-encodedarguments",
+            "-executionpolicy", "-ex", "-ep",
+            "-inputformat", "-inp", "-if",
+            "-outputformat", "-o", "-of",
+            "-psconsolefile",
+            "-settingsfile", "-settings",
+            "-version",
+            "-windowstyle", "-w",
+            "-workingdirectory", "-wd", "-wo",
         ]
         var index = 1
         while index < args.count {
             let raw = trimQuotes(args[index])
             if isKnownAgentProgram(raw) { return true }
-            let flag = raw.lowercased()
-            switch flag {
-            case "-file", "-f", "/file":
+            let (name, attached) = powershellParameter(raw)
+            switch name {
+            case "-file", "-f":
+                if let attached {
+                    return isKnownAgentProgram(attached)
+                }
                 guard index + 1 < args.count else { return false }
                 return isKnownAgentProgram(args[index + 1])
-            case "-command", "-c", "/command", "/c":
+            case "-command", "-c", "-commandwithargs", "-cwa":
+                if let attached {
+                    return commandTextIsAgent(attached)
+                }
                 guard index + 1 < args.count else { return false }
                 return commandTextIsAgent(args[index + 1])
-            case "-encodedcommand", "-enc", "/encodedcommand", "/enc":
+            case "-encodedcommand", "-enc", "-e", "-ec":
                 return false
             default:
-                if valueFlags.contains(flag) {
-                    index += 2
+                if valueFlags.contains(name) {
+                    index += attached == nil ? 2 : 1
                     continue
                 }
-                if flag.hasPrefix("-") || flag.hasPrefix("/") {
+                if name.hasPrefix("-") || raw.hasPrefix("/") {
                     index += 1
                     continue
                 }
@@ -673,6 +700,44 @@ private enum ShellForeground {
             }
         }
         return false
+    }
+
+    /// Host parameter name, and a value glued on with `:`.
+    ///
+    /// cmd.exe accepts `/File` as `-File`. A token with another separator
+    /// (`/usr/bin/claude`, `C:\claude.ps1`) is a path, so the slash stays.
+    /// The name and a colon-attached value are compared in lowercase.
+    /// `isKnownAgentProgram` folds case again, so the fold does not hide a path.
+    private static func powershellParameter(_ token: String) -> (name: String, attached: String?) {
+        let trimmed = trimQuotes(token)
+        let flag = powershellSwitch(trimmed)
+        guard flag.hasPrefix("-"), let colon = flag.firstIndex(of: ":") else {
+            return (flag, nil)
+        }
+        let name = String(flag[..<colon])
+        guard name.count > 1 else { return (flag, nil) }
+        // The value is sliced from `flag`, which is the same characters as
+        // `trimmed` with case folded and a cmd `/` rewritten to `-`.
+        // Agent matching folds case again, so the fold does not hide a path.
+        let value = String(flag[flag.index(after: colon)...])
+        return (name, value)
+    }
+
+    /// `-File` and `/File` share a name. A path does not.
+    private static func powershellSwitch(_ token: String) -> String {
+        guard let first = token.first else { return token.lowercased() }
+        if first == "-" {
+            return token.lowercased()
+        }
+        guard first == "/" else { return token.lowercased() }
+        let rest = token.dropFirst()
+        let name = rest.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            .first
+            .map { String($0) } ?? String(rest)
+        guard !name.isEmpty, !name.contains("/"), !name.contains("\\") else {
+            return token.lowercased()
+        }
+        return "-" + token.dropFirst().lowercased()
     }
 
     /// `/C` and `/K` are the command. The other switches herdr skips are
