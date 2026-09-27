@@ -1234,7 +1234,10 @@ private enum ShellForeground {
                 // concurrency, coverage threshold, or reporter list
                 // the harness rejects is not Letta. `1/2`, a timeout
                 // of `2147483647`, and `--test-reporter spec` still
-                // are. `--no-test` leaves a bad shard as Letta.
+                // are. A `--test-name-pattern` or `--test-skip-pattern`
+                // that Node's regexp parser rejects is not Letta.
+                // `ok`, `/foo/i`, and `/[a--b]/v` still are. `--no-test`
+                // leaves a bad shard and `(` as Letta.
                 // Bun rejects `-W`,
                 // `-X`, `-S`, `-L`, and `-o`; the path after one is
                 // not Letta. A bun value that starts with `-` is not
@@ -1691,8 +1694,9 @@ private enum ShellForeground {
         // script written first is already the program: options after
         // it are arguments, and that prefix has no conflict. `--watch`
         // without a path still runs beside `--test`. A later `--no-`
-        // wins. A test-runner operand the harness rejects is
-        // `nodeOption`, and only while the final `--test` state is on.
+        // wins. A test-runner operand the harness rejects, including
+        // a name or skip pattern, is `nodeOption`, and only while the
+        // final `--test` state is on.
         if isNodeRuntime(runtime), nodePrefixFlags(argv).conflicts {
             return nil
         }
@@ -2873,9 +2877,12 @@ private enum ShellForeground {
     /// `PerProcessOptions::CheckOptions`. The last operand of each
     /// flag wins, so an earlier `3` does not hide a later `4`.
     /// `--test-shard`, `--test-timeout`, `--test-concurrency`, the
-    /// coverage thresholds, and the reporter list are
-    /// `nodeTestHarnessRejects`. They throw inside the test runner,
-    /// and only when the final `--test` state is on.
+    /// coverage thresholds, the reporter list, and a test name or
+    /// skip pattern are `nodeTestHarnessRejects`. They throw inside
+    /// the test runner, and only when the final `--test` state is on.
+    /// A pattern throws when `convertStringToRegExp` throws. A `v`
+    /// flag's character class, an unknown `\p` name, and a scalar
+    /// above U+FFFF are not that decision.
     private static func nodeRejectedOperand(
         name: String,
         value: String,
@@ -3173,6 +3180,8 @@ private enum ShellForeground {
         case lines(UInt64)
         case branches(UInt64)
         case functions(UInt64)
+        /// The operand text, with a separate `\-` left in place.
+        case pattern(String)
     }
 
     private struct NodeTestOperand {
@@ -3185,6 +3194,12 @@ private enum ShellForeground {
         argv: [String],
         index: Int
     ) -> NodeTestOperand? {
+        // Name and skip patterns keep the argv text. A leading `\-`
+        // is not the numeric unescape `nodeUnescapedDash` applies
+        // to a shard or a timeout.
+        if let pattern = nodePatternOperand(arg, argv: argv, index: index) {
+            return pattern
+        }
         let flags: [(String, (String) -> NodeTestValue)] = [
             ("--test-reporter-destination", { _ in .destination }),
             ("--test-reporter", { _ in .reporter }),
@@ -3209,9 +3224,34 @@ private enum ShellForeground {
         return nil
     }
 
+    /// `--test-name-pattern` and `--test-skip-pattern`, including the
+    /// `=` form. Nil for every other word. The operand is not run
+    /// through `nodeUnescapedDash`.
+    private static func nodePatternOperand(
+        _ arg: String,
+        argv: [String],
+        index: Int
+    ) -> NodeTestOperand? {
+        let names = ["--test-skip-pattern", "--test-name-pattern"]
+        for name in names {
+            if arg == name {
+                let raw = index + 1 < argv.count ? argv[index + 1] : ""
+                return NodeTestOperand(value: .pattern(raw), width: 2)
+            }
+            let attached = name + "="
+            if arg.hasPrefix(attached) {
+                let text = String(arg.dropFirst(attached.count))
+                return NodeTestOperand(value: .pattern(text), width: 1)
+            }
+        }
+        return nil
+    }
+
     /// True when Node 22.23's test harness throws this flag before the
     /// file runs. `name` has no `=`. The decision is the final prefix,
-    /// so a later good operand replaces an earlier bad one.
+    /// so a later good shard, timeout, concurrency, or coverage operand
+    /// replaces an earlier bad one. A name or skip pattern does not:
+    /// every operand is compiled, and any throw stops the file.
     ///
     /// `--test-shard` has to match `^\d+/\d+$`. Each side is
     /// `parseInt` and has to be a safe integer from 1 through the
@@ -3244,6 +3284,8 @@ private enum ShellForeground {
                 reporters: prefix.reporterCount,
                 destinations: prefix.destinationCount
             )
+        case "--test-name-pattern", "--test-skip-pattern":
+            return prefix.testPatterns.contains { NodeTestPattern.rejects($0) }
         default:
             return false
         }
@@ -3365,6 +3407,12 @@ private enum ShellForeground {
         var coverageLines: UInt64 = 0
         var coverageBranches: UInt64 = 0
         var coverageFunctions: UInt64 = 0
+        /// Every `--test-name-pattern` and `--test-skip-pattern` operand
+        /// before the script. The harness compiles each one. A later
+        /// valid pattern does not erase an earlier one that throws.
+        /// A separate `\-` stays in the text. This is a string option,
+        /// not the numeric unescape the shard path uses.
+        var testPatterns: [String] = []
 
         /// TLS pair, CA pair, `--test` with `--interactive` / `-i` or
         /// with `--watch-path`, or `--watch` with `--interactive` /
@@ -3485,6 +3533,8 @@ private enum ShellForeground {
                     state.coverageBranches = value
                 case .functions(let value):
                     state.coverageFunctions = value
+                case .pattern(let text):
+                    state.testPatterns.append(text)
                 }
                 index += testOperand.width
                 continue

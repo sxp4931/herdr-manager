@@ -6278,6 +6278,141 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)
         #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
     }
+
+    @Test("a node test pattern the regexp parser rejects is not the agent script")
+    func nodeTestPatternRejectionIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23 compiles every `--test-name-pattern` and
+        // `--test-skip-pattern` before the file when `--test` is on.
+        // `(` , `*`, a quantifier whose bounds are reversed, bad flags,
+        // and a named backreference that does not exist throw there.
+        // A later valid pattern does not erase an earlier throw.
+        let rejected: [(String, [String])] = [
+            ("paren", ["node", "--test", "--test-name-pattern", "(", "/usr/local/bin/codex"]),
+            ("paren-eq", ["nodejs", "--test", "--test-name-pattern=(", "/tmp/codex"]),
+            ("skip-star", ["node.exe", "--test", "--test-skip-pattern", "*", "/usr/local/bin/codex"]),
+            ("skip-plus", ["node", "--test", "--test-skip-pattern=+", "/tmp/codex"]),
+            ("question", ["nodejs", "--test", "--test-name-pattern", "?", "/usr/local/bin/codex"]),
+            ("class", ["node.exe", "--test", "--test-name-pattern", "[", "/tmp/codex"]),
+            ("trail", ["node", "--test", "--test-name-pattern", "\\", "/usr/local/bin/codex"]),
+            ("order", ["nodejs", "--test", "--test-name-pattern", "a{2,1}", "/tmp/codex"]),
+            ("flags", ["node.exe", "--test", "--test-name-pattern", "/foo/gg", "/usr/local/bin/codex"]),
+            ("wrap", ["node", "--test", "--test-name-pattern", "/(/", "/tmp/codex"]),
+            ("range", ["nodejs", "--test", "--test-name-pattern", "/[a--b]/u", "/usr/local/bin/codex"]),
+            ("named", ["node.exe", "--test", "--test-name-pattern", "(?<n>a)\\k<m>", "/tmp/codex"]),
+            ("close", ["node", "--test", "--test-name-pattern", ")", "/usr/local/bin/codex"]),
+            ("double", ["nodejs", "--test", "--test-name-pattern", "a**", "/tmp/codex"]),
+            ("both", [
+                "node.exe", "--test", "--test-name-pattern", "ok",
+                "--test-skip-pattern", "(", "/usr/local/bin/codex",
+            ]),
+            ("later", [
+                "node", "--test", "--test-name-pattern", "(",
+                "--test-name-pattern", "ok", "/tmp/codex",
+            ]),
+            ("then-test", [
+                "nodejs", "--test-name-pattern", "(", "--test", "/usr/local/bin/codex",
+            ]),
+            ("no-then-test", [
+                "node.exe", "--no-test", "--test-name-pattern", "(", "--test", "/tmp/codex",
+            ]),
+            ("group", ["node", "--test", "--test-name-pattern", "(?:", "/usr/local/bin/codex"]),
+            ("lookbehind", ["nodejs", "--test", "--test-name-pattern", "(?<=a)*", "/tmp/codex"]),
+        ]
+        for (label, argv) in rejected {
+            let exited = process(4, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(label) ranked the path")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(label) took the sample from the leader slot"
+            )
+        }
+        #expect(
+            Diagnoser.cpuSamplePid([
+                process(4, "node", argv: ["node", "--test", "--test-name-pattern", "(", "/usr/local/bin/codex"])
+            ]) == 4
+        )
+
+        // A pattern Node runs still names the file. `/[a--b]/v` is a
+        // unicodeSets class and is not the legacy range error.
+        // `/\p{NotAThing}/u` throws in Node because the property name
+        // is unknown; that database is not checked here, so the file
+        // stays the script. `\-*` keeps its backslash.
+        let kept: [(String, [String])] = [
+            ("word", ["node", "--test", "--test-name-pattern", "ok", "/usr/local/bin/codex"]),
+            ("eq", ["nodejs", "--test", "--test-name-pattern=foo", "/tmp/codex"]),
+            ("flags", ["node.exe", "--test", "--test-name-pattern", "/foo/i", "/usr/local/bin/codex"]),
+            ("class", ["node", "--test", "--test-name-pattern", "[a-z]+", "/tmp/codex"]),
+            ("named", ["nodejs", "--test", "--test-name-pattern", "(?<n>a)\\k<n>", "/usr/local/bin/codex"]),
+            ("star", ["node.exe", "--test", "--test-name-pattern", "\\-*", "/tmp/codex"]),
+            ("sets", ["node", "--test", "--test-name-pattern", "/[a--b]/v", "/usr/local/bin/codex"]),
+            ("property", ["nodejs", "--test", "--test-name-pattern", "/\\p{NotAThing}/u", "/tmp/codex"]),
+            ("legacy-prop", ["node.exe", "--test", "--test-name-pattern", "\\p{NotAThing}", "/usr/local/bin/codex"]),
+            ("off", ["node", "--test-name-pattern", "(", "/usr/local/bin/codex"]),
+            ("no-test", ["nodejs", "--test", "--no-test", "--test-name-pattern", "(", "/tmp/codex"]),
+            ("script-first", ["node", "/usr/local/bin/codex", "--test", "--test-name-pattern", "("]),
+            ("flag-after", [
+                "node.exe", "--test", "--test-name-pattern", "ok", "/tmp/codex",
+                "--test-name-pattern", "(",
+            ]),
+            ("empty", ["nodejs", "--test", "--test-name-pattern", "", "/usr/local/bin/codex"]),
+            ("skip-ok", ["node", "--test", "--test-skip-pattern", "a+", "/tmp/codex"]),
+            ("quant", ["node.exe", "--test", "--test-name-pattern", "a{1,2}", "/usr/local/bin/codex"]),
+            ("forward", ["nodejs", "--test", "--test-name-pattern", "\\1(a)", "/tmp/codex"]),
+        ]
+        for (label, argv) in kept {
+            let running = process(20, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(label) dropped the script")
+        }
+        let leader = process(
+            20,
+            "node",
+            argv: ["node", "--test", "--test-name-pattern", "ok", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+
+        let badParen = process(
+            8, "node", argv: ["node", "--test", "--test-name-pattern", "(", "/tmp/letta"]
+        )
+        let badSkip = process(
+            8, "nodejs", argv: ["nodejs", "--test", "--test-skip-pattern", "*", "/tmp/letta"]
+        )
+        let keptLetta = process(
+            40, "node.exe", argv: ["node.exe", "--test", "--test-name-pattern", "ok", "/tmp/letta"]
+        )
+        let keptSets = process(
+            40, "node", argv: ["node", "--test", "--test-name-pattern", "/[a--b]/v", "/tmp/letta"]
+        )
+        let oneShot = process(
+            40,
+            "nodejs",
+            argv: ["nodejs", "--test", "--test-name-pattern", "ok", "/tmp/letta", "--prompt"]
+        )
+        #expect(Diagnoser.cpuSamplePid([badParen, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badParen, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([badSkip, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badSkip, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, keptLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, keptSets]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, oneShot]) == 10)
+        #expect(Diagnoser.cpuSamplePid([oneShot, interactive]) == 30)
+
+        // Bun does not take `--test-name-pattern`'s next word, so `(`
+        // is the script. Python exits on the unknown option.
+        let bun = process(
+            20, "bun", argv: ["bun", "--test", "--test-name-pattern", "(", "/usr/local/bin/codex"]
+        )
+        let python = process(
+            4, "python3", argv: ["python3", "--test", "--test-name-pattern", "(", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([bun]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)
+        #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
+    }
 }
 
 @Suite("Diagnoser finished vs process-gone")
