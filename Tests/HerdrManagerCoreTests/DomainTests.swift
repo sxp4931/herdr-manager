@@ -574,6 +574,133 @@ struct SecretRedactorTests {
         #expect(!blockResult.redactedText.contains("MIIEv"))
     }
 
+    @Test("Redacts camelCase secretKey, SecretAccessKey, privateKey, and passwordKey")
+    func redactsCamelCaseSecretNames() {
+        let redactor = SecretRedactor()
+        // The shape `aws sts assume-role` prints. The access key id is not
+        // this name. The secret and the session token are.
+        let cli = """
+        {
+            "Credentials": {
+                "AccessKeyId": "ASIAIOSFODNN7EXAMPLE",
+                "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                "SessionToken": "IQoJb3JpZ2luX2VjEXampleTokenValue"
+            }
+        }
+        """
+        let cliResult = redactor.redact(cli)
+        #expect(
+            cliResult.redactedText
+                == """
+                {
+                    "Credentials": {
+                        "AccessKeyId": "ASIAIOSFODNN7EXAMPLE",
+                        "SecretAccessKey=[REDACTED]",
+                        "SessionToken=[REDACTED]"
+                    }
+                }
+                """
+        )
+        #expect(cliResult.redactionCount == 2)
+        #expect(!cliResult.redactedText.contains("wJalrXUtnFEMI"))
+        #expect(!cliResult.redactedText.contains("IQoJb3JpZ2luX2VjE"))
+        #expect(cliResult.redactedText.contains("ASIAIOSFODNN7EXAMPLE"))
+        let cliAgain = redactor.redact(cliResult.redactedText)
+        #expect(cliAgain.redactedText == cliResult.redactedText)
+        #expect(cliAgain.redactionCount == 0)
+
+        let js = redactor.redact(
+            #"{"secretKey": "supersecretvalue", "privateKey": "anothersecretvalue", "passwordKey": "thirdsecretvalue"}"#
+        )
+        #expect(
+            js.redactedText
+                == #"{"secretKey=[REDACTED]", "privateKey=[REDACTED]", "passwordKey=[REDACTED]"}"#
+        )
+        #expect(js.redactionCount == 3)
+        #expect(!js.redactedText.contains("supersecretvalue"))
+        #expect(!js.redactedText.contains("anothersecretvalue"))
+        #expect(!js.redactedText.contains("thirdsecretvalue"))
+        let jsAgain = redactor.redact(js.redactedText)
+        #expect(jsAgain.redactedText == js.redactedText)
+        #expect(jsAgain.redactionCount == 0)
+
+        // No separator at all is the same name. A prefix stays on the label,
+        // and the captured name keeps its case.
+        #expect(
+            redactor.redact(
+                "secretkey=supersecretvalue SECRETACCESSKEY=anothersecretvalue awsSecretAccessKey=thirdsecretvalue"
+            ).redactedText
+                == "secretkey=[REDACTED] SECRETACCESSKEY=[REDACTED] awsSecretAccessKey=[REDACTED]"
+        )
+        #expect(
+            redactor.redact("privateKey=supersecretvalue passwordkey=anothersecretvalue").redactedText
+                == "privateKey=[REDACTED] passwordkey=[REDACTED]"
+        )
+        #expect(
+            redactor.redact(#"{"secretKey": "correct horse's battery"}"#).redactedText
+                == #"{"secretKey=[REDACTED]"}"#
+        )
+        #expect(redactor.redact("secretKey=12345678").redactedText == "secretKey=[REDACTED]")
+
+        // The name still has to end on the keyword. A plural, a longer
+        // identifier, and a 7-character value stay.
+        let kept = [
+            "secretKeys=supersecretvalue",
+            "secretAccessKeyId=supersecretvalue",
+            "privateKeys=supersecretvalue",
+            "passwordKeyboard=supersecretvalue",
+            "passwordKeyId=supersecretvalue",
+            "privateKeyId=supersecretvalue",
+            "secretKey=1234567",
+            "secretary=supersecretvalue",
+            "private=supersecretvalue",
+        ]
+        for line in kept {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line)")
+            #expect(result.redactedText == line)
+        }
+
+        let key = "xai-abcdefghijklmnopqrstuvwxyz0123456789"
+        let labeled = redactor.redact(#"{"secretKey": "\#(key)"}"#)
+        #expect(labeled.redactedText == #"{"secretKey": "xai-[REDACTED]"}"#)
+        #expect(labeled.redactionCount == 1)
+        #expect(!labeled.redactedText.contains("abcdefghijklmnopqrstuvwxyz0123456789"))
+        let labeledAgain = redactor.redact(labeled.redactedText)
+        #expect(labeledAgain.redactedText == labeled.redactedText)
+        #expect(labeledAgain.redactionCount == 0)
+
+        // A username that is this keyword keeps the host. `=` is still
+        // an assignment, so that host goes with the secret.
+        let url = redactor.redact("https://secretKey:supersecret@github.com/org/repo")
+        #expect(url.redactedText == "https://secretKey:[REDACTED]@github.com/org/repo")
+        #expect(url.redactionCount == 1)
+        #expect(!url.redactedText.contains("supersecret"))
+        let urlAgain = redactor.redact(url.redactedText)
+        #expect(urlAgain.redactedText == url.redactedText)
+        #expect(urlAgain.redactionCount == 0)
+        let prefixed = redactor.redact("https://my-secretKey:supersecret@github.com/org/repo")
+        #expect(prefixed.redactedText == "https://my-secretKey:[REDACTED]@github.com/org/repo")
+        #expect(prefixed.redactionCount == 1)
+        let equals = redactor.redact("https://secretKey=supersecret@host")
+        #expect(equals.redactedText == "https://secretKey=[REDACTED]")
+        #expect(!equals.redactedText.contains("supersecret"))
+        #expect(!equals.redactedText.contains("@host"))
+
+        let pem = """
+        privateKey=-----BEGIN OPENSSH PRIVATE KEY-----
+        MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSj
+        -----END OPENSSH PRIVATE KEY-----
+        """
+        let pemResult = redactor.redact(pem)
+        #expect(pemResult.redactedText == "privateKey=[REDACTED PRIVATE KEY]")
+        #expect(pemResult.redactionCount == 1)
+        #expect(!pemResult.redactedText.contains("MIIEv"))
+        let pemAgain = redactor.redact(pemResult.redactedText)
+        #expect(pemAgain.redactedText == pemResult.redactedText)
+        #expect(pemAgain.redactionCount == 0)
+    }
+
     @Test("Redacts a URL userinfo password and leaves the host")
     func redactsURLUserinfo() {
         let redactor = SecretRedactor()

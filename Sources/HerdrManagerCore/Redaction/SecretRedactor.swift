@@ -273,8 +273,15 @@ public final class SecretRedactor: Sendable {
             "|(?:[A-Za-z0-9+/]{4}){2,}[A-Za-z0-9+/]{2}" +
             "|(?:[A-Za-z0-9+/]{4}){2,}[A-Za-z0-9+/]{3}" +
             ")(?![A-Za-z0-9+/=])"
+        // `api[_-]?key` already makes the separator optional, so `apiKey`
+        // is an assignment. JSON and the AWS CLI write the other names
+        // the same way, with no `_` or `-`: `secretKey`, `SecretAccessKey`,
+        // `privateKey`, `passwordKey`. The separator may be absent. The
+        // name still has to end on that keyword, so `secretKeys`,
+        // `privateKeys`, `passwordKeyboard`, and `secretAccessKeyId` are
+        // not assignments. `secretary` has no `key`.
         let keyword =
-            "api[_-]?key|secret(?:[_-]access)?[_-]key|private[_-]key|password[_-]key|secret|token|password"
+            "api[_-]?key|secret[_-]?access[_-]?key|secret[_-]?key|private[_-]?key|password[_-]?key|secret|token|password"
         let defs = labeled + [
             (basicPrefix + basicSignal + basicToken, "$1[REDACTED]"),
             // Generic assignments. A JSON key has a quote between the name
@@ -282,10 +289,11 @@ public final class SecretRedactor: Sendable {
             // (`api_key=…`, `token: "…"`). `secret_key` and
             // `secret_access_key` (the suffix of `AWS_SECRET_ACCESS_KEY`)
             // are the same kind of name, and so are `private_key` and
-            // `password_key`: the keyword is not the end until `_key` or
-            // `_access_key`. A hyphen is the separator `api_key` already
-            // accepts. The name still has to end there, so `secret_name`,
-            // `secret_keys`, `token_key`, `private_keys`, and
+            // `password_key`. The separator may be absent (`SecretAccessKey`,
+            // `privateKey`); a hyphen is still the separator `api_key`
+            // already accepts. The name still has to end there, so
+            // `secret_name`, `secret_keys`, `secretKeys`,
+            // `secretAccessKeyId`, `token_key`, `private_keys`, and
             // `SECRET_ACCESS_KEY_ID` are not assignments. Bare `private`
             // is not a keyword. A double-quoted value keeps spaces and
             // apostrophes, and a single-quoted value keeps spaces. The
