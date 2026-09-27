@@ -406,3 +406,27 @@ struct HerdResolveTests {
         )
     }
 }
+
+@Suite("agent.tail accepts only the four pane-read sources")
+struct PaneReadSourceArgumentTests {
+    @Test("The four wire names ignore case and surrounding space, and a missing argument is detection")
+    func accepted() {
+        #expect(PaneReadSource.parseArgument(nil) == .parsed(.detection))
+        #expect(PaneReadSource.parseArgument("detection") == .parsed(.detection))
+        #expect(PaneReadSource.parseArgument(" DETECTION ") == .parsed(.detection))
+        #expect(PaneReadSource.parseArgument("Recent") == .parsed(.recent))
+        #expect(PaneReadSource.parseArgument(" visible ") == .parsed(.visible))
+        #expect(PaneReadSource.parseArgument("Recent_Unwrapped") == .parsed(.recentUnwrapped))
+        #expect(PaneReadSource.wireNames == "visible, recent, recent_unwrapped, detection")
+    }
+
+    @Test("Blank and an unknown word are not the detection buffer")
+    func refused() {
+        #expect(PaneReadSource.parseArgument("") == .unrecognized(""))
+        #expect(PaneReadSource.parseArgument("   ") == .unrecognized(""))
+        #expect(PaneReadSource.parseArgument("\n") == .unrecognized(""))
+        #expect(PaneReadSource.parseArgument(" scrollback ") == .unrecognized("scrollback"))
+        #expect(PaneReadSource.parseArgument("recent-unwrapped") == .unrecognized("recent-unwrapped"))
+        #expect(PaneReadSource.parseArgument("RecentUnwrapped") == .unrecognized("RecentUnwrapped"))
+    }
+}

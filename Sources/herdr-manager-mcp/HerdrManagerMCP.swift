@@ -639,14 +639,19 @@ actor MCPServer {
     private func handleAgentTail(arguments: [String: Any]) async -> [String: Any] {
         let lineCount = min(max(JSONNumber.int(arguments["lines"]) ?? 50, 1), 200)
 
-        let sourceStr = arguments["source"] as? String ?? "detection"
+        // An unknown word used to be read as detection, so a caller that
+        // asked for scrollback received the screen herdr classifies on.
+        // A missing argument is still that default. Blank is not.
+        // Check this before any socket call. A non-string value is the
+        // missing-argument path.
         let source: PaneReadSource
-        switch sourceStr {
-        case "visible": source = .visible
-        case "recent": source = .recent
-        case "recent_unwrapped": source = .recentUnwrapped
-        case "detection": source = .detection
-        default: source = .detection
+        switch PaneReadSource.parseArgument(arguments["source"] as? String) {
+        case .parsed(let parsed):
+            source = parsed
+        case .unrecognized(let text):
+            return makeToolError(
+                "Invalid source '\(text)'. Must be one of: \(PaneReadSource.wireNames)"
+            )
         }
 
         do {
@@ -2304,7 +2309,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "agent.tail",
-            "description": "Read the last N lines of one agent's terminal output. Pass agent_id or a unique human query. The read is bounded at the source and secret-scrubbed.",
+            "description": "Read the last N lines of one agent's terminal output. Pass agent_id or a unique human query. The read is bounded at the source and secret-scrubbed. source is visible, recent, recent_unwrapped, or detection (the default). An unknown source is an error.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -2324,7 +2329,7 @@ actor MCPServer {
                     "source": [
                         "type": "string",
                         "enum": ["visible", "recent", "recent_unwrapped", "detection"],
-                        "description": "Pane read source (default: detection)",
+                        "description": "Pane read source (default: detection). Case-insensitive; surrounding space is ignored. A blank value is an error. An unknown word is an error, not detection.",
                         "default": "detection"
                     ]
                 ] as [String: Any]

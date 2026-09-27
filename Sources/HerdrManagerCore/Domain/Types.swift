@@ -440,11 +440,40 @@ public struct Agent: Sendable, Identifiable, Equatable {
 
 // MARK: - PaneReadSource
 
-public enum PaneReadSource: String, Sendable {
+/// herdr's `pane.read` source.
+///
+/// `agent.tail` defaults a missing argument to `detection`. A present
+/// string has to be one of the four wire names. Blank and any other word
+/// used to return the detection buffer, so a caller that asked for
+/// scrollback read the screen herdr classifies on.
+public enum PaneReadSource: String, Equatable, Sendable {
     case visible
     case recent
     case recentUnwrapped = "recent_unwrapped"
     case detection
+
+    /// The words a rejection lists, in schema order.
+    public static let wireNames = "visible, recent, recent_unwrapped, detection"
+
+    public enum ArgumentParse: Equatable, Sendable {
+        case parsed(PaneReadSource)
+        /// The argument was present and is not one of the four wire names.
+        /// Blank is included: omitting the argument is the default, and an
+        /// empty string is not.
+        case unrecognized(String)
+    }
+
+    /// Trim and case-fold. Nil is the documented default. An empty string
+    /// is unrecognized, so it is not treated as that default.
+    public static func parseArgument(_ raw: String?) -> ArgumentParse {
+        guard let raw else { return .parsed(.detection) }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .unrecognized(trimmed) }
+        guard let source = PaneReadSource(rawValue: trimmed.lowercased()) else {
+            return .unrecognized(trimmed)
+        }
+        return .parsed(source)
+    }
 }
 
 // MARK: - PaneReadResult
