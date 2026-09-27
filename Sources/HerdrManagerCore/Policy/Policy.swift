@@ -82,17 +82,8 @@ public actor PolicyEngine {
             }
         }
 
-        // Global rate limit: ≤6/min
-        let cutoff = now.addingTimeInterval(-60)
-        globalWriteTimestamps.removeAll { $0 < cutoff }
-        if globalWriteTimestamps.count >= globalLimitPerMinute {
-            let oldest = globalWriteTimestamps.first ?? now
-            let retryAfter = Int(oldest.addingTimeInterval(60).timeIntervalSince(now)) + 1
-            return PolicyResult(
-                allowed: false,
-                reason: "Global rate limit: \(globalLimitPerMinute) writes/min exceeded",
-                retryAfterSeconds: max(retryAfter, 1)
-            )
+        if let global = globalRefusal(now: now) {
+            return global
         }
 
         // For .gated tier (agent.answer, and agent.say while idle or
@@ -114,19 +105,92 @@ public actor PolicyEngine {
         return .allowed
     }
 
+    /// Take the slot `checkWriteAllowed` just reported.
+    ///
+    /// The check records nothing, so two overlapping sends can both
+    /// observe a free slot and both proceed. This is one call: the
+    /// second sees the first. A refusal does not record. Free tier
+    /// does not either. The slot stays taken if the caller then fails
+    /// to send; putting it back would let a burst of failures through.
+    public func reserveWrite(
+        agentId: String,
+        tier: AuthorityTier,
+        sessionIdentity: String? = nil
+    ) -> PolicyResult {
+        let result = checkWriteAllowed(
+            agentId: agentId,
+            tier: tier,
+            sessionIdentity: sessionIdentity
+        )
+        guard result.allowed else { return result }
+        if case .free = tier { return result }
+        recordWrite(agentId: agentId, sessionIdentity: sessionIdentity)
+        return result
+    }
+
+    /// Take one global slot and no per-agent cooldown.
+    ///
+    /// A spawn has no pane yet. The 6/min cap is the limit that applies
+    /// before that pane exists. An unrelated pane's cooldown does not
+    /// refuse this. The created pane is cooled down afterwards with
+    /// `noteAgentCooldown`, which must not count a second time.
+    public func reserveGlobalWrite() -> PolicyResult {
+        let now = Date()
+        if let refusal = globalRefusal(now: now) {
+            return refusal
+        }
+        globalWriteTimestamps.append(now)
+        return .allowed
+    }
+
+    /// Start this occupant's cooldown without counting a global write.
+    ///
+    /// The global slot was already taken by `reserveGlobalWrite` while
+    /// the pane did not exist. Stamping it here the way `recordWrite`
+    /// does would make one spawn count as two.
+    public func noteAgentCooldown(agentId: String, sessionIdentity: String? = nil) {
+        stampCooldown(agentId: agentId, sessionIdentity: sessionIdentity, countsGlobally: false)
+    }
+
     /// Record that a write was performed for an agent.
     ///
     /// One global timestamp. A session also stamps `agentId`, so the
     /// pane the write addressed stays in cooldown when a later check
-    /// has no session to offer.
+    /// has no session to offer. Callers that send under `reserveWrite`
+    /// have already recorded and must not call this again.
     public func recordWrite(agentId: String, sessionIdentity: String? = nil) {
+        stampCooldown(agentId: agentId, sessionIdentity: sessionIdentity, countsGlobally: true)
+    }
+
+    private func stampCooldown(
+        agentId: String,
+        sessionIdentity: String?,
+        countsGlobally: Bool
+    ) {
         let now = Date()
         let key = budgetKey(agentId: agentId, sessionIdentity: sessionIdentity)
         perAgentLastWrite[key] = now
         if case .session = key {
             perAgentLastWrite[.pane(agentId)] = now
         }
-        globalWriteTimestamps.append(now)
+        if countsGlobally {
+            globalWriteTimestamps.append(now)
+        }
+    }
+
+    /// Nil when another global write fits in the last minute.
+    /// Does not record one. Drops timestamps older than the window.
+    private func globalRefusal(now: Date) -> PolicyResult? {
+        let cutoff = now.addingTimeInterval(-60)
+        globalWriteTimestamps.removeAll { $0 < cutoff }
+        guard globalWriteTimestamps.count >= globalLimitPerMinute else { return nil }
+        let oldest = globalWriteTimestamps.first ?? now
+        let retryAfter = Int(oldest.addingTimeInterval(60).timeIntervalSince(now)) + 1
+        return PolicyResult(
+            allowed: false,
+            reason: "Global rate limit: \(globalLimitPerMinute) writes/min exceeded",
+            retryAfterSeconds: max(retryAfter, 1)
+        )
     }
 
     /// Record an answer for consecutive-answer tracking.

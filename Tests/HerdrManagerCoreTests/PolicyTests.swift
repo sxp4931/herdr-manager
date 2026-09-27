@@ -1323,6 +1323,146 @@ struct PolicyEngineTests {
         #expect(afterSix.reason?.contains("Global") == true)
     }
 
+    @Test("A reservation is the write the next check sees")
+    func reserveConsumesTheSlot() async {
+        let engine = PolicyEngine()
+        let first = await engine.reserveWrite(agentId: "w1:p1", tier: .confirm)
+        #expect(first.allowed)
+        let second = await engine.reserveWrite(agentId: "w1:p1", tier: .confirm)
+        #expect(!second.allowed)
+        #expect(second.reason?.contains("Per-agent") == true)
+        let other = await engine.reserveWrite(agentId: "w1:p2", tier: .confirm)
+        #expect(other.allowed)
+    }
+
+    @Test("A refused reservation does not take a global slot")
+    func refusedReserveDoesNotConsume() async {
+        let engine = PolicyEngine()
+        let first = await engine.reserveWrite(agentId: "wA:p1", tier: .confirm)
+        #expect(first.allowed)
+        let refused = await engine.reserveWrite(agentId: "wA:p1", tier: .confirm)
+        #expect(!refused.allowed)
+        // Five more distinct panes fill the minute only if the refusal
+        // did not count. The next one is the global cap.
+        for pane in ["wB:p2", "wC:p3", "wD:p4", "wE:p5", "wF:p6"] {
+            let result = await engine.reserveWrite(agentId: pane, tier: .confirm)
+            #expect(result.allowed)
+        }
+        let over = await engine.reserveWrite(agentId: "wG:p7", tier: .confirm)
+        #expect(!over.allowed)
+        #expect(over.reason?.contains("Global") == true)
+    }
+
+    @Test("A check does not take the slot a reservation does")
+    func checkDoesNotConsume() async {
+        let engine = PolicyEngine()
+        for pane in ["p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8"] {
+            let result = await engine.checkWriteAllowed(agentId: pane, tier: .confirm)
+            #expect(result.allowed)
+        }
+        for _ in 0..<6 {
+            let result = await engine.reserveGlobalWrite()
+            #expect(result.allowed)
+        }
+        let over = await engine.reserveGlobalWrite()
+        #expect(!over.allowed)
+        #expect(over.reason?.contains("Global") == true)
+    }
+
+    @Test("A free-tier reservation does not take a write slot")
+    func freeReserveDoesNotConsume() async {
+        let engine = PolicyEngine()
+        for _ in 0..<20 {
+            let result = await engine.reserveWrite(agentId: "w1:p1", tier: .free)
+            #expect(result.allowed)
+        }
+        let write = await engine.reserveWrite(agentId: "w1:p1", tier: .confirm)
+        #expect(write.allowed)
+    }
+
+    @Test("A confirm-tier reservation ignores a full answer cap")
+    func confirmReserveIgnoresAnswerCap() async {
+        let engine = PolicyEngine()
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordAnswer(agentId: "w1:p1")
+        await engine.recordAnswer(agentId: "w1:p1")
+        let capped = await engine.checkWriteAllowed(agentId: "w1:p1", tier: .gated)
+        #expect(!capped.allowed)
+        #expect(capped.reason?.contains("Consecutive") == true)
+        let confirm = await engine.reserveWrite(agentId: "w1:p1", tier: .confirm)
+        #expect(confirm.allowed)
+    }
+
+    @Test("A reservation follows the session and counts once globally")
+    func reserveFollowsSession() async {
+        let engine = PolicyEngine()
+        let session = "agent|claude|session|abc"
+        let reserved = await engine.reserveWrite(
+            agentId: "wA:p1", tier: .confirm, sessionIdentity: session
+        )
+        #expect(reserved.allowed)
+        let moved = await engine.checkWriteAllowed(
+            agentId: "wB:p4", tier: .confirm, sessionIdentity: session
+        )
+        #expect(!moved.allowed)
+        #expect(moved.reason?.contains("Per-agent") == true)
+        for pane in ["wC:p2", "wD:p3", "wE:p4", "wF:p5", "wG:p6"] {
+            let result = await engine.reserveWrite(
+                agentId: pane, tier: .confirm,
+                sessionIdentity: "agent|claude|session|\(pane)"
+            )
+            #expect(result.allowed)
+        }
+        let over = await engine.reserveGlobalWrite()
+        #expect(!over.allowed)
+        #expect(over.reason?.contains("Global") == true)
+    }
+
+    @Test("Cooling a pane down does not count toward the global limit")
+    func noteAgentCooldownIsNotGlobal() async {
+        let engine = PolicyEngine()
+        let session = "agent|claude|session|abc"
+        await engine.noteAgentCooldown(agentId: "wA:p1", sessionIdentity: session)
+        let moved = await engine.checkWriteAllowed(
+            agentId: "wB:p4", tier: .confirm, sessionIdentity: session
+        )
+        #expect(!moved.allowed)
+        #expect(moved.reason?.contains("Per-agent") == true)
+        let origin = await engine.checkWriteAllowed(agentId: "wA:p1", tier: .confirm)
+        #expect(!origin.allowed)
+        for _ in 0..<6 {
+            let result = await engine.reserveGlobalWrite()
+            #expect(result.allowed)
+        }
+        let over = await engine.reserveGlobalWrite()
+        #expect(!over.allowed)
+        #expect(over.reason?.contains("Global") == true)
+    }
+
+    @Test("A spawn reservation ignores another pane's cooldown and does not double-count")
+    func spawnReservationDoesNotDoubleCount() async {
+        let engine = PolicyEngine()
+        await engine.noteAgentCooldown(agentId: "wA:p1")
+        let cooled = await engine.checkWriteAllowed(agentId: "wA:p1", tier: .confirm)
+        #expect(!cooled.allowed)
+
+        let spawn = await engine.reserveGlobalWrite()
+        #expect(spawn.allowed)
+        await engine.noteAgentCooldown(agentId: "wB:p2")
+        let newPane = await engine.checkWriteAllowed(agentId: "wB:p2", tier: .confirm)
+        #expect(!newPane.allowed)
+        #expect(newPane.reason?.contains("Per-agent") == true)
+
+        // The cooled pane and the spawn were not two global writes.
+        for _ in 0..<5 {
+            let result = await engine.reserveGlobalWrite()
+            #expect(result.allowed)
+        }
+        let over = await engine.reserveGlobalWrite()
+        #expect(!over.allowed)
+        #expect(over.reason?.contains("Global") == true)
+    }
+
     private func fingerprint(_ session: String, pane: String) -> String {
         "session|\(session)|\(pane)"
     }

@@ -727,14 +727,14 @@ actor MCPServer {
 
             // Check policy. The session has to travel with the pane id:
             // the cap and the cooldown are stored on it.
+            // Does not take the slot. explain is still ahead, and a
+            // refusal here has not sent anything.
             let policyResult = await policy.checkWriteAllowed(
                 agentId: agentIdStr,
                 tier: .gated,
                 sessionIdentity: paneInfo.sessionIdentity
             )
-            guard policyResult.allowed else {
-                return makeToolError("Policy denied: \(policyResult.reason ?? "unknown")")
-            }
+            if let error = policyDenial(policyResult) { return error }
 
             // Detect the block kind so we only answer RECOGNIZED prompts.
             // Unknown or merely-probable blocks stay read-only — we never send
@@ -761,9 +761,16 @@ actor MCPServer {
             if !health.writesEnabled {
                 return makeToolError("Writes not enabled: \(health.reason ?? "herdr protocol not verified for writes")")
             }
+            // The check before explain did not take the slot. Another
+            // write can land in that gap. Take it now, before the keys.
+            let reserved = await policy.reserveWrite(
+                agentId: agentIdStr,
+                tier: .gated,
+                sessionIdentity: paneInfo.sessionIdentity
+            )
+            if let error = policyDenial(reserved) { return error }
             try await adapter.sendKeys(paneId: paneId, keys: resolvedKeys)
 
-            await policy.recordWrite(agentId: agentIdStr, sessionIdentity: paneInfo.sessionIdentity)
             await policy.recordAnswer(agentId: agentIdStr, sessionIdentity: paneInfo.sessionIdentity)
 
             // Capture fingerprint in params for audit trail
@@ -820,14 +827,14 @@ actor MCPServer {
             let status = paneInfo.agentStatus
             let tier: AuthorityTier = (status == "idle" || status == "done") ? .gated : .confirm
 
+            // Does not take the slot. A confirm-tier say still has the
+            // approval wait ahead of it; the send reserves.
             let policyResult = await policy.checkWriteAllowed(
                 agentId: agentIdStr,
                 tier: tier,
                 sessionIdentity: paneInfo.sessionIdentity
             )
-            guard policyResult.allowed else {
-                return makeToolError("Policy denied: \(policyResult.reason ?? "unknown")")
-            }
+            if let error = policyDenial(policyResult) { return error }
 
             // Capture fingerprint info for revalidation after confirmation wait
             let fpOccupant = occupantFingerprint(from: paneInfo)
@@ -884,6 +891,19 @@ actor MCPServer {
                         resolved: current.paneId,
                         extra: ["text_length": "\(text.count)"]
                     )
+                    // The check that opened this dialog is minutes old.
+                    // Reserve the pane the write will actually address.
+                    if let error = await rejectIfSendOverBudget(
+                        actionId: actionId,
+                        tool: "agent.say",
+                        agentId: current.paneId,
+                        tier: .confirm,
+                        sessionIdentity: current.sessionIdentity,
+                        params: addressed,
+                        preState: "status=\(status)"
+                    ) {
+                        return error
+                    }
                     do {
                         try await adapter.prompt(paneId: current.paneId, text: text)
                     } catch {
@@ -893,10 +913,6 @@ actor MCPServer {
                             preState: "status=\(status)", error: error
                         )
                     }
-                    await policy.recordWrite(
-                        agentId: current.paneId,
-                        sessionIdentity: current.sessionIdentity
-                    )
                     try? await sharedActionStore.markExecuted(actionId)
 
                     await journal.record(JournalEntry(
@@ -931,10 +947,16 @@ actor MCPServer {
                 }
             }
 
-            // Gated tier: auto-allowed
+            // Gated tier: auto-allowed. The check above did not take
+            // the slot, and the write gate is an await.
             if let error = await checkWritesEnabled() { return error }
+            let reserved = await policy.reserveWrite(
+                agentId: agentIdStr,
+                tier: .gated,
+                sessionIdentity: paneInfo.sessionIdentity
+            )
+            if let error = policyDenial(reserved) { return error }
             try await adapter.prompt(paneId: paneId, text: text)
-            await policy.recordWrite(agentId: agentIdStr, sessionIdentity: paneInfo.sessionIdentity)
 
             var params: [String: String] = [
                 "agent_id": agentIdStr,
@@ -988,6 +1010,16 @@ actor MCPServer {
                 return makeToolError("Agent not found: \(agentIdStr)")
             }
 
+            // Refuse before asking when the budget is already spent.
+            // The send reserves again: the approval wait is long enough
+            // for another write to take the slot.
+            let budget = await policy.checkWriteAllowed(
+                agentId: agentIdStr,
+                tier: .confirm,
+                sessionIdentity: paneInfo.sessionIdentity
+            )
+            if let error = policyDenial(budget) { return error }
+
             // Capture fingerprint info for revalidation after confirmation wait
             var params: [String: String] = ["agent_id": agentIdStr, "level": level]
             params["_fp_occupant"] = occupantFingerprint(from: paneInfo)
@@ -1035,6 +1067,17 @@ actor MCPServer {
                     resolved: current.paneId,
                     extra: ["level": level]
                 )
+                if let error = await rejectIfSendOverBudget(
+                    actionId: actionId,
+                    tool: "agent.interrupt",
+                    agentId: current.paneId,
+                    tier: .confirm,
+                    sessionIdentity: current.sessionIdentity,
+                    params: addressed,
+                    preState: "status=\(paneInfo.agentStatus)"
+                ) {
+                    return error
+                }
                 do {
                     try await adapter.sendKeys(paneId: current.paneId, keys: keys)
                 } catch {
@@ -1044,10 +1087,6 @@ actor MCPServer {
                         preState: "status=\(paneInfo.agentStatus)", error: error
                     )
                 }
-                await policy.recordWrite(
-                    agentId: current.paneId,
-                    sessionIdentity: current.sessionIdentity
-                )
                 try? await sharedActionStore.markExecuted(actionId)
 
                 await journal.record(JournalEntry(
@@ -1099,6 +1138,15 @@ actor MCPServer {
                 return makeToolError("Agent not found: \(agentIdStr)")
             }
 
+            // Same budget as interrupt. A stop is a write, and the
+            // approval wait does not hold the slot.
+            let budget = await policy.checkWriteAllowed(
+                agentId: agentIdStr,
+                tier: .confirm,
+                sessionIdentity: paneInfo.sessionIdentity
+            )
+            if let error = policyDenial(budget) { return error }
+
             // Capture fingerprint info for revalidation after confirmation wait
             var params: [String: String] = ["agent_id": agentIdStr, "reason": reason]
             params["_fp_occupant"] = occupantFingerprint(from: paneInfo)
@@ -1146,6 +1194,18 @@ actor MCPServer {
                     resolved: current.paneId,
                     extra: ["reason": reason]
                 )
+                if let error = await rejectIfSendOverBudget(
+                    actionId: actionId,
+                    tool: "agent.stop",
+                    agentId: current.paneId,
+                    tier: .confirm,
+                    sessionIdentity: current.sessionIdentity,
+                    params: addressed,
+                    preState: "status=\(paneInfo.agentStatus)",
+                    keepForever: true
+                ) {
+                    return error
+                }
                 do {
                     try await adapter.closePane(paneId: current.paneId)
                 } catch {
@@ -1156,10 +1216,6 @@ actor MCPServer {
                         keepForever: true
                     )
                 }
-                await policy.recordWrite(
-                    agentId: current.paneId,
-                    sessionIdentity: current.sessionIdentity
-                )
                 try? await sharedActionStore.markExecuted(actionId)
 
                 await journal.record(JournalEntry(
@@ -1332,6 +1388,17 @@ actor MCPServer {
         ) {
             return error
         }
+        // Before any mutation. Concurrent spawns share the 6/min cap.
+        // A spawn that then fails still holds the slot. The new pane's
+        // cooldown is stamped only after it has started, and that stamp
+        // does not count a second time.
+        if let error = await rejectIfGlobalSpawnOverBudget(
+            actionId: actionId,
+            params: params.filter { !$0.key.hasPrefix("_fp_") },
+            preState: "pending"
+        ) {
+            return error
+        }
 
         await journal.record(JournalEntry(
             actionId: actionId, tool: "session.spawn",
@@ -1427,7 +1494,9 @@ actor MCPServer {
                 try await adapter.prompt(paneId: paneId, text: brief)
             }
 
-            await policy.recordWrite(agentId: paneId)
+            // The global slot was taken before the mutation. This only
+            // starts the new pane's cooldown, so the spawn is one write.
+            await policy.noteAgentCooldown(agentId: paneId)
             try? await sharedActionStore.markExecuted(actionId)
 
             await journal.record(JournalEntry(
@@ -1554,6 +1623,79 @@ actor MCPServer {
         guard let error = await checkWritesEnabled() else { return nil }
         try? await sharedActionStore.markFailed(actionId, detail: detail)
         return error
+    }
+
+    /// The tool error for a budget result that is already decided.
+    /// Does not record a write.
+    private func policyDenial(_ result: PolicyResult) -> [String: Any]? {
+        guard !result.allowed else { return nil }
+        return makeToolError("Policy denied: \(result.reason ?? "unknown")")
+    }
+
+    /// Reserve the slot and, when the budget refuses, fail the claimed
+    /// action without sending. The reservation has already consumed the
+    /// slot when this returns nil.
+    private func rejectIfSendOverBudget(
+        actionId: String,
+        tool: String,
+        agentId: String,
+        tier: AuthorityTier,
+        sessionIdentity: String?,
+        params: [String: String],
+        preState: String,
+        keepForever: Bool = false
+    ) async -> [String: Any]? {
+        let result = await policy.reserveWrite(
+            agentId: agentId,
+            tier: tier,
+            sessionIdentity: sessionIdentity
+        )
+        return await failClosedBudget(
+            result,
+            actionId: actionId,
+            tool: tool,
+            params: params,
+            preState: preState,
+            keepForever: keepForever
+        )
+    }
+
+    /// One global slot for a spawn, which has no pane id yet.
+    private func rejectIfGlobalSpawnOverBudget(
+        actionId: String,
+        params: [String: String],
+        preState: String
+    ) async -> [String: Any]? {
+        let result = await policy.reserveGlobalWrite()
+        return await failClosedBudget(
+            result,
+            actionId: actionId,
+            tool: "session.spawn",
+            params: params,
+            preState: preState,
+            keepForever: true
+        )
+    }
+
+    private func failClosedBudget(
+        _ result: PolicyResult,
+        actionId: String,
+        tool: String,
+        params: [String: String],
+        preState: String,
+        keepForever: Bool
+    ) async -> [String: Any]? {
+        guard !result.allowed else { return nil }
+        let reason = result.reason ?? "rate limit"
+        try? await sharedActionStore.markFailed(actionId, detail: "policy denied: \(reason)")
+        await journal.record(JournalEntry(
+            actionId: actionId, tool: tool,
+            params: params,
+            caller: "mcp", preState: preState,
+            outcome: "policy_denied",
+            keepForever: keepForever
+        ))
+        return makeToolError("Policy denied: \(reason) (actionId: \(actionId))")
     }
 
     /// A claimed, approved write threw. Record the failure on the shared
