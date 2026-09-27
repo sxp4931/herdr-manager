@@ -396,6 +396,105 @@ struct SecretRedactorTests {
         #expect(labeledAgain.redactedText == labeled.redactedText)
         #expect(labeledAgain.redactionCount == 0)
     }
+
+    @Test("Redacts private_key and password_key without taking token_key or a bare private")
+    func redactsPrivateKeyAndPasswordKey() {
+        let redactor = SecretRedactor()
+        let env = redactor.redact(
+            "export PRIVATE_KEY=MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSj PASSWORD_KEY=anothersecretvalue"
+        )
+        #expect(env.redactedText == "export PRIVATE_KEY=[REDACTED] PASSWORD_KEY=[REDACTED]")
+        #expect(env.redactionCount == 2)
+        #expect(!env.redactedText.contains("MIIEv"))
+        #expect(!env.redactedText.contains("anothersecretvalue"))
+        let envAgain = redactor.redact(env.redactedText)
+        #expect(envAgain.redactedText == env.redactedText)
+        #expect(envAgain.redactionCount == 0)
+
+        let json = redactor.redact(
+            #"{"private_key": "supersecretvalue", "password_key": "anothersecretvalue", "private_keys": "keepthisvalue", "token_key": "keepthistoo", "PRIVATE_KEY_ID": "stillkeep"}"#
+        )
+        #expect(
+            json.redactedText
+                == #"{"private_key=[REDACTED]", "password_key=[REDACTED]", "private_keys": "keepthisvalue", "token_key": "keepthistoo", "PRIVATE_KEY_ID": "stillkeep"}"#
+        )
+        #expect(json.redactionCount == 2)
+        #expect(!json.redactedText.contains("supersecretvalue"))
+        #expect(!json.redactedText.contains("anothersecretvalue"))
+        #expect(json.redactedText.contains("keepthisvalue"))
+        #expect(json.redactedText.contains("keepthistoo"))
+        #expect(json.redactedText.contains("stillkeep"))
+        let jsonAgain = redactor.redact(json.redactedText)
+        #expect(jsonAgain.redactedText == json.redactedText)
+        #expect(jsonAgain.redactionCount == 0)
+
+        #expect(
+            redactor.redact("private-key=supersecretvalue password-key=anothersecretvalue").redactedText
+                == "private-key=[REDACTED] password-key=[REDACTED]"
+        )
+        #expect(redactor.redact("my_private_key=supersecretvalue").redactedText == "my_private_key=[REDACTED]")
+        #expect(redactor.redact("Private_Key=supersecretvalue").redactedText == "Private_Key=[REDACTED]")
+        #expect(redactor.redact("password_key=12345678").redactedText == "password_key=[REDACTED]")
+        #expect(
+            redactor.redact(#"{"private_key": "correct horse's battery"}"#).redactedText
+                == #"{"private_key=[REDACTED]"}"#
+        )
+        // The existing password assignment still ends on the keyword. The
+        // longer `password_key` alternative does not take this one.
+        #expect(
+            redactor.redact(#"{"password": "correct horse's battery"}"#).redactedText
+                == #"{"password=[REDACTED]"}"#
+        )
+
+        let kept = [
+            "private_key=1234567",
+            "private_keys=supersecretvalue",
+            "password_keys=supersecretvalue",
+            "password_keyboard=supersecretvalue",
+            "PRIVATE_KEY_ID=supersecretvalue",
+            "token_key=supersecretvalue",
+            "private=supersecretvalue",
+        ]
+        for line in kept {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line)")
+            #expect(result.redactedText == line)
+        }
+
+        let key = "xai-abcdefghijklmnopqrstuvwxyz0123456789"
+        let labeled = redactor.redact(#"{"private_key": "\#(key)"}"#)
+        #expect(labeled.redactedText == #"{"private_key": "xai-[REDACTED]"}"#)
+        #expect(labeled.redactionCount == 1)
+        #expect(!labeled.redactedText.contains("abcdefghijklmnopqrstuvwxyz0123456789"))
+        let labeledAgain = redactor.redact(labeled.redactedText)
+        #expect(labeledAgain.redactedText == labeled.redactedText)
+        #expect(labeledAgain.redactionCount == 0)
+
+        // The PEM pattern runs first. `private_key` must not take a second
+        // count off `[REDACTED PRIVATE KEY]`, and the key body stays gone.
+        let pem = """
+        PRIVATE_KEY=-----BEGIN OPENSSH PRIVATE KEY-----
+        MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSj
+        -----END OPENSSH PRIVATE KEY-----
+        """
+        let pemResult = redactor.redact(pem)
+        #expect(pemResult.redactedText == "PRIVATE_KEY=[REDACTED PRIVATE KEY]")
+        #expect(pemResult.redactionCount == 1)
+        #expect(!pemResult.redactedText.contains("MIIEv"))
+        let pemAgain = redactor.redact(pemResult.redactedText)
+        #expect(pemAgain.redactedText == pemResult.redactedText)
+        #expect(pemAgain.redactionCount == 0)
+
+        let block = """
+        -----BEGIN RSA PRIVATE KEY-----
+        MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSj
+        -----END RSA PRIVATE KEY-----
+        """
+        let blockResult = redactor.redact(block)
+        #expect(blockResult.redactedText == "[REDACTED PRIVATE KEY]")
+        #expect(blockResult.redactionCount == 1)
+        #expect(!blockResult.redactedText.contains("MIIEv"))
+    }
 }
 
 // MARK: - DwellTracker Tests
