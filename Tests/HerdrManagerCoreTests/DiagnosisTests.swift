@@ -1860,6 +1860,245 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([pythonLetta, interactive]) == 30)
     }
 
+    @Test("bun's --experimental-loader and --inspect-port words are the script")
+    func bunLoaderAndInspectPortNameTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+
+        // Bun 1.4.2 runs the next word. The shared set used to swallow it.
+        let loader = process(
+            20,
+            "bun",
+            argv: ["bun", "--experimental-loader", "/tmp/codex.js", "/tmp/other.js"]
+        )
+        let loaderRun = process(
+            20,
+            "bun",
+            argv: ["bun", "run", "--experimental-loader", "/usr/local/bin/codex", "dev"]
+        )
+        let loaderEquals = process(
+            20,
+            "bun",
+            argv: ["bun", "--experimental-loader=/tmp/loader.js", "/tmp/codex"]
+        )
+        let loaderWatch = process(
+            20,
+            "bun",
+            argv: ["bun", "--experimental-loader", "--watch", "/tmp/codex"]
+        )
+        let bunExe = process(
+            20,
+            "bun.exe",
+            argv: ["bun.exe", "--experimental-loader", "/tmp/codex"]
+        )
+        let portPath = process(
+            20, "bun", argv: ["bun", "--inspect-port", "/usr/local/bin/codex"]
+        )
+        let portEquals = process(
+            20, "bun", argv: ["bun", "--inspect-port=9229", "/tmp/codex"]
+        )
+        let portWatch = process(
+            20, "bun", argv: ["bun", "--inspect-port", "--watch", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, loader]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, loaderRun]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, loaderEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, loaderWatch]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bunExe]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, portPath]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, portEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, portWatch]) == 20)
+        #expect(Diagnoser.cpuSamplePid([mcp, loader]) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, loader], foregroundProcessGroupId: 20) == 20)
+        #expect(Diagnoser.cpuSamplePid([mcp, portPath]) == 10)
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, portPath], foregroundProcessGroupId: 20) == 20
+        )
+
+        // The first word is the program. A port is not an address here.
+        let loaderFirst = process(
+            4,
+            "bun",
+            argv: [
+                "bun", "--experimental-loader", "server.js", "/usr/local/bin/codex",
+            ]
+        )
+        let portNumber = process(
+            4,
+            "bun",
+            argv: ["bun", "--inspect-port", "9229", "/usr/local/bin/codex"]
+        )
+        let portHost = process(
+            4,
+            "bun",
+            argv: ["bun", "--inspect-port", "127.0.0.1:9229", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([loaderFirst, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([portNumber, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([portHost, claude]) == 12)
+        let falseLeader = process(
+            20,
+            "bun",
+            argv: ["bun", "--inspect-port", "9229", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, falseLeader]) == 10)
+        #expect(
+            Diagnoser.cpuSamplePid(
+                [mcp, falseLeader], foregroundProcessGroupId: 20
+            ) == 10
+        )
+
+        // `--loader` still takes the next word. The agent path after it
+        // is not the script, and a value named codex is not either.
+        let loaderFlag = process(
+            4,
+            "bun",
+            argv: ["bun", "--loader", "/usr/local/bin/codex", "server.js"]
+        )
+        let requireFlag = process(
+            4, "bun", argv: ["bun", "--require", "codex", "server.js"]
+        )
+        let requireScript = process(
+            20, "bun", argv: ["bun", "--require", "preload.js", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([loaderFlag, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([requireFlag, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, requireScript]) == 20)
+
+        let letta = process(
+            30,
+            "bun",
+            argv: ["bun", "--experimental-loader", "/home/user/node_modules/.bin/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, letta]) == 30)
+        let oneShot = process(
+            8,
+            "bun",
+            argv: [
+                "bun", "--inspect-port",
+                "/home/user/node_modules/.bin/letta", "--prompt", "hello",
+            ]
+        )
+        let interactive = process(30, "letta", argv: ["letta"])
+        #expect(Diagnoser.cpuSamplePid([oneShot, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([oneShot]) == 8)
+        #expect(
+            Diagnoser.cpuSamplePid([oneShot, interactive], foregroundProcessGroupId: 8) == 30
+        )
+        let portLetta = process(
+            8,
+            "bun",
+            argv: [
+                "bun", "--inspect-port", "9229",
+                "/home/user/node_modules/.bin/letta",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([portLetta, interactive]) == 30)
+
+        // Node still consumes the next word. The script is the one after it.
+        let nodeLoaderValue = process(
+            4,
+            "node",
+            argv: ["node", "--experimental-loader", "codex", "server.js"]
+        )
+        let nodeLoaderScript = process(
+            20,
+            "node",
+            argv: ["node", "--experimental-loader", "/tmp/loader.js", "/usr/local/bin/codex"]
+        )
+        let nodeLoaderEquals = process(
+            20,
+            "nodejs",
+            argv: ["nodejs", "--experimental-loader=/tmp/loader.js", "/tmp/codex"]
+        )
+        let nodePortValue = process(
+            4, "node", argv: ["node", "--inspect-port", "codex", "server.js"]
+        )
+        let nodePortScript = process(
+            20, "node", argv: ["node", "--inspect-port", "9229", "/usr/local/bin/codex"]
+        )
+        let nodePortEquals = process(
+            20, "node.exe", argv: ["node.exe", "--inspect-port=9229", "/tmp/codex"]
+        )
+        let nodePortPath = process(
+            4,
+            "node",
+            argv: ["node", "--inspect-port", "/usr/local/bin/codex", "server.js"]
+        )
+        #expect(Diagnoser.cpuSamplePid([nodeLoaderValue, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeLoaderScript]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeLoaderEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([nodePortValue, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, nodePortScript]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodePortEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([nodePortPath, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([mcp, nodePortScript]) == 10)
+        #expect(
+            Diagnoser.cpuSamplePid(
+                [mcp, nodePortScript], foregroundProcessGroupId: 20
+            ) == 20
+        )
+
+        // Deno still consumes both. The value named codex is not the script.
+        let denoLoader = process(
+            4, "deno", argv: ["deno", "run", "--experimental-loader", "codex", "server.js"]
+        )
+        let denoLoaderScript = process(
+            20,
+            "deno",
+            argv: ["deno", "run", "--experimental-loader", "loader.js", "/tmp/codex"]
+        )
+        let denoPort = process(
+            4, "deno", argv: ["deno", "--inspect-port", "9229", "server.js"]
+        )
+        let denoPortScript = process(
+            20, "deno", argv: ["deno", "--inspect-port", "codex", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([denoLoader, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, denoLoaderScript]) == 20)
+        #expect(Diagnoser.cpuSamplePid([denoPort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, denoPortScript]) == 20)
+
+        // Python 3.13 rejects both and exits. A path after either is not
+        // the script. A script written before the flag still is.
+        let pythonLoader = process(
+            4, "python3", argv: ["python3", "--experimental-loader", "/usr/local/bin/codex"]
+        )
+        let pythonLoaderNext = process(
+            4,
+            "python3",
+            argv: ["python3", "--experimental-loader", "loader.js", "/tmp/codex"]
+        )
+        let pythonLoaderEquals = process(
+            4,
+            "python3.11",
+            argv: ["python3.11", "--experimental-loader=/tmp/loader.js", "/tmp/codex"]
+        )
+        let pythonPort = process(
+            4, "python3", argv: ["python3", "--inspect-port", "9229", "/tmp/codex"]
+        )
+        let pythonPortEquals = process(
+            4, "Python.exe", argv: ["Python.exe", "--inspect-port=9229", "/tmp/codex"]
+        )
+        let pythonScriptFirst = process(
+            20,
+            "python3",
+            argv: ["python3", "/tmp/codex", "--experimental-loader", "loader.js"]
+        )
+        let pythonLetta = process(
+            40, "python3", argv: ["python3", "--inspect-port", "9229", "/tmp/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([pythonLoader, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([pythonLoaderNext, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([pythonLoaderEquals, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([pythonPort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([pythonPortEquals, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, pythonScriptFirst]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, pythonLetta]) == 10)
+        #expect(Diagnoser.cpuSamplePid([pythonLetta, interactive]) == 30)
+    }
+
     @Test("a node flag value is not the agent script")
     func nodeFlagValueIsNotTheScript() {
         let helper = process(10, "node", argv: ["node", "server.js"])

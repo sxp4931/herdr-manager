@@ -1195,7 +1195,10 @@ private enum ShellForeground {
                 // `--config=file` stays one word. Node still consumes
                 // `--config` here; that process exits, and `runtimeScript`
                 // does not treat the following path as the script.
-                if runtimeName == "bun", bunConfigFlagWidth(arg) != nil {
+                // `--experimental-loader` and space-separated
+                // `--inspect-port` are the same shape on Bun 1.4.2.
+                if runtimeName == "bun",
+                   bunConfigFlagWidth(arg) != nil || bunFlagNamesTheScript(arg) {
                     index += 1
                     continue
                 }
@@ -1431,9 +1434,16 @@ private enum ShellForeground {
     /// after either is not a script. Python's `-S` does not take a value
     /// either: `python3 -S /tmp/codex` runs that file. `--check-hash-based-pycs`
     /// takes `always`, `default`, or `never`, and any other word makes
-    /// Python exit. `--inspect`, `--inspect-wait`, and `--inspect-brk`
-    /// take the next word only when it is a port or host:port, and only
-    /// on bun. `bun --inspect ./codex` keeps the path. Node's and Deno's
+    /// Python exit. Bun 1.4.2's `--experimental-loader` and a
+    /// space-separated `--inspect-port` do not take a word either:
+    /// `bun --experimental-loader /tmp/codex.js /tmp/other.js` runs
+    /// `codex.js`, and `bun --inspect-port 9229 /tmp/codex` exits with
+    /// script not found `9229`. `--flag=value` keeps the value in the
+    /// flag word. Node still consumes both, so the script is the word
+    /// after the loader or the port. Python rejects both and exits.
+    /// `--inspect`, `--inspect-wait`, and `--inspect-brk` take the next
+    /// word only when it is a port or host:port, and only on bun.
+    /// `bun --inspect ./codex` keeps the path. Node's and Deno's
     /// `--inspect` do not take that word: `deno run --inspect ./codex`
     /// is the script.
     private static func runtimeScriptIsAgent(_ process: ForegroundProcess) -> Bool {
@@ -1447,6 +1457,12 @@ private enum ShellForeground {
         "-e", "--eval", "-p", "--print", "-c", "-m",
     ]
 
+    /// Shared flags whose next word is a value, not the script. Bun 1.4.2
+    /// does not take a separate word for `--experimental-loader` or
+    /// `--inspect-port` (`bunFlagNamesTheScript`); `--config` is
+    /// `bunConfigFlagWidth`. Python rejects both node flags and
+    /// `--config`. Deno still consumes this set. `-S` is Python's own
+    /// boolean and Deno's permission flag, handled before the set.
     private static let runtimeValueFlags: Set<String> = [
         "-r", "--require", "--loader", "--import", "--experimental-loader",
         "--inspect-port", "-W", "-X", "-S", "-L", "-o",
@@ -1485,8 +1501,10 @@ private enum ShellForeground {
             // Bun's `-c` and space-separated `--config` do not take a
             // separate word: the next word is the script. Both have to
             // run before the eval abandon, which is python's `-c` and
-            // still applies to node.
-            if runtime == "bun", bunConfigFlagWidth(arg) != nil {
+            // still applies to node. `--experimental-loader` and
+            // space-separated `--inspect-port` are the same bun shape.
+            if runtime == "bun",
+               bunConfigFlagWidth(arg) != nil || bunFlagNamesTheScript(arg) {
                 index += 1
                 continue
             }
@@ -1502,6 +1520,12 @@ private enum ShellForeground {
             // that already appeared is returned above. Bun's space form
             // was handled as the script, and Deno still consumes it below.
             if configFlagExits(runtime), arg == "--config" || arg.hasPrefix("--config=") {
+                return nil
+            }
+            // Python rejects these two node flags and exits. Bun's space
+            // form was handled above. Node still consumes them from the
+            // shared set, and so does Deno.
+            if isPythonRuntime(runtime), pythonRejectsNodeFlag(arg) {
                 return nil
             }
             // Python's `-S` is a boolean. It shares the shared value set
@@ -1746,6 +1770,18 @@ private enum ShellForeground {
         return 2
     }
 
+    /// Bun 1.4.2 does not take a separate word for these node flags.
+    /// `bun --experimental-loader /tmp/codex.js /tmp/other.js` runs
+    /// `codex.js`. `bun --inspect-port /tmp/codex` runs that file, and
+    /// `bun --inspect-port 9229 /tmp/codex` tries to run `9229` and
+    /// exits. `--experimental-loader=mod` and `--inspect-port=9229`
+    /// keep the value in the flag word, so they are not this check.
+    /// Node still consumes both from `runtimeValueFlags`. Python
+    /// rejects them in `pythonRejectsNodeFlag`.
+    private static func bunFlagNamesTheScript(_ arg: String) -> Bool {
+        arg == "--experimental-loader" || arg == "--inspect-port"
+    }
+
     /// Bun 1.4.2 keeps a config path glued to the flag (`-cPATH`,
     /// `-c=PATH`, `--config=PATH`). A separate word is the script:
     /// `bun -c /tmp/codex` and `bun run --config /tmp/codex` run that
@@ -1804,6 +1840,21 @@ private enum ShellForeground {
         }
         if arg.hasPrefix("--check-hash-based-pycs=") { return .exits }
         return nil
+    }
+
+    /// Python 3.13 has neither flag. `python3 --experimental-loader x
+    /// /tmp/codex` and `python3 --inspect-port 9229 /tmp/codex` exit
+    /// before any script runs, including the `=` form. A script written
+    /// before the flag is already returned. Node consumes both, and
+    /// Bun's space form is the script.
+    private static func pythonRejectsNodeFlag(_ arg: String) -> Bool {
+        if arg == "--experimental-loader" || arg.hasPrefix("--experimental-loader=") {
+            return true
+        }
+        if arg == "--inspect-port" || arg.hasPrefix("--inspect-port=") {
+            return true
+        }
+        return false
     }
 
     /// Deno flags whose next word is the script. `-r` is `--reload`.
