@@ -1552,12 +1552,15 @@ struct DiagnoserCpuSamplePidTests {
             Diagnoser.cpuSamplePid([oneShot, interactive], foregroundProcessGroupId: 8) == 30
         )
 
-        // These shorts are eval, not bun's --port / --config / --external.
+        // `-p` and `-e` are eval. Bun 1.4.2's `-c` does not take a separate
+        // word: `/tmp/codex` is the script, and `server.js` is its argument.
         let printFlag = process(4, "bun", argv: ["bun", "-p", "3000", "/tmp/codex"])
         let configShort = process(4, "bun", argv: ["bun", "-c", "/tmp/codex", "server.js"])
+        let configGlued = process(20, "bun", argv: ["bun", "-c=/tmp/bunfig.toml", "/tmp/codex"])
         let externalShort = process(4, "bun", argv: ["bun", "-e", "codex", "/tmp/codex"])
         #expect(Diagnoser.cpuSamplePid([printFlag, claude]) == 12)
-        #expect(Diagnoser.cpuSamplePid([configShort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([configShort, claude]) == 4)
+        #expect(Diagnoser.cpuSamplePid([helper, configGlued]) == 20)
         #expect(Diagnoser.cpuSamplePid([externalShort, claude]) == 12)
 
         // Node and python do not take bun's flags. The next word is the script.
@@ -1719,6 +1722,180 @@ struct DiagnoserCpuSamplePidTests {
         )
         #expect(Diagnoser.cpuSamplePid([helper, nodeInspect]) == 20)
         #expect(Diagnoser.cpuSamplePid([nodeInspectPort, claude]) == 12)
+    }
+
+    @Test("a deno flag value is not the agent script")
+    func denoFlagValueIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+
+        let importMap = process(
+            4, "deno", argv: ["deno", "run", "--import-map", "codex", "server.js"]
+        )
+        let cert = process(
+            4, "deno", argv: ["deno", "run", "--cert", "codex", "server.js"]
+        )
+        let location = process(
+            4,
+            "deno",
+            argv: ["deno", "run", "--location", "https://example.com/codex", "server.js"]
+        )
+        let ext = process(4, "deno", argv: ["deno", "run", "--ext", "codex", "server.js"])
+        let conditions = process(
+            4, "deno", argv: ["deno", "run", "--conditions", "codex", "server.js"]
+        )
+        let seed = process(4, "deno", argv: ["deno", "run", "--seed", "codex", "server.js"])
+        let minDep = process(
+            4, "deno", argv: ["deno", "run", "--min-dep-age", "codex", "server.js"]
+        )
+        let linker = process(
+            4, "deno", argv: ["deno", "run", "--node-modules-linker", "codex", "server.js"]
+        )
+        let lock = process(4, "deno", argv: ["deno", "run", "--lock", "codex", "server.js"])
+        let publish = process(
+            4, "deno", argv: ["deno", "run", "--inspect-publish-uid", "codex", "server.js"]
+        )
+        let logLevel = process(
+            4, "deno", argv: ["deno", "run", "--log-level", "codex", "server.js"]
+        )
+        let config = process(
+            4, "deno", argv: ["deno", "run", "--config", "codex", "server.js"]
+        )
+        #expect(Diagnoser.cpuSamplePid([importMap, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([cert, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([location, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([ext, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([conditions, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([seed, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([minDep, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([linker, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([lock, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([publish, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([logLevel, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([config, claude]) == 12)
+
+        let mapped = process(
+            20, "deno", argv: ["deno", "--import-map", "/tmp/map.json", "/tmp/codex"]
+        )
+        let configured = process(
+            20, "deno", argv: ["deno", "run", "-c", "/tmp/deno.json", "/tmp/codex"]
+        )
+        let gluedConfig = process(
+            20, "deno.exe", argv: ["deno.exe", "run", "-c/tmp/deno.json", "/tmp/codex"]
+        )
+        let equalsConfig = process(
+            20, "deno", argv: ["deno", "-c=/tmp/deno.json", "/usr/local/bin/codex"]
+        )
+        let served = process(
+            20, "deno", argv: ["deno", "serve", "--port", "8000", "/tmp/codex"]
+        )
+        let servedHost = process(
+            20, "deno", argv: ["deno", "--host", "127.0.0.1", "serve", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, mapped]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, configured]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, gluedConfig]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, equalsConfig]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, served]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, servedHost]) == 20)
+
+        // The value's basename is an agent. The script after it is not.
+        let servePort = process(
+            4, "deno", argv: ["deno", "serve", "--port", "codex", "server.js"]
+        )
+        let serveHostName = process(
+            4, "deno", argv: ["deno", "serve", "--host", "codex", "server.js"]
+        )
+        #expect(Diagnoser.cpuSamplePid([servePort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([serveHostName, claude]) == 12)
+
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let leader = process(
+            20,
+            "deno",
+            argv: ["deno", "run", "--import-map", "helper.json", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, leader]) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+
+        // These do not consume a separate word on Deno 2.9.7. The path is
+        // the script. Node still consumes `--env-file` and `-r`.
+        let reloaded = process(20, "deno", argv: ["deno", "run", "-r", "/tmp/codex"])
+        let allowWrite = process(20, "deno", argv: ["deno", "run", "-W", "/tmp/codex"])
+        let allowSys = process(20, "deno", argv: ["deno", "run", "-S", "/tmp/codex"])
+        let envFile = process(20, "deno", argv: ["deno", "run", "--env-file", "/tmp/codex"])
+        let envEquals = process(
+            20, "deno", argv: ["deno", "run", "--env-file=/tmp/dev.env", "/tmp/codex"]
+        )
+        let allowRead = process(
+            20, "deno", argv: ["deno", "run", "--allow-read", "/tmp/codex"]
+        )
+        let inspect = process(20, "deno", argv: ["deno", "run", "--inspect", "./codex"])
+        let modulesMode = process(
+            20, "deno", argv: ["deno", "run", "--node-modules-dir=manual", "/tmp/codex"]
+        )
+        let lockQuiet = process(
+            20, "deno", argv: ["deno", "run", "--lock", "--quiet", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, reloaded]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, allowWrite]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, allowSys]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, envFile]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, envEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, allowRead]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, inspect]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, modulesMode]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, lockQuiet]) == 20)
+
+        let inspectPort = process(
+            4, "deno", argv: ["deno", "run", "--inspect", "127.0.0.1:9229", "/tmp/codex"]
+        )
+        let modulesWord = process(
+            4, "deno", argv: ["deno", "run", "--node-modules-dir", "manual", "/tmp/codex"]
+        )
+        // One condition is consumed. The next word is the script, so a
+        // second condition named `codex` is the agent, not another value.
+        let secondCondition = process(
+            4, "deno", argv: ["deno", "run", "--conditions", "a", "codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([inspectPort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([modulesWord, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([secondCondition, claude]) == 4)
+
+        let nodeEnv = process(
+            4, "node", argv: ["node", "--env-file", "codex", "server.js"]
+        )
+        let nodeRequire = process(
+            20, "node", argv: ["node", "-r", "preload.js", "/tmp/codex"]
+        )
+        let nodeImportMap = process(
+            4, "node", argv: ["node", "--import-map", "codex", "server.js"]
+        )
+        let pythonWarn = process(
+            20, "python3", argv: ["python3", "-W", "ignore", "/tmp/codex"]
+        )
+        let pythonEval = process(
+            4, "python3", argv: ["python3", "-c", "code", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([nodeEnv, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeRequire]) == 20)
+        #expect(Diagnoser.cpuSamplePid([nodeImportMap, claude]) == 4)
+        #expect(Diagnoser.cpuSamplePid([helper, pythonWarn]) == 20)
+        #expect(Diagnoser.cpuSamplePid([pythonEval, claude]) == 12)
+
+        // Deno is not a Letta entrypoint. The file named letta stays a
+        // plain runtime, and the interactive TUI is the sample.
+        let denoLetta = process(
+            40,
+            "deno",
+            argv: [
+                "deno", "run", "--import-map", "map.json",
+                "/tmp/letta", "--conversation", "id",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, denoLetta]) == 10)
+        let interactive = process(30, "letta", argv: ["letta"])
+        #expect(Diagnoser.cpuSamplePid([denoLetta, interactive]) == 30)
     }
 
     @Test("The shell that is the agent interpreter is the sample when nothing else is")

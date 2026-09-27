@@ -1017,9 +1017,10 @@ private enum ShellForeground {
     /// `cursor-agent/versions/<version>` directory), or a process whose
     /// name, argv0, or argv[0] is the agent. The last of those is a nix
     /// wrapper whose comm name is `.codex-wrapped`. `bun run`, `bun x`,
-    /// and `deno run` are subcommands, so the script is the program after
-    /// them; a path, or the word after `--`, is still that program when
-    /// its name is `run`. A shell that is only launching the agent stays
+    /// `deno run`, and `deno serve` are subcommands, so the script is the
+    /// program after them; a path, or the word after `--`, is still that
+    /// program when its name is `run`. A shell that is only launching the
+    /// agent stays
     /// below those, so its idle CPU is not the reading while the agent
     /// is in the group. A plain runtime still outranks any other helper.
     /// The same rank prefers a runtime over a process that is not one,
@@ -1405,16 +1406,20 @@ private enum ShellForeground {
     /// The script argument of a node-like runtime, when that script is an
     /// agent. Eval and module flags are not a path, including a value
     /// glued onto the flag. A flag that takes a value is not the script
-    /// either. `bun run`, `bun x`, and `deno run` are subcommands, so
-    /// they are not the script. Bun's value flags take the next word,
-    /// including `--define` / `-d` and the other `bun run` options that
-    /// require one, so `bun --define codex server.js` stays a plain
-    /// runtime. Node takes its own, including `--title`, so
+    /// either. `bun run`, `bun x`, `deno run`, and `deno serve` are
+    /// subcommands, so they are not the script. Bun's value flags take the
+    /// next word, including `--define` / `-d` and the other `bun run`
+    /// options that require one, so `bun --define codex server.js` stays a
+    /// plain runtime. Node takes its own, including `--title`, so
     /// `node --title codex server.js` stays a plain runtime too.
+    /// Deno 2.9.7 takes `--import-map`, `--cert`, `--location`, `--ext`,
+    /// and the other flags in `denoRequiredValueFlags`, so
+    /// `deno run --import-map codex server.js` stays a plain runtime.
     /// `--inspect`, `--inspect-wait`, and `--inspect-brk` take
     /// the next word only when it is a port or host:port, and only on bun.
-    /// `bun --inspect ./codex` keeps the path. Node's `--inspect` does not
-    /// take that word: `node --inspect ./codex` is the script.
+    /// `bun --inspect ./codex` keeps the path. Node's and Deno's
+    /// `--inspect` do not take that word: `deno run --inspect ./codex`
+    /// is the script.
     private static func runtimeScriptIsAgent(_ process: ForegroundProcess) -> Bool {
         guard let argv = launchArguments(process), let script = runtimeScript(argv) else {
             return false
@@ -1433,17 +1438,17 @@ private enum ShellForeground {
         "--config", "--tsconfig-override",
     ]
 
-    /// `bun run` / `bun x` / `deno run` are not the program. The word is
-    /// exactly that subcommand: `./run`, `run.js`, and the token after
-    /// `--` are a program named `run`, and `node` / `python` have no such
-    /// subcommand. One subcommand is skipped, so `bun run x` is a script
-    /// named `x`.
+    /// `bun run` / `bun x` / `deno run` / `deno serve` are not the program.
+    /// The word is exactly that subcommand: `./run`, `run.js`, and the
+    /// token after `--` are a program named `run`, and `node` / `python`
+    /// have no such subcommand. One subcommand is skipped, so `bun run x`
+    /// is a script named `x` and `deno serve server.ts` is that file.
     private static func runtimeSubcommand(_ arg: String, runtime: String) -> Bool {
         switch runtime {
         case "bun":
             return arg == "run" || arg == "x"
         case "deno":
-            return arg == "run"
+            return arg == "run" || arg == "serve"
         default:
             return false
         }
@@ -1455,14 +1460,35 @@ private enum ShellForeground {
         var skippedSubcommand = false
         while index < argv.count {
             let arg = argv[index]
+            let following = index + 1 < argv.count ? argv[index + 1] : nil
             if arg == "--" {
-                guard index + 1 < argv.count else { return nil }
-                return argv[index + 1]
+                guard let following else { return nil }
+                return following
+            }
+            // Deno's `-c` is `--config`, and the next word is that file.
+            // Bun's `-c` does not take a separate word: the next word is
+            // the script. Both have to run before the eval abandon, which
+            // is python's `-c` and still applies to node.
+            if runtime == "bun", bunConfigFlagWidth(arg) != nil {
+                index += 1
+                continue
+            }
+            if runtime == "deno", let width = denoFlagWidth(arg, following: following) {
+                index += width
+                continue
             }
             if runtimeAbandonsScript(arg) {
                 return nil
             }
             if runtimeValueFlags.contains(arg) {
+                // Deno's `-r` is `--reload` with no separate value, and
+                // `-W` / `-S` / `--env-file` are the same shape. Node's
+                // `-r` and `--env-file`, and Python's `-W`, still take
+                // the next word.
+                if runtime == "deno", denoBooleanFlags.contains(arg) {
+                    index += 1
+                    continue
+                }
                 index += 2
                 continue
             }
@@ -1473,7 +1499,7 @@ private enum ShellForeground {
             if let width = valueFlagWidth(
                 arg,
                 runtime: runtime,
-                following: index + 1 < argv.count ? argv[index + 1] : nil
+                following: following
             ) {
                 index += width
                 continue
@@ -1497,8 +1523,9 @@ private enum ShellForeground {
     /// herdr's node and bun walker matches `-eCODE`, `--eval=code`,
     /// `-pCODE`, and `--print=code` as the flag itself, then stops. Python's
     /// walker does the same for `-cCODE` and `-mmodule`. An exact `-e`
-    /// already did, and so did an exact `-c` or `-m` on every runtime.
-    /// The glued form was skipped as an unknown flag, so the next word
+    /// already did, and so did an exact `-c` or `-m`. Deno and bun handle
+    /// their own `-c` before this function runs. The glued form was
+    /// skipped as an unknown flag, so the next word
     /// (`/tmp/codex`, a Letta path) became the script and outranked the
     /// real agent, including when that node was the group leader. A short
     /// flag only has to start with `-e`, `-p`, `-c`, or `-m`; herdr's
@@ -1524,14 +1551,16 @@ private enum ShellForeground {
     /// help, plus `--origin`, which that binary still consumes and the
     /// help no longer prints. `--loader`, `--require`, `--import`,
     /// `--preload`, `--cwd`, `--env-file`, `--config`, `--filter`, and
-    /// `--tsconfig-override` are already `runtimeValueFlags`. `-e`, `-p`,
-    /// and `-c` abandon the walk before this set is consulted, so they
-    /// are not `--external`, `--port`, or `--config`. `--external`,
-    /// `--target`, and `--packages` as their own word are not options on
+    /// `--tsconfig-override` are already `runtimeValueFlags`. `-e` and
+    /// `-p` abandon the walk before this set is consulted, so they are
+    /// not `--external` or `--port`. Bun's `-c` is not a value here: the
+    /// next word is the script. `--external`, `--target`, and `--packages`
+    /// as their own word are not options on
     /// that binary: the next word is the script. `-dVALUE` and
     /// `--define=KEY` keep the value in the flag word. Node and python
     /// are not bun, so `node --define` and `python -d` do not use this set.
-    /// Node's own value flags are `nodeRequiredValueFlags`.
+    /// Node's own value flags are `nodeRequiredValueFlags`. Deno's are
+    /// `denoRequiredValueFlags`, and Deno does not use this set.
     private static let bunRequiredValueFlags: Set<String> = [
         "--define", "-d",
         "--drop",
@@ -1675,6 +1704,61 @@ private enum ShellForeground {
     private static func nodeFlagWidth(_ arg: String, runtime: String) -> Int? {
         guard runtime == "node" || runtime == "nodejs" else { return nil }
         guard nodeRequiredValueFlags.contains(arg) else { return nil }
+        return 2
+    }
+
+    /// Bun 1.4.2 keeps a config path glued to `-c` (`-cPATH`, `-c=PATH`).
+    /// A separate word is the script: `bun -c /tmp/codex` runs that file.
+    /// Python's `-c` is still eval, and node's `-c` is still a syntax check.
+    private static func bunConfigFlagWidth(_ arg: String) -> Int? {
+        guard arg.hasPrefix("-c"), !arg.hasPrefix("--") else { return nil }
+        return 1
+    }
+
+    /// Deno flags whose next word is the script. `-r` is `--reload`.
+    /// `-W` and `-S` are permissions. `--env-file` reads `.env` unless
+    /// the path is `--env-file=<path>`. Node's `-r` and `--env-file`,
+    /// and Python's `-W`, are not in this set.
+    private static let denoBooleanFlags: Set<String> = [
+        "-r", "-W", "-S", "--env-file",
+    ]
+
+    /// Deno options whose next word is a value, not the script.
+    ///
+    /// Checked against Deno 2.9.7. Each one consumes the following word,
+    /// so `deno run --import-map codex server.js` was rank 4 and, as the
+    /// group leader, was the pid `ps` read. `--config` is already
+    /// `runtimeValueFlags`. `--lock` consumes the next word only when
+    /// that word is not a flag. `--port` and `--host` are `deno serve`;
+    /// `deno run` rejects them, and the value is still not the script.
+    /// `--inspect` does not take the next word. `--allow-read` and
+    /// `--node-modules-dir` do not either, except as `--flag=value`.
+    private static let denoRequiredValueFlags: Set<String> = [
+        "--import-map",
+        "--cert",
+        "--location",
+        "--seed",
+        "--ext",
+        "--conditions",
+        "--min-dep-age",
+        "--node-modules-linker",
+        "--inspect-publish-uid",
+        "--log-level",
+        "--port",
+        "--host",
+    ]
+
+    /// Words this Deno flag occupies, including itself. Nil when `arg`
+    /// is not one of them. An exact `-c` takes the config file. `-cPATH`
+    /// and `-c=PATH` keep that file in the flag word.
+    private static func denoFlagWidth(_ arg: String, following: String?) -> Int? {
+        if arg == "-c" { return 2 }
+        if arg.hasPrefix("-c"), !arg.hasPrefix("--") { return 1 }
+        if arg == "--lock" {
+            if let following, !following.hasPrefix("-") { return 2 }
+            return 1
+        }
+        guard denoRequiredValueFlags.contains(arg) else { return nil }
         return 2
     }
 
