@@ -328,9 +328,30 @@ Self-review:
 - Vacant hash retarget: an unpolled new id keeps the origin's screen, so the same screen is not a change and the next one is. A new id that was already hashed keeps that hash. An origin that was never hashed does not clear the destination.
 - Not compiled and not run. No Swift toolchain on this box.
 
+### Pass 16 — a heartbeat change compared on the old id still moves the silence clock
+
+The heartbeat hashes the detection screen by pane id. A change is returned under the id the poll started with, and the store writes `lastOutputAt` under that key. Passes 3, 6, 14, and 15 re-key a cross-workspace move and carry the hash, so the next poll does not treat the mover's screen as new output. They do not carry a change the poll had already compared. The move can land in the gap after that comparison and before the store applies it: the event loop and the herd poll are the main actor, and the heartbeat is suspended until `poll` returns. The row is already on the new id, the update names the old one, and it is dropped. The hash that moved is the new screen, so the next poll does not report it either. `lastOutputAt` stays on the previous output. A pane that just produced output can be notified as quiet, and a quiet already showing stays up.
+
+The poll now parks a change it compared against that pane's own previous screen, separate from the date a first look stores. `retarget` and `retargetVacant` hand the parked time to the new id and return it. The menu bar writes that time onto the row after the move. A later hop still has it, so a second move in the same gap does not drop it. A first look returns nil: that time is "when we first stored the screen," and writing it would end a silence the screen never moved. A vacant fill keeps the later of the two parked times for the hop after this one, and still returns the origin's time so the comparison the old id made is not lost when the new id already has a hash. Prune drops a parked change for an id that left. The poll's own dictionary is unchanged, so a row that has not moved still updates the way it did.
+
+Why this one: backlog items 1–18 stay deferred (below). This is the same "needs you" signal those passes protected. The hash already followed the move; the clock the silence is measured from did not. The menu bar is the only caller.
+
+Files:
+- `Sources/HerdrManagerCore/Diagnosis/HeartbeatPoller.swift`
+- `Sources/HerdrManagerCore/Store/AgentStore.swift`
+- `Sources/ShepherdApp/AppModel.swift`
+- `Tests/HerdrManagerCoreTests/DiagnosisTests.swift`
+
+Self-review:
+- Swift 6: `outputChanges` is actor state on `HeartbeatPoller`, next to the hash map. `Date` is `Sendable`. Both retargets return `Date?` and are `@discardableResult`, so the existing call sites and tests keep compiling. `parkOutputChange` is a synchronous method on the actor; it does not hop and it does not touch the hash. `applyObservedOutput` was already `@MainActor` on the store; it is now `public` so the menu bar can pass the carried time. No new macOS API, import, or protocol requirement. The event-loop `switch` assigns the optional on both kinds before it is read.
+- A baseline retarget, and a vacant retarget of that same baseline, return nil. A screen that changed from "one" to "two" returns that poll's date, the old id's baseline date is gone, and a second retarget returns the same date on the third id. Applying the poll's dictionary to the old id leaves a silent row on the new id silent; applying the carried date clears it and sets `lastOutputAt`. A vacant retarget after the new id has already hashed "two" still returns the change, and the next read of "two" is not another change. Prune of an id that left makes the following retarget return nil.
+- A read that is still in flight when the hash is moved does not park a change. The hash it sees on return is gone, so it stores a first look on the old id, and the new id keeps the hash from before that read. The next poll reports a screen that actually changed. Carrying the in-flight bytes would treat whatever now occupies the old pane as the mover's output (item 19).
+- A result the poll already returned for the new id is still applied under that id. When the poll landed first, that screen is the mover's. Replace drops a parked change on the destination so a later hop does not carry a previous occupant's time; the dictionary this poll already built is not rewritten.
+- Not compiled and not run. No Swift toolchain on this box.
+
 ## Backlog / ideas
 
-Pass 15 re-checked items 1–17. They stay as written. None of them is the poll that lands the new pane id before `pane.moved`. Item 18 is the part of that race this pass did not close.
+Pass 16 re-checked items 1–18. They stay as written. None of them is the output time the heartbeat had already compared on the old pane id. Item 19 is the read that finishes after that id's hash has moved.
 
 1. A seq-less `pane_updated` that arrives after a poll already applied a newer status still flips the pane. The event carries no seq, so it cannot be told apart from a genuine second prompt. Deferred again: any rule that drops a seq-less status change also drops the live update the subscription exists to deliver. A non-zero seq is already ignored when it is behind the stored one.
 2. Dwell restore still matches a reused pane on kind + non-zero seq + status. `agent_session.value` is parsed onto `HerdrAgentInfo` and not kept on `Agent`. Putting it in the occupant fingerprint would also change Settings override keys (`DwellTracker.fingerprint` and `AppModel.fingerprintForAgent` must stay identical). Deferred: needs a second identity stored on `Agent` and in the dwell file, with old files still matching, and it is a separate change from the answer-send check. The MCP write path compares session value; the panel Approve/Deny check and the dwell file still do not.
@@ -350,6 +371,7 @@ Pass 15 re-checked items 1–17. They stay as written. None of them is the poll 
 16. Done in pass 13. A crashed pane is its own bucket, mark (`GONE`), and footer count. herdmgr reads the process list before paint, after events, and every 15s, so a dead process is not shown as working or blocked. A failed read does not clear a crash. MCP uses the same mark and does not count a crash as unknown as well.
 17. herdmgr does not classify silence. Deferred: the table has no output clock. Timing silence from `enteredAt` would mark a busy agent quiet at the 5-minute threshold. The menu bar's heartbeat is what makes that clock real.
 18. A poll that lands before `pane.moved` still starts a new episode when the pane has no `agent_session.value`. Pass 15 carries the episode only when exactly one dropped pane and one new pane share a non-empty session value. Deferred: kind and title are shared by agents that are not the same occupant, and an empty value is what several panes look like. Selection and the detection hash still follow when the event arrives, because the new id is already a row. The duplicate blocked alert and the reset dwell for that session-less pane do not.
+19. A detection read that finishes after the hash was already moved still records on the old id and does not carry a change. The next poll of the new id reports a screen that differs from the hash the move saved. Deferred: the read was addressed to the old pane id, and after the move those bytes can be the shell that replaced the agent. Parking them would clear a silence for output the agent did not produce. Pass 16 carries only a change the poll had already compared against the mover's own previous screen.
 
 ## Notes
 

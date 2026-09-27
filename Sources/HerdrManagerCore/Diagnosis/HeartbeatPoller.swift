@@ -22,8 +22,16 @@ public actor HeartbeatPoller {
     /// SHA256 hash of last detection read per agent.
     private var hashes: [AgentID: String] = [:]
 
-    /// Last known output timestamps per agent.
+    /// Last known output timestamps per agent. The first look stores one
+    /// too; that time is not evidence the screen changed.
     private var lastOutputDates: [AgentID: Date] = [:]
+
+    /// Times a poll compared against this pane's own previous screen and
+    /// found a change. A move has to hand the latest one to the new id:
+    /// the dictionary `poll` already returned still names the old id, and
+    /// the row is gone by the time the store applies it. A first look is
+    /// not recorded here.
+    private var outputChanges: [AgentID: Date] = [:]
 
     public init() {}
 
@@ -49,9 +57,12 @@ public actor HeartbeatPoller {
 
                 if let previousHash = hashes[agent.id] {
                     if hash != previousHash {
-                        // Output changed
+                        // Output changed. Remember it apart from the
+                        // baseline date so a move can carry this time
+                        // after `updates` has already been returned.
                         hashes[agent.id] = hash
                         lastOutputDates[agent.id] = now
+                        outputChanges[agent.id] = now
                         updates[agent.id] = now
                     }
                 } else {
@@ -78,8 +89,16 @@ public actor HeartbeatPoller {
     /// hash moves with the row. An id that has not been polled yet does not
     /// take the destination's hash — that screen belonged to whoever was
     /// there before.
-    public func retarget(from previous: AgentID, to newID: AgentID) {
-        guard previous != newID else { return }
+    ///
+    /// - Returns: The change already compared on `previous`, now stored
+    ///   for `newID`. Nil when that pane has no compared change, which
+    ///   includes a screen that has only been seen once. The caller
+    ///   writes it onto the row: `poll`'s dictionary still names
+    ///   `previous`. A first-look time is not returned; treating it as
+    ///   output would end a silence the screen never moved.
+    @discardableResult
+    public func retarget(from previous: AgentID, to newID: AgentID) -> Date? {
+        guard previous != newID else { return nil }
         let hash = hashes.removeValue(forKey: previous)
         let date = lastOutputDates.removeValue(forKey: previous)
         if let hash {
@@ -92,6 +111,7 @@ public actor HeartbeatPoller {
         } else {
             lastOutputDates.removeValue(forKey: newID)
         }
+        return parkOutputChange(from: previous, onto: newID, replacingDestination: true)
     }
 
     /// Move the origin's hash onto `newID` only when that id has none.
@@ -102,8 +122,14 @@ public actor HeartbeatPoller {
     /// the hash the move carried, or the next read is a first look and
     /// swallows the screen the pane landed on. An origin that was never
     /// polled does not clear a hash the destination already stored.
-    public func retargetVacant(from previous: AgentID, to newID: AgentID) {
-        guard previous != newID else { return }
+    ///
+    /// - Returns: The origin's compared change, including when `newID`
+    ///   already has a hash. That hash is the mover's screen, so the next
+    ///   poll will not report the change again. The later of the two
+    ///   parked changes stays on `newID` for the move after this one.
+    @discardableResult
+    public func retargetVacant(from previous: AgentID, to newID: AgentID) -> Date? {
+        guard previous != newID else { return nil }
         let hash = hashes.removeValue(forKey: previous)
         let date = lastOutputDates.removeValue(forKey: previous)
         if hashes[newID] == nil, let hash {
@@ -112,24 +138,52 @@ public actor HeartbeatPoller {
         if lastOutputDates[newID] == nil, let date {
             lastOutputDates[newID] = date
         }
+        return parkOutputChange(from: previous, onto: newID, replacingDestination: false)
+    }
+
+    /// Move a compared change onto `newID`. The baseline date stays in
+    /// `lastOutputDates` and is not parked here.
+    private func parkOutputChange(
+        from previous: AgentID,
+        onto newID: AgentID,
+        replacingDestination: Bool
+    ) -> Date? {
+        let carried = outputChanges.removeValue(forKey: previous)
+        if replacingDestination {
+            if let carried {
+                outputChanges[newID] = carried
+            } else {
+                outputChanges.removeValue(forKey: newID)
+            }
+            return carried
+        }
+        guard let carried else { return nil }
+        if let existing = outputChanges[newID], existing >= carried {
+            return carried
+        }
+        outputChanges[newID] = carried
+        return carried
     }
 
     /// Remove tracking for an agent (e.g., when it's closed).
     public func remove(agentId: AgentID) {
         hashes.removeValue(forKey: agentId)
         lastOutputDates.removeValue(forKey: agentId)
+        outputChanges.removeValue(forKey: agentId)
     }
 
     /// Drop hashes for panes that left the herd.
     public func prune(keeping ids: Set<AgentID>) {
         hashes = hashes.filter { ids.contains($0.key) }
         lastOutputDates = lastOutputDates.filter { ids.contains($0.key) }
+        outputChanges = outputChanges.filter { ids.contains($0.key) }
     }
 
     /// Clear all tracking state.
     public func clear() {
         hashes.removeAll()
         lastOutputDates.removeAll()
+        outputChanges.removeAll()
     }
 
     /// Get the last known output date for an agent.

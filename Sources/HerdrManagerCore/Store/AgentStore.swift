@@ -1030,7 +1030,10 @@ public final class AgentStore {
     /// decides the next quiet. A time that is not newer does not move the
     /// clock backward. A time that is still before the episode does not end
     /// a silence measured from `enteredAt`.
-    func applyObservedOutput(_ updates: [AgentID: Date]) {
+    ///
+    /// The menu bar also calls this with the time a move carried. The poll
+    /// recorded that change under the previous pane id, which is gone.
+    public func applyObservedOutput(_ updates: [AgentID: Date]) {
         for (agentId, date) in updates {
             guard var agent = agents[agentId] else { continue }
             if let existing = agent.lastOutputAt, date <= existing { continue }

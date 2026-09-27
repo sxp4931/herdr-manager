@@ -248,7 +248,13 @@ final class AppModel {
             notifyAndDiagnoseIfNeeded(transition)
         }
         for (from, to) in moves {
-            await poller.retarget(from: from, to: to)
+            // The poll that adopted this id may also be the poll that saw
+            // the screen change, under `from`. That result cannot find the
+            // row. The carried time is the one the comparison already made.
+            let observed = await poller.retarget(from: from, to: to)
+            if let observed {
+                store.applyObservedOutput([to: observed])
+            }
         }
     }
 
@@ -627,14 +633,21 @@ final class AppModel {
             // pane and alert again for the same silence.
             retargetSilentAlert(for: event)
             if let movedHeartbeat, store.agents[movedHeartbeat.to] != nil {
+                // A change compared before this move is keyed by the old
+                // id. Apply the time the retarget carried, or the row keeps
+                // the clock from before the output.
+                let observed: Date?
                 switch movedHeartbeat.kind {
                 case .replace:
-                    await poller.retarget(from: movedHeartbeat.from, to: movedHeartbeat.to)
+                    observed = await poller.retarget(from: movedHeartbeat.from, to: movedHeartbeat.to)
                 case .fillVacant:
                     // The poll already published this id and moved the hash.
                     // A hash that arrived on the new id since then is the
                     // mover's screen; do not put the older one back.
-                    await poller.retargetVacant(from: movedHeartbeat.from, to: movedHeartbeat.to)
+                    observed = await poller.retargetVacant(from: movedHeartbeat.from, to: movedHeartbeat.to)
+                }
+                if let observed {
+                    store.applyObservedOutput([movedHeartbeat.to: observed])
                 }
             }
             if let transition {

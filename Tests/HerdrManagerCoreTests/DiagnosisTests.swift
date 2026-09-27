@@ -560,6 +560,127 @@ struct HeartbeatPollerHashTests {
         #expect(sameScreen.isEmpty)
         #expect(await poller.lastOutputDate(for: destination.id) != nil)
     }
+
+    @Test("A first look is not a change a move can carry")
+    func retargetOfABaselineCarriesNoChange() async {
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = ReadScript(["one"])
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let moved = Agent(id: AgentID("wB:p4"), status: .working)
+
+        let baseline = await poller.poll(agents: [origin], adapter: adapter)
+        #expect(baseline.isEmpty)
+        let carried = await poller.retarget(from: origin.id, to: moved.id)
+        #expect(carried == nil)
+        let vacant = await poller.retargetVacant(from: moved.id, to: AgentID("wC:p8"))
+        #expect(vacant == nil)
+    }
+
+    @Test("A change compared on the old id follows the row, and a second hop keeps it")
+    func retargetCarriesTheComparedChange() async {
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = ReadScript(["one", "two"])
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let moved = Agent(id: AgentID("wB:p4"), status: .working)
+        let again = AgentID("wC:p8")
+
+        let baseline = await poller.poll(agents: [origin], adapter: adapter)
+        #expect(baseline.isEmpty)
+        let changed = await poller.poll(agents: [origin], adapter: adapter)
+        let when = changed[origin.id]
+        #expect(when != nil)
+
+        let carried = await poller.retarget(from: origin.id, to: moved.id)
+        #expect(carried == when)
+        #expect(await poller.lastOutputDate(for: origin.id) == nil)
+
+        let hopped = await poller.retarget(from: moved.id, to: again)
+        #expect(hopped == when)
+        #expect(await poller.lastOutputDate(for: moved.id) == nil)
+        #expect(await poller.lastOutputDate(for: again) != nil)
+    }
+
+    @Test("The carried change clears a silence the poll's old id can no longer see")
+    @MainActor
+    func carriedChangeClearsSilenceOnTheNewId() async {
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = ReadScript(["one", "two"])
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let moved = Agent(id: AgentID("wB:p4"), status: .working)
+
+        _ = await poller.poll(agents: [origin], adapter: adapter)
+        let changed = await poller.poll(agents: [origin], adapter: adapter)
+        let carried = await poller.retarget(from: origin.id, to: moved.id)
+        #expect(carried == changed[origin.id])
+
+        let store = AgentStore()
+        let stale = Date().addingTimeInterval(-20 * 60)
+        store.agents = [
+            moved.id: Agent(
+                id: moved.id,
+                kind: .claude,
+                status: .working,
+                enteredAt: stale,
+                lastOutputAt: stale,
+                verdict: .silent(since: stale, cpu: nil)
+            )
+        ]
+        // The dictionary poll returned names the pane that left.
+        if let when = changed[origin.id] {
+            store.applyObservedOutput([origin.id: when])
+        }
+        #expect(store.agents[moved.id]?.verdict.isSilent == true)
+
+        if let carried {
+            store.applyObservedOutput([moved.id: carried])
+        }
+        let agent = store.agents[moved.id]
+        #expect(agent?.lastOutputAt == carried)
+        #expect(agent?.verdict.isHealthy == true)
+        #expect(agent?.verdict.isSilent == false)
+    }
+
+    @Test("A vacant retarget carries a change the new id will not report again")
+    func vacantRetargetCarriesTheComparedChange() async {
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = ReadScript(["one", "two", "two", "two", "three"])
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let moved = Agent(id: AgentID("wB:p4"), status: .working)
+
+        _ = await poller.poll(agents: [origin], adapter: adapter)
+        let changed = await poller.poll(agents: [origin], adapter: adapter)
+        // The new id's first look stored this same screen.
+        let landed = await poller.poll(agents: [moved], adapter: adapter)
+        #expect(landed.isEmpty)
+
+        let carried = await poller.retargetVacant(from: origin.id, to: moved.id)
+        #expect(carried == changed[origin.id])
+        #expect(await poller.lastOutputDate(for: origin.id) == nil)
+
+        let sameScreen = await poller.poll(agents: [moved], adapter: adapter)
+        #expect(sameScreen.isEmpty)
+        let next = await poller.poll(agents: [moved], adapter: adapter)
+        #expect(next[moved.id] != nil)
+    }
+
+    @Test("Prune drops a change that never followed the row")
+    func pruneDropsAnUncarriedChange() async {
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = ReadScript(["one", "two"])
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+
+        _ = await poller.poll(agents: [origin], adapter: adapter)
+        let changed = await poller.poll(agents: [origin], adapter: adapter)
+        #expect(changed[origin.id] != nil)
+        await poller.prune(keeping: [])
+        let carried = await poller.retarget(from: origin.id, to: AgentID("wB:p4"))
+        #expect(carried == nil)
+    }
 }
 
 // MARK: - Diagnoser silentThreshold Tests
