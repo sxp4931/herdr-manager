@@ -1563,6 +1563,152 @@ struct DiagnoserFinishedClassificationTests {
         #expect(argvWins == .gone(lastLine: "sh (pid 30)"))
     }
 
+    @Test("A shell option is not the program, and dash, ksh, and csh still launch one")
+    func shellOptionAndSiblingShellsLaunchAgents() async {
+        let working = Agent(id: AgentID("w1:p1"), kind: .claude, status: .working)
+        let diagnoser = Diagnoser()
+
+        func observe(_ processes: [ForegroundProcess]) async -> ProcessGoneObservation {
+            await diagnoser.observeProcessGone(
+                agent: working,
+                adapter: MockHerdrAdapter(processInfoResult: ProcessInfoResult(
+                    shellPid: 10,
+                    foregroundProcesses: processes
+                ))
+            )
+        }
+
+        // `-o` names an option. The program is the word after that.
+        let bashOption = await observe([
+            ForegroundProcess(
+                pid: 40, name: "bash", argv0: "/bin/bash", cmdline: nil, cwd: nil,
+                argv: ["/bin/bash", "-o", "errexit", "/usr/local/bin/claude"]
+            )
+        ])
+        #expect(bashOption == .running)
+        let zshShopt = await observe([
+            ForegroundProcess(
+                pid: 41, name: "zsh", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["zsh", "-O", "shwordsplit", "/usr/bin/codex"]
+            )
+        ])
+        #expect(zshShopt == .running)
+        // The option can sit in front of an eval. The eval is still not a program.
+        let optionThenEval = await observe([
+            ForegroundProcess(
+                pid: 42, name: "bash", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["bash", "-o", "errexit", "-c", "claude"]
+            )
+        ])
+        #expect(optionThenEval == .gone(lastLine: "bash (pid 42)"))
+        // The word after `-o` is the option name, even when that name is an agent.
+        let optionNamedClaude = await observe([
+            ForegroundProcess(
+                pid: 43, name: "bash", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["bash", "-o", "claude"]
+            )
+        ])
+        #expect(optionNamedClaude == .gone(lastLine: "bash (pid 43)"))
+        // `--rcfile` is a file. The program is the next word, and a missing
+        // program is the shell even when the file's basename is an agent.
+        let rcfile = await observe([
+            ForegroundProcess(
+                pid: 44, name: "bash", argv0: nil,
+                cmdline: "bash --rcfile /tmp/init /usr/bin/claude", cwd: nil
+            )
+        ])
+        #expect(rcfile == .running)
+        let rcfileOnly = await observe([
+            ForegroundProcess(
+                pid: 45, name: "bash", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["bash", "--init-file", "/tmp/claude"]
+            )
+        ])
+        #expect(rcfileOnly == .gone(lastLine: "bash (pid 45)"))
+
+        // These are already crash shells. A script path is the agent.
+        let dashScript = await observe([
+            ForegroundProcess(
+                pid: 46, name: "dash", argv0: "/bin/dash", cmdline: nil, cwd: nil,
+                argv: ["/bin/dash", "/tmp/test-bin/pi"]
+            )
+        ])
+        #expect(dashScript == .running)
+        let kshScript = await observe([
+            ForegroundProcess(
+                pid: 47, name: "ksh", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["ksh", "/usr/local/bin/codex"]
+            )
+        ])
+        #expect(kshScript == .running)
+        let kshEval = await observe([
+            ForegroundProcess(
+                pid: 48, name: "ksh", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["ksh", "-c", "/tmp/codex"]
+            )
+        ])
+        #expect(kshEval == .gone(lastLine: "ksh (pid 48)"))
+        let cshScript = await observe([
+            ForegroundProcess(
+                pid: 49, name: "csh", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["csh", "/usr/bin/claude"]
+            )
+        ])
+        #expect(cshScript == .running)
+        let tcshFast = await observe([
+            ForegroundProcess(
+                pid: 50, name: "tcsh", argv0: "-tcsh", cmdline: nil, cwd: nil,
+                argv: ["-tcsh", "-f", "/usr/bin/gemini"]
+            )
+        ])
+        #expect(tcshFast == .running)
+        // csh has no `-o` option value, so the next word is still the program.
+        let cshFlag = await observe([
+            ForegroundProcess(
+                pid: 51, name: "csh", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["csh", "-o", "/usr/bin/claude"]
+            )
+        ])
+        #expect(cshFlag == .running)
+        // dash takes `-o` and does not take `-O`.
+        let dashOption = await observe([
+            ForegroundProcess(
+                pid: 52, name: "dash", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["dash", "-o", "errexit", "/tmp/pi"]
+            )
+        ])
+        #expect(dashOption == .running)
+        let dashCapital = await observe([
+            ForegroundProcess(
+                pid: 53, name: "dash", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["dash", "-O", "extglob", "/tmp/claude"]
+            )
+        ])
+        #expect(dashCapital == .gone(lastLine: "dash (pid 53)"))
+        // ksh and fish take `-o`. fish does not take `-O`.
+        let kshOption = await observe([
+            ForegroundProcess(
+                pid: 54, name: "ksh", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["ksh", "-o", "errexit", "/usr/local/bin/codex"]
+            )
+        ])
+        #expect(kshOption == .running)
+        let fishOption = await observe([
+            ForegroundProcess(
+                pid: 55, name: "fish", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["fish", "-o", "errexit", "/usr/bin/claude"]
+            )
+        ])
+        #expect(fishOption == .running)
+        let fishCapital = await observe([
+            ForegroundProcess(
+                pid: 56, name: "fish", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["fish", "-O", "extglob", "/usr/bin/claude"]
+            )
+        ])
+        #expect(fishCapital == .gone(lastLine: "fish (pid 56)"))
+    }
+
     @Test("Blocked with a bare shell is process-gone, not awaiting input")
     func blockedBareShellIsGone() async {
         let agent = Agent(id: AgentID("w1:p1"), kind: .claude, status: .blocked)

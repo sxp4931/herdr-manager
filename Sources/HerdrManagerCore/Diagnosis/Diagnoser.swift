@@ -353,7 +353,13 @@ public actor Diagnoser {
 /// herdr identifies `sh /path/to/pi` as Pi and `powershell -File claude.ps1`
 /// as Claude. The comm on both is the shell, so a name-only check marked
 /// a live agent gone. `argv` is that vector. `cmdline` is used only when
-/// `argv` was not sent. `sh -c` stays bare, including when a later argument
+/// `argv` was not sent. `dash`, `ksh`, `csh`, and `tcsh` run a script the
+/// same way `sh` does, and they are already the shells a dead agent can
+/// leave, so a path after the flags is the program. `bash -o` and `bash
+/// -O` take the next word as the option name; `bash --rcfile` takes a
+/// file. Treating that word as the program marked `bash -o errexit
+/// claude` gone, and treated the rcfile as the program when claude was
+/// the next word. `sh -c` stays bare, including when a later argument
 /// names an agent: that flag's operand is a script, not a program path,
 /// and herdr does not treat it as the agent either. `nu` is not unwrapped.
 /// `cmd` is a shell only when an argument vector is present, so a payload
@@ -424,15 +430,16 @@ private enum ShellForeground {
 
     /// The shell whose rules apply. `argv[0]` wins over the comm name,
     /// because a login argv0 can be `-zsh` while the comm is `MainThread`.
-    /// `nu` is not here: a later path is not how herdr decides that pane
-    /// is still an agent.
+    /// `dash`, `ksh`, `csh`, and `tcsh` use the same script rule as `sh`:
+    /// the first word that is not a flag is the program. `nu` is not here.
+    /// A later path is not how that pane is still an agent.
     private static func unwrappingKind(_ process: ForegroundProcess) -> Kind? {
         let args = launchArguments(process)
         let candidates = [args?.first, process.argv0, process.name]
         for candidate in candidates {
             guard let candidate else { continue }
             switch shellBase(candidate) {
-            case "sh", "bash", "zsh", "fish":
+            case "sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh":
                 return .posix
             case "powershell", "pwsh":
                 return .powershell
@@ -463,9 +470,15 @@ private enum ShellForeground {
 
     /// Skip the shell itself. `-c` (and a short cluster that starts with
     /// it, such as `-cl`) is an eval, so the next word is not a program.
-    /// `--` ends the flags. Any other flag is skipped and does not consume
-    /// the following word; the first word that is not a flag is the program.
+    /// `--` ends the flags. `-o` and `-O` on bash, zsh, ksh, and sh take
+    /// the next word as an option name; dash and fish do the same for
+    /// `-o`. `--rcfile` and `--init-file` on bash and sh take a file.
+    /// Any other flag is skipped and does not consume the following word.
+    /// The first word that is not a flag is the program. csh and tcsh
+    /// have no option flag that takes a value, so `-o` there is only a
+    /// flag and the next word can still be the program.
     private static func posixLaunchesAgent(_ args: [String]) -> Bool {
+        let shell = args.first.map { shellBase($0) } ?? ""
         var index = 1
         while index < args.count {
             let arg = args[index]
@@ -474,6 +487,10 @@ private enum ShellForeground {
                 return isKnownAgentProgram(args[index + 1])
             }
             if isPosixEval(arg) { return false }
+            if posixOptionTakesValue(arg, shell: shell) {
+                index += 2
+                continue
+            }
             if arg.hasPrefix("-") {
                 index += 1
                 continue
@@ -481,6 +498,23 @@ private enum ShellForeground {
             return isKnownAgentProgram(arg)
         }
         return false
+    }
+
+    /// A flag whose next word is not the program. The set is the shell
+    /// that is actually in `argv[0]`, so `csh -o` does not swallow a path
+    /// and `dash` does not treat `-O` as an option name.
+    private static func posixOptionTakesValue(_ arg: String, shell: String) -> Bool {
+        switch arg {
+        case "-o":
+            return shell == "sh" || shell == "bash" || shell == "zsh"
+                || shell == "ksh" || shell == "dash" || shell == "fish"
+        case "-O":
+            return shell == "sh" || shell == "bash" || shell == "zsh" || shell == "ksh"
+        case "--rcfile", "--init-file":
+            return shell == "sh" || shell == "bash"
+        default:
+            return false
+        }
     }
 
     private static func isPosixEval(_ arg: String) -> Bool {
