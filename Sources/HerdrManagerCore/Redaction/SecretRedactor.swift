@@ -524,6 +524,33 @@ public final class SecretRedactor: Sendable {
                 "(?<![A-Za-z0-9_])SG\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])",
                 "SG.[REDACTED]"
             ),
+            // DigitalOcean API tokens. A personal token from the control
+            // panel is `dop_v1_`. An OAuth access token is `doo_v1_`. A
+            // refresh token is `dor_v1_`, and it mints another access
+            // token. The body is exactly 64 lowercase hex characters:
+            // the token DigitalOcean issued before the prefix, with the
+            // prefix in front. `DIGITALOCEAN_TOKEN` already ends in
+            // `token`, so an assignment is hidden. `doctl`, a curl
+            // line, and a pasted token have no keyword, and one
+            // personal token can manage the account. A shorter body
+            // stays, and a longer run stays whole, so a tail is not
+            // left behind. Uppercase hex is not what DigitalOcean
+            // writes. A letter, digit, or underscore glued to the front
+            // is not the prefix. The prefix is the lowercase form
+            // DigitalOcean prints. A legacy 64-hex token with no prefix
+            // is not one of these. The three prefixes do not overlap.
+            (
+                "(?<![A-Za-z0-9_])dop_v1_[a-f0-9]{64}(?![A-Za-z0-9])",
+                "dop_v1_[REDACTED]"
+            ),
+            (
+                "(?<![A-Za-z0-9_])doo_v1_[a-f0-9]{64}(?![A-Za-z0-9])",
+                "doo_v1_[REDACTED]"
+            ),
+            (
+                "(?<![A-Za-z0-9_])dor_v1_[a-f0-9]{64}(?![A-Za-z0-9])",
+                "dor_v1_[REDACTED]"
+            ),
         ]
         // Compact JWS or JWE, then a PEM block. Both stay after bearer:
         // a JWT written after the scheme has to be one redaction, and

@@ -3298,6 +3298,123 @@ struct SecretRedactorTests {
             #expect(result.redactedText == line)
         }
     }
+
+    @Test("A DigitalOcean API token is redacted once and keeps its prefix")
+    func redactsDigitalOceanTokens() {
+        let redactor = SecretRedactor()
+        let body = String(repeating: "0123456789abcdef", count: 4)
+        #expect(body.count == 64)
+        let pat = "dop_v1_\(body)"
+        let oauth = "doo_v1_\(body)"
+        let refresh = "dor_v1_\(String(repeating: "a", count: 64))"
+        let patKept = "dop_v1_[REDACTED]"
+        let oauthKept = "doo_v1_[REDACTED]"
+        let refreshKept = "dor_v1_[REDACTED]"
+
+        let bare = redactor.redact("doctl printed \(pat)")
+        #expect(bare.redactedText == "doctl printed \(patKept)")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains(body))
+        let again = redactor.redact(bare.redactedText)
+        #expect(again.redactedText == bare.redactedText)
+        #expect(again.redactionCount == 0)
+
+        let trio = redactor.redact("\(pat) \(oauth) \(refresh)")
+        #expect(trio.redactedText == "\(patKept) \(oauthKept) \(refreshKept)")
+        #expect(trio.redactionCount == 3)
+        #expect(!trio.redactedText.contains(body))
+        #expect(!trio.redactedText.contains(String(repeating: "a", count: 64)))
+
+        let assigned = redactor.redact("DIGITALOCEAN_TOKEN=\(pat)")
+        #expect(assigned.redactedText == "DIGITALOCEAN_TOKEN=\(patKept)")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        // The name already ends in token, so a shorter value is still
+        // an assignment. Seven characters stays.
+        let shortName = redactor.redact("DIGITALOCEAN_TOKEN=12345678")
+        #expect(shortName.redactedText == "DIGITALOCEAN_TOKEN=[REDACTED]")
+        #expect(shortName.redactionCount == 1)
+        let tooShort = redactor.redact("DIGITALOCEAN_TOKEN=1234567")
+        #expect(tooShort.redactedText == "DIGITALOCEAN_TOKEN=1234567")
+        #expect(tooShort.redactionCount == 0)
+        let quoted = redactor.redact(
+            #"{"access_token": "\#(oauth)", "refresh_token": "\#(refresh)"}"#
+        )
+        #expect(
+            quoted.redactedText
+                == #"{"access_token": "\#(oauthKept)", "refresh_token": "\#(refreshKept)"}"#
+        )
+        #expect(quoted.redactionCount == 2)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        let header = redactor.redact("Authorization: Bearer \(pat)")
+        #expect(header.redactedText == "Authorization: Bearer \(patKept)")
+        #expect(header.redactionCount == 1)
+        let headerAgain = redactor.redact(header.redactedText)
+        #expect(headerAgain.redactionCount == 0)
+        let lower = redactor.redact("authorization: bearer \(oauth)")
+        #expect(lower.redactedText == "authorization: bearer \(oauthKept)")
+        #expect(lower.redactionCount == 1)
+
+        let remote = redactor.redact("https://user:\(pat)@api.digitalocean.com/v2/account")
+        #expect(remote.redactedText == "https://user:\(patKept)@api.digitalocean.com/v2/account")
+        #expect(remote.redactionCount == 1)
+        #expect(remote.redactedText.contains("api.digitalocean.com/v2/account"))
+        let remoteAgain = redactor.redact(remote.redactedText)
+        #expect(remoteAgain.redactionCount == 0)
+
+        let callback = redactor.redact(
+            "https://example.com/callback#access_token=\(oauth)&token_type=bearer&state=0807edf7"
+        )
+        #expect(
+            callback.redactedText
+                == "https://example.com/callback#access_token=\(oauthKept)&token_type=bearer&state=0807edf7"
+        )
+        #expect(callback.redactionCount == 1)
+        #expect(callback.redactedText.contains("token_type=bearer"))
+        #expect(callback.redactedText.contains("state=0807edf7"))
+
+        let sentence = redactor.redact("saw \(refresh). next")
+        #expect(sentence.redactedText == "saw \(refreshKept). next")
+        #expect(sentence.redactionCount == 1)
+        let hyphen = redactor.redact("my-\(pat)")
+        #expect(hyphen.redactedText == "my-\(patKept)")
+        #expect(hyphen.redactionCount == 1)
+        let note = redactor.redact("\(pat)-note")
+        #expect(note.redactedText == "\(patKept)-note")
+        #expect(note.redactionCount == 1)
+
+        let leftover = redactor.redact("token=\(pat)@leftoversecret")
+        #expect(leftover.redactedText == "token=[REDACTED]")
+        #expect(leftover.redactionCount == 2)
+        #expect(!leftover.redactedText.contains("leftoversecret"))
+        #expect(!leftover.redactedText.contains(body))
+
+        let keptLines = [
+            "tokens start with dop_v1_",
+            "dop_v1_" + String(repeating: "a", count: 63),
+            "dop_v1_" + String(repeating: "a", count: 65),
+            "doo_v1_" + String(repeating: "a", count: 63),
+            "dor_v1_" + String(repeating: "a", count: 65),
+            "DOP_V1_" + body,
+            "dop_V1_" + body,
+            "x" + pat,
+            "_" + pat,
+            "dop_v1_" + String(repeating: "A", count: 64),
+            "dop_v1_" + String(repeating: "a", count: 32) + "-" + String(repeating: "b", count: 31),
+            "dor_v1_" + String(repeating: "a", count: 20) + "y" + String(repeating: "b", count: 43),
+            String(repeating: "a", count: 64),
+            "doo_" + body,
+            "dor_v1",
+        ]
+        for line in keptLines {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line.prefix(80))")
+            #expect(result.redactedText == line)
+        }
+    }
 }
 
 // MARK: - DwellTracker Tests
