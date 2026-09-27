@@ -263,6 +263,50 @@ public final class SecretRedactor: Sendable {
                 "(?<![A-Za-z0-9_])AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}(?![A-Za-z0-9])",
                 "AGE-SECRET-KEY-1[REDACTED]"
             ),
+            // Supabase secret keys. The legacy service_role value is a
+            // JWT, and the `eyJ` pattern already takes that. The current
+            // key is not a JWT: `sb_secret_`, 22 base64url characters,
+            // `_`, and an 8-character base64url checksum. That is the
+            // shape the docs name, and the generator writes it from
+            // base64url random bytes plus a base64url SHA-256 slice.
+            // The key bypasses row-level security. `SUPABASE_SECRET_KEY`
+            // already ends in `secret_key`, so an assignment is hidden.
+            // `supabase status`, the dashboard, and an `apikey` header
+            // print the key with no other keyword. A shorter body stays,
+            // and a longer run stays whole, so a tail is not left
+            // behind. `+`, `/`, and `=` are not in this alphabet. A
+            // letter, digit, or underscore glued to the front is not
+            // the prefix. The prefix is the lowercase form Supabase
+            // prints. `sb_publishable_` is the client key and is not
+            // this prefix. The hyphen sits at the end of the class so
+            // it is not a range.
+            (
+                "(?<![A-Za-z0-9_])sb_secret_[A-Za-z0-9_-]{22}_[A-Za-z0-9_-]{8}(?![A-Za-z0-9_-])",
+                "sb_secret_[REDACTED]"
+            ),
+            // Supabase personal access tokens. One token reaches every
+            // project on the account, and the CLI also accepts it as a
+            // database password. The CLI's pattern is `sbp_`, optionally
+            // `v0_` or `oauth_`, plus 40 lowercase hex characters.
+            // `SUPABASE_ACCESS_TOKEN` already ends in `token`. `supabase
+            // login` and a pasted token have no keyword. A shorter body
+            // stays, and a longer run stays whole. Uppercase hex is not
+            // what the CLI accepts. `v` and `o` are not hex, so `sbp_`
+            // alone does not match the versioned forms; naming them
+            // keeps that version on the label. A letter, digit, or
+            // underscore glued to the front is not the prefix.
+            (
+                "(?<![A-Za-z0-9_])sbp_oauth_[a-f0-9]{40}(?![A-Za-z0-9])",
+                "sbp_oauth_[REDACTED]"
+            ),
+            (
+                "(?<![A-Za-z0-9_])sbp_v0_[a-f0-9]{40}(?![A-Za-z0-9])",
+                "sbp_v0_[REDACTED]"
+            ),
+            (
+                "(?<![A-Za-z0-9_])sbp_[a-f0-9]{40}(?![A-Za-z0-9])",
+                "sbp_[REDACTED]"
+            ),
             // Slack app-level tokens (`xapp-1-<app>-<id>-<secret>`). The
             // older `xox[baprs]` pattern does not name this prefix. The
             // version is the single digit Slack issues. Each later

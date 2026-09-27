@@ -2664,6 +2664,218 @@ struct SecretRedactorTests {
             #expect(result.redactedText == line)
         }
     }
+
+    @Test("A Supabase secret key is redacted once and keeps its prefix")
+    func redactsSupabaseSecretKey() {
+        let redactor = SecretRedactor()
+        // Docs: sb_secret_ + 22 base64url + _ + 8 base64url. The hyphen
+        // and underscore are in that alphabet, so both segments use them.
+        let random = "Ab3-Ef_9Gh1-Jk_2Mn4-Pq"
+        let checksum = "Zx-9_Q2w"
+        #expect(random.count == 22)
+        #expect(checksum.count == 8)
+        let body = random + "_" + checksum
+        let plainRandom = String(repeating: "A", count: 22)
+        let plainChecksum = String(repeating: "B", count: 8)
+        let key = "sb_secret_" + body
+        let plain = "sb_secret_" + plainRandom + "_" + plainChecksum
+        let kept = "sb_secret_[REDACTED]"
+
+        let bare = redactor.redact("supabase status printed \(key)")
+        #expect(bare.redactedText == "supabase status printed \(kept)")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains(body))
+        let again = redactor.redact(bare.redactedText)
+        #expect(again.redactedText == bare.redactedText)
+        #expect(again.redactionCount == 0)
+
+        let other = redactor.redact(plain)
+        #expect(other.redactedText == kept)
+        #expect(other.redactionCount == 1)
+        #expect(!other.redactedText.contains(plainChecksum))
+
+        // The publishable key is the client identifier. Same shape,
+        // different prefix, and it stays beside the secret.
+        let publishable = "sb_publishable_" + body
+        let both = redactor.redact("\(publishable) \(key)")
+        #expect(both.redactedText == "\(publishable) \(kept)")
+        #expect(both.redactionCount == 1)
+        #expect(both.redactedText.contains(publishable))
+
+        // `SUPABASE_SECRET_KEY` already ends in the assignment keyword.
+        // `apikey` is how the gateway reads the key. The prefix stays,
+        // and the placeholder is not a second secret.
+        let assigned = redactor.redact("SUPABASE_SECRET_KEY=\(key)")
+        #expect(assigned.redactedText == "SUPABASE_SECRET_KEY=\(kept)")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        let wire = redactor.redact("apikey: \(plain)")
+        #expect(wire.redactedText == "apikey: \(kept)")
+        #expect(wire.redactionCount == 1)
+        let wireAgain = redactor.redact(wire.redactedText)
+        #expect(wireAgain.redactionCount == 0)
+        let quoted = redactor.redact(#"{"apikey": "\#(key)"}"#)
+        #expect(quoted.redactedText == #"{"apikey": "\#(kept)"}"#)
+        #expect(quoted.redactionCount == 1)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        let header = redactor.redact("Authorization: Bearer \(key)")
+        #expect(header.redactedText == "Authorization: Bearer \(kept)")
+        #expect(header.redactionCount == 1)
+        let headerAgain = redactor.redact(header.redactedText)
+        #expect(headerAgain.redactionCount == 0)
+        let lower = redactor.redact("authorization: bearer \(plain)")
+        #expect(lower.redactedText == "authorization: bearer \(kept)")
+        #expect(lower.redactionCount == 1)
+
+        let remote = redactor.redact("https://user:\(key)@db.example.supabase.co/postgres")
+        #expect(remote.redactedText == "https://user:\(kept)@db.example.supabase.co/postgres")
+        #expect(remote.redactionCount == 1)
+        #expect(remote.redactedText.contains("db.example.supabase.co/postgres"))
+        let remoteAgain = redactor.redact(remote.redactedText)
+        #expect(remoteAgain.redactionCount == 0)
+
+        let sentence = redactor.redact("saw \(key). next")
+        #expect(sentence.redactedText == "saw \(kept). next")
+        #expect(sentence.redactionCount == 1)
+        let hyphen = redactor.redact("my-\(key)")
+        #expect(hyphen.redactedText == "my-\(kept)")
+        #expect(hyphen.redactionCount == 1)
+
+        let pair = redactor.redact("\(key) and \(plain)")
+        #expect(pair.redactedText == "\(kept) and \(kept)")
+        #expect(pair.redactionCount == 2)
+
+        // `@` is still not the end of an ordinary assignment.
+        let leftover = redactor.redact("token=\(key)@leftoversecret")
+        #expect(leftover.redactedText == "token=[REDACTED]")
+        #expect(leftover.redactionCount == 2)
+        #expect(!leftover.redactedText.contains("leftoversecret"))
+        #expect(!leftover.redactedText.contains(body))
+
+        let keptLines = [
+            "keys start with sb_secret_",
+            "sb_secret_" + String(repeating: "A", count: 21) + "_" + plainChecksum,
+            "sb_secret_" + String(repeating: "A", count: 23) + "_" + plainChecksum,
+            "sb_secret_" + plainRandom + "_" + String(repeating: "B", count: 7),
+            "sb_secret_" + plainRandom + "_" + String(repeating: "B", count: 9),
+            plain + "B",
+            plain + "-note",
+            "sb_secret_" + String(repeating: "A", count: 10) + "+" + String(repeating: "A", count: 11) + "_" + plainChecksum,
+            "sb_secret_" + String(repeating: "A", count: 10) + "/" + String(repeating: "A", count: 11) + "_" + plainChecksum,
+            "sb_secret_" + String(repeating: "A", count: 10) + "=" + String(repeating: "A", count: 11) + "_" + plainChecksum,
+            "SB_SECRET_" + plainRandom + "_" + plainChecksum,
+            "x" + key,
+            "_" + key,
+            publishable,
+            "sb_temp_" + body,
+            "sb_secret_...",
+        ]
+        for line in keptLines {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line.prefix(80))")
+            #expect(result.redactedText == line)
+        }
+    }
+
+    @Test("A Supabase access token is redacted once and keeps its prefix")
+    func redactsSupabaseAccessToken() {
+        let redactor = SecretRedactor()
+        // The CLI accepts sbp_, sbp_v0_, and sbp_oauth_, each plus 40
+        // lowercase hex characters.
+        let hex = String(repeating: "0123456789abcdef", count: 2) + "01234567"
+        #expect(hex.count == 40)
+        let forms = ["sbp_", "sbp_v0_", "sbp_oauth_"]
+        for prefix in forms {
+            let key = prefix + hex
+            let kept = prefix + "[REDACTED]"
+            let bare = redactor.redact("supabase login showed \(key)")
+            #expect(bare.redactedText == "supabase login showed \(kept)")
+            #expect(bare.redactionCount == 1)
+            #expect(!bare.redactedText.contains(hex))
+            let again = redactor.redact(bare.redactedText)
+            #expect(again.redactedText == bare.redactedText)
+            #expect(again.redactionCount == 0)
+        }
+
+        let key = "sbp_" + hex
+        let versioned = "sbp_v0_" + hex
+        let oauth = "sbp_oauth_" + String(repeating: "a", count: 40)
+        let kept = "sbp_[REDACTED]"
+
+        // `SUPABASE_ACCESS_TOKEN` already ends in the assignment keyword.
+        let assigned = redactor.redact("SUPABASE_ACCESS_TOKEN=\(versioned)")
+        #expect(assigned.redactedText == "SUPABASE_ACCESS_TOKEN=sbp_v0_[REDACTED]")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        let quoted = redactor.redact(#"{"token": "\#(oauth)"}"#)
+        #expect(quoted.redactedText == #"{"token": "sbp_oauth_[REDACTED]"}"#)
+        #expect(quoted.redactionCount == 1)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        let header = redactor.redact("Authorization: Bearer \(key)")
+        #expect(header.redactedText == "Authorization: Bearer \(kept)")
+        #expect(header.redactionCount == 1)
+        let headerAgain = redactor.redact(header.redactedText)
+        #expect(headerAgain.redactionCount == 0)
+        let lower = redactor.redact("authorization: bearer \(versioned)")
+        #expect(lower.redactedText == "authorization: bearer sbp_v0_[REDACTED]")
+        #expect(lower.redactionCount == 1)
+
+        // The management token is also the password in the pooler URL.
+        let remote = redactor.redact("postgres://postgres:\(key)@db.example.supabase.co/postgres")
+        #expect(remote.redactedText == "postgres://postgres:\(kept)@db.example.supabase.co/postgres")
+        #expect(remote.redactionCount == 1)
+        #expect(remote.redactedText.contains("db.example.supabase.co/postgres"))
+        let remoteAgain = redactor.redact(remote.redactedText)
+        #expect(remoteAgain.redactionCount == 0)
+
+        let sentence = redactor.redact("saw \(oauth). next")
+        #expect(sentence.redactedText == "saw sbp_oauth_[REDACTED]. next")
+        #expect(sentence.redactionCount == 1)
+        let noted = redactor.redact(key + "-note")
+        #expect(noted.redactedText == kept + "-note")
+        #expect(noted.redactionCount == 1)
+        #expect(!noted.redactedText.contains(hex))
+        let hyphen = redactor.redact("my-\(versioned)")
+        #expect(hyphen.redactedText == "my-sbp_v0_[REDACTED]")
+        #expect(hyphen.redactionCount == 1)
+
+        let pair = redactor.redact("\(key) and \(versioned)")
+        #expect(pair.redactedText == "\(kept) and sbp_v0_[REDACTED]")
+        #expect(pair.redactionCount == 2)
+
+        let leftover = redactor.redact("token=\(oauth)@leftoversecret")
+        #expect(leftover.redactedText == "token=[REDACTED]")
+        #expect(leftover.redactionCount == 2)
+        #expect(!leftover.redactedText.contains("leftoversecret"))
+        #expect(!leftover.redactedText.contains(oauth))
+
+        let keptLines = [
+            "tokens start with sbp_",
+            "sbp_" + String(repeating: "a", count: 39),
+            "sbp_" + String(repeating: "a", count: 41),
+            key + "a",
+            "sbp_" + String(repeating: "A", count: 40),
+            "sbp_v0_" + String(repeating: "A", count: 40),
+            "sbp_oauth_" + String(repeating: "a", count: 39),
+            "sbp_v1_" + hex,
+            "sbp_OAUTH_" + String(repeating: "a", count: 40),
+            "SBP_" + hex,
+            "x" + key,
+            "_" + versioned,
+            "sbp_not-a-token",
+        ]
+        for line in keptLines {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line.prefix(80))")
+            #expect(result.redactedText == line)
+        }
+    }
 }
 
 // MARK: - DwellTracker Tests
