@@ -1451,6 +1451,118 @@ struct DiagnoserFinishedClassificationTests {
         #expect(finished == .running)
     }
 
+    @Test("A shell whose argv launches an agent is still that agent")
+    func shellWrapperIsNotProcessGone() async {
+        let working = Agent(id: AgentID("w1:p1"), kind: .claude, status: .working)
+        let diagnoser = Diagnoser()
+
+        func observe(_ processes: [ForegroundProcess]) async -> ProcessGoneObservation {
+            await diagnoser.observeProcessGone(
+                agent: working,
+                adapter: MockHerdrAdapter(processInfoResult: ProcessInfoResult(
+                    shellPid: 10,
+                    foregroundProcesses: processes
+                ))
+            )
+        }
+
+        // herdr identifies `sh /path/to/pi` as Pi. The comm is the shell.
+        let pi = await observe([
+            ForegroundProcess(
+                pid: 20, name: "sh", argv0: "/bin/sh", cmdline: nil, cwd: nil,
+                argv: ["/bin/sh", "/tmp/test-bin/pi"]
+            )
+        ])
+        #expect(pi == .running)
+
+        // The same fact from cmdline when the payload has no argv.
+        let cmdline = await observe([
+            ForegroundProcess(
+                pid: 21, name: "bash", argv0: nil,
+                cmdline: "/bin/bash /usr/local/bin/codex", cwd: nil
+            )
+        ])
+        #expect(cmdline == .running)
+
+        // PowerShell's -File script, including the .ps1 herdr strips, and
+        // a -Command whose first program is the agent. A value-taking
+        // flag is not that program.
+        let file = await observe([
+            ForegroundProcess(
+                pid: 22, name: "powershell.exe", argv0: nil, cmdline: nil, cwd: nil,
+                argv: [
+                    "powershell.exe", "-NoProfile", "-File",
+                    "C:\\Users\\herdr\\Documents\\PowerShell\\Scripts\\claude.ps1",
+                ]
+            )
+        ])
+        #expect(file == .running)
+        let command = await observe([
+            ForegroundProcess(
+                pid: 23, name: "pwsh", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["pwsh", "-WorkingDirectory", "C:\\repo", "-Command", "& claude"]
+            )
+        ])
+        #expect(command == .running)
+
+        // `-c` is an eval. A later path that names an agent is not the program.
+        // An encoded blob is not decoded. `nu` is not unwrapped.
+        let eval = await observe([
+            ForegroundProcess(
+                pid: 24, name: "bash", argv0: nil,
+                cmdline: "bash -c claude /tmp/codex", cwd: nil,
+                argv: ["bash", "-c", "claude", "/tmp/codex"]
+            )
+        ])
+        #expect(eval == .gone(lastLine: "bash (pid 24)"))
+        let encoded = await observe([
+            ForegroundProcess(
+                pid: 25, name: "powershell.exe", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["powershell.exe", "-EncodedCommand", "Y2xhdWRl"]
+            )
+        ])
+        #expect(encoded == .gone(lastLine: "powershell.exe (pid 25)"))
+        let nuScript = await observe([
+            ForegroundProcess(
+                pid: 26, name: "nu", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["nu", "/tmp/claude"]
+            )
+        ])
+        #expect(nuScript == .gone(lastLine: "nu (pid 26)"))
+
+        // `cmd /C` is the Windows wrapper. A bare `cmd.exe` with an argument
+        // vector is the prompt. A payload that names cmd and omits the
+        // vector stays running: that used to be indistinguishable.
+        let cmdWrapped = await observe([
+            ForegroundProcess(
+                pid: 27, name: "cmd.exe", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["cmd.exe", "/D", "/C", "C:\\npm\\codex.cmd --model gpt-5"]
+            )
+        ])
+        #expect(cmdWrapped == .running)
+        let cmdPrompt = await observe([
+            ForegroundProcess(
+                pid: 28, name: "C:\\Windows\\System32\\cmd.exe", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["C:\\Windows\\System32\\cmd.exe"]
+            )
+        ])
+        #expect(cmdPrompt == .gone(lastLine: "C:\\Windows\\System32\\cmd.exe (pid 28)"))
+        let cmdUnspecified = await observe([
+            ForegroundProcess(pid: 29, name: "cmd.exe", argv0: nil, cmdline: nil, cwd: nil)
+        ])
+        #expect(cmdUnspecified == .running)
+
+        // argv wins over a cmdline that names an agent. The eval is the vector.
+        let argvWins = await observe([
+            ForegroundProcess(
+                pid: 30, name: "sh", argv0: "/bin/sh",
+                cmdline: "/bin/sh /usr/bin/claude", cwd: nil,
+                argv: ["sh", "-c", "sleep 60"]
+            )
+        ])
+        #expect(argvWins == .gone(lastLine: "sh (pid 30)"))
+    }
+
     @Test("Blocked with a bare shell is process-gone, not awaiting input")
     func blockedBareShellIsGone() async {
         let agent = Agent(id: AgentID("w1:p1"), kind: .claude, status: .blocked)

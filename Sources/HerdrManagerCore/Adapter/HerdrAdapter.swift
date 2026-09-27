@@ -362,11 +362,32 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                     name: p["name"] as? String ?? "",
                     argv0: p["argv0"] as? String,
                     cmdline: p["cmdline"] as? String,
-                    cwd: p["cwd"] as? String
+                    cwd: p["cwd"] as? String,
+                    argv: Self.parseArgv(p["argv"])
                 ))
             }
         }
         return ProcessInfoResult(shellPid: shellPid, foregroundProcesses: procs)
+    }
+
+    /// `argv` is an array of strings. A fixture stores `[String]`; the
+    /// socket stores an `NSArray`, which bridges the same way when every
+    /// element is a string. A number in the array is not a shifted
+    /// argument list, so the whole field is dropped and the crash check
+    /// falls back to `cmdline`. An empty array is the same as a missing one.
+    private static func parseArgv(_ value: Any?) -> [String]? {
+        let strings: [String]
+        if let list = value as? [String] {
+            strings = list
+        } else if let list = value as? [Any] {
+            let parsed = list.compactMap { $0 as? String }
+            guard parsed.count == list.count else { return nil }
+            strings = parsed
+        } else {
+            return nil
+        }
+        guard !strings.isEmpty else { return nil }
+        return strings
     }
 
     public func focus(paneId: String) async throws {

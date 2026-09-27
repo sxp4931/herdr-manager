@@ -524,13 +524,26 @@ public struct ForegroundProcess: Sendable {
     public let pid: Int32
     public let name: String
     public let argv0: String?
+    /// `pane.process_info`'s `argv`, when herdr sent one. Nil when the
+    /// field was absent, empty, or not an array of strings. The crash
+    /// check uses it to tell a shell that is launching an agent from the
+    /// shell left behind after the agent exited.
+    public let argv: [String]?
     public let cmdline: String?
     public let cwd: String?
 
-    public init(pid: Int32, name: String, argv0: String?, cmdline: String?, cwd: String?) {
+    public init(
+        pid: Int32,
+        name: String,
+        argv0: String?,
+        cmdline: String?,
+        cwd: String?,
+        argv: [String]? = nil
+    ) {
         self.pid = pid
         self.name = name
         self.argv0 = argv0
+        self.argv = argv
         self.cmdline = cmdline
         self.cwd = cwd
     }

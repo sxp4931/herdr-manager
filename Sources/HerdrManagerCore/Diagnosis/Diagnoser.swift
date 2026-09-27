@@ -138,9 +138,10 @@ public actor Diagnoser {
             guard !procs.isEmpty else { return .unknown }
 
             // Corroborate: only a bare shell in the foreground means the agent's
-            // process group vanished. Anything else (a runtime hosting it) means
-            // the agent is still there. `name` and `argv0` are that one process;
-            // either one naming the shell is enough.
+            // process group vanished. Anything else (a runtime hosting it, or a
+            // shell whose argv is launching that agent) means the agent is still
+            // there. `name` and `argv0` are that one process; either one naming
+            // the shell is enough.
             let foregroundIsBareShell = procs.allSatisfy { Self.isBareShell($0) }
             guard foregroundIsBareShell else { return .running }
 
@@ -319,34 +320,10 @@ public actor Diagnoser {
 
     // MARK: - Helpers
 
-    /// True when this foreground process is the pane's own shell.
-    ///
-    /// herdr starts a pane with `$SHELL`, or with `[terminal] default_shell`.
-    /// The documented example of that setting is `nu`. PowerShell is `pwsh`
-    /// or `powershell`, including the `.exe` a remote pane reports. `csh` is
-    /// the shell beside `tcsh`. A login shell's argv0 is `-nu` or a path, and
-    /// the comm name can be the other spelling of the same binary, so either
-    /// field counts. A runtime (`node`, `tmux`) does not: the agent may still
-    /// be the program that name is running. One non-shell in the group keeps
-    /// the row alive.
+    /// True when this foreground process is the pane's own shell and is
+    /// not the program that is launching the agent. See `ShellForeground`.
     private static func isBareShell(_ process: ForegroundProcess) -> Bool {
-        if isShellProcessName(process.name) { return true }
-        if let argv0 = process.argv0, isShellProcessName(argv0) { return true }
-        return false
-    }
-
-    private static func isShellProcessName(_ name: String) -> Bool {
-        let afterSlash = name.split(separator: "/").last.map(String.init) ?? name
-        let base = afterSlash.split(separator: "\\").last.map(String.init) ?? afterSlash
-        let stripped = base.hasPrefix("-") ? String(base.dropFirst()) : base
-        var normalized = stripped.lowercased()
-        if normalized.hasSuffix(".exe") {
-            normalized.removeLast(4)
-        }
-        return [
-            "zsh", "bash", "sh", "fish", "tcsh", "ksh", "dash", "csh",
-            "nu", "pwsh", "powershell", "login",
-        ].contains(normalized)
+        ShellForeground.isBare(process)
     }
 
     /// Silent threshold for an agent kind.
@@ -359,5 +336,309 @@ public actor Diagnoser {
         case .custom:
             return 5 * 60 // default to 5 minutes
         }
+    }
+}
+
+/// Whether one foreground process is the shell a dead agent leaves.
+///
+/// herdr starts a pane with `$SHELL`, or with `[terminal] default_shell`.
+/// The documented example of that setting is `nu`. PowerShell is `pwsh`
+/// or `powershell`, including the `.exe` a remote pane reports. `csh` is
+/// the shell beside `tcsh`. A login shell's argv0 is `-nu` or a path, and
+/// the comm name can be the other spelling of the same binary, so either
+/// field counts. A runtime (`node`, `tmux`) does not: the agent may still
+/// be the program that name is running.
+///
+/// A shell is not bare when its argument vector is launching an agent.
+/// herdr identifies `sh /path/to/pi` as Pi and `powershell -File claude.ps1`
+/// as Claude. The comm on both is the shell, so a name-only check marked
+/// a live agent gone. `argv` is that vector. `cmdline` is used only when
+/// `argv` was not sent. `sh -c` stays bare, including when a later argument
+/// names an agent: that flag's operand is a script, not a program path,
+/// and herdr does not treat it as the agent either. `nu` is not unwrapped.
+/// `cmd` is a shell only when an argument vector is present, so a payload
+/// that omits `argv` and `cmdline` does not start calling every `cmd.exe`
+/// a crash. One non-shell in the group keeps the row alive; the caller
+/// applies that.
+private enum ShellForeground {
+    private enum Kind {
+        case posix
+        case powershell
+        case cmd
+    }
+
+    static func isBare(_ process: ForegroundProcess) -> Bool {
+        if isNamedShell(process.name) || isNamedShell(process.argv0) {
+            return !launchesKnownAgent(process)
+        }
+        // `cmd` is the Windows prompt a crashed agent leaves, and it is
+        // also the wrapper `cmd /C codex.cmd`. Without the argument vector
+        // those two are the same name, so the old payload stays "running".
+        if isCmd(process), launchArguments(process) != nil {
+            return !launchesKnownAgent(process)
+        }
+        return false
+    }
+
+    private static func isNamedShell(_ name: String?) -> Bool {
+        guard let name else { return false }
+        return [
+            "zsh", "bash", "sh", "fish", "tcsh", "ksh", "dash", "csh",
+            "nu", "pwsh", "powershell", "login",
+        ].contains(shellBase(name))
+    }
+
+    private static func isCmd(_ process: ForegroundProcess) -> Bool {
+        shellBase(process.name) == "cmd" || shellBase(process.argv0 ?? "") == "cmd"
+    }
+
+    /// Basename herdr's agent lookup accepts as one token, after a path
+    /// and one of `.exe`, `.cmd`, `.bat`, `.ps1`, `.js`. A leading `-` is
+    /// a login shell's argv0, not a program. `muse-bin-<version>` is the
+    /// launcher herdr matches separately. Names with a space are not a
+    /// basename.
+    private static let knownAgentPrograms: Set<String> = [
+        "pi", "claude", "claude-code", "codex", "gemini", "cursor", "cursor-agent",
+        "devin", "devin-cli", "agy", "antigravity", "antigravity-cli",
+        "cline", ".cline", "omp", "mastracode", "mastra-code",
+        "opencode", "opencode2", "open-code", "copilot", "github-copilot", "ghcs",
+        "kimi", "kimi-code", "kiro", "kiro-cli", "droid", "amp", "amp-local",
+        "grok", "grok-build", "hermes", "hermes-agent", "kilo", "kilo-code",
+        "qodercli", "qoderclicn", "qoder", "qodercn", "qwen", "qwen-code",
+        "letta", "letta-code", "maki", "muse", "muse-code", "muse-cli",
+    ]
+
+    private static func launchesKnownAgent(_ process: ForegroundProcess) -> Bool {
+        guard let kind = unwrappingKind(process), let args = launchArguments(process) else {
+            return false
+        }
+        switch kind {
+        case .posix:
+            return posixLaunchesAgent(args)
+        case .powershell:
+            return powershellLaunchesAgent(args)
+        case .cmd:
+            return cmdLaunchesAgent(args)
+        }
+    }
+
+    /// The shell whose rules apply. `argv[0]` wins over the comm name,
+    /// because a login argv0 can be `-zsh` while the comm is `MainThread`.
+    /// `nu` is not here: a later path is not how herdr decides that pane
+    /// is still an agent.
+    private static func unwrappingKind(_ process: ForegroundProcess) -> Kind? {
+        let args = launchArguments(process)
+        let candidates = [args?.first, process.argv0, process.name]
+        for candidate in candidates {
+            guard let candidate else { continue }
+            switch shellBase(candidate) {
+            case "sh", "bash", "zsh", "fish":
+                return .posix
+            case "powershell", "pwsh":
+                return .powershell
+            case "cmd":
+                return .cmd
+            default:
+                break
+            }
+        }
+        return nil
+    }
+
+    /// `argv` when herdr sent it. Otherwise the words of `cmdline`.
+    /// A present `argv` is the whole vector, so a cmdline that disagrees
+    /// with it is not a second source.
+    private static func launchArguments(_ process: ForegroundProcess) -> [String]? {
+        if let argv = process.argv, !argv.isEmpty {
+            return argv
+        }
+        guard let cmdline = process.cmdline?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !cmdline.isEmpty else {
+            return nil
+        }
+        let parts = cmdline.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        return parts.isEmpty ? nil : parts
+    }
+
+    /// Skip the shell itself. `-c` (and a short cluster that starts with
+    /// it, such as `-cl`) is an eval, so the next word is not a program.
+    /// `--` ends the flags. Any other flag is skipped and does not consume
+    /// the following word; the first word that is not a flag is the program.
+    private static func posixLaunchesAgent(_ args: [String]) -> Bool {
+        var index = 1
+        while index < args.count {
+            let arg = args[index]
+            if arg == "--" {
+                guard index + 1 < args.count else { return false }
+                return isKnownAgentProgram(args[index + 1])
+            }
+            if isPosixEval(arg) { return false }
+            if arg.hasPrefix("-") {
+                index += 1
+                continue
+            }
+            return isKnownAgentProgram(arg)
+        }
+        return false
+    }
+
+    private static func isPosixEval(_ arg: String) -> Bool {
+        if arg == "-c" { return true }
+        return arg.hasPrefix("-c") && !arg.hasPrefix("--") && arg.count > 2
+    }
+
+    /// `-File` is the script. `-Command` / `-c` is a command line, and the
+    /// first program token of that line is the agent. `-EncodedCommand`
+    /// stays a shell: the blob is not decoded. A flag herdr treats as
+    /// taking a value consumes the next word, so the directory is not the
+    /// program. A path that is already an agent program counts before a
+    /// leading `/` is treated as a switch.
+    private static func powershellLaunchesAgent(_ args: [String]) -> Bool {
+        let valueFlags: Set<String> = [
+            "-configurationname", "-executionpolicy", "-outputformat",
+            "-psconsolefile", "-version", "-windowstyle", "-workingdirectory",
+        ]
+        var index = 1
+        while index < args.count {
+            let raw = trimQuotes(args[index])
+            if isKnownAgentProgram(raw) { return true }
+            let flag = raw.lowercased()
+            switch flag {
+            case "-file", "-f", "/file":
+                guard index + 1 < args.count else { return false }
+                return isKnownAgentProgram(args[index + 1])
+            case "-command", "-c", "/command", "/c":
+                guard index + 1 < args.count else { return false }
+                return commandTextIsAgent(args[index + 1])
+            case "-encodedcommand", "-enc", "/encodedcommand", "/enc":
+                return false
+            default:
+                if valueFlags.contains(flag) {
+                    index += 2
+                    continue
+                }
+                if flag.hasPrefix("-") || flag.hasPrefix("/") {
+                    index += 1
+                    continue
+                }
+                return false
+            }
+        }
+        return false
+    }
+
+    /// `/C` and `/K` are the command. The other switches herdr skips are
+    /// not a program. A word that is neither is not an agent either:
+    /// `cmd` does not take a positional script path.
+    private static func cmdLaunchesAgent(_ args: [String]) -> Bool {
+        let skipped: Set<String> = [
+            "/d", "/s", "/q", "/a", "/u",
+            "/e:on", "/e:off", "/f:on", "/f:off", "/v:on", "/v:off",
+        ]
+        var index = 1
+        while index < args.count {
+            let flag = trimQuotes(args[index]).lowercased()
+            if flag == "/c" || flag == "/k" {
+                guard index + 1 < args.count else { return false }
+                return commandTextIsAgent(args[index + 1])
+            }
+            if skipped.contains(flag) {
+                index += 1
+                continue
+            }
+            index += 1
+        }
+        return false
+    }
+
+    /// The first program word of a `-Command` or `/C` string. `&`, `.`,
+    /// and `call` are invocation noise. A quoted word stays one token.
+    private static func commandTextIsAgent(_ command: String) -> Bool {
+        var rest = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        while !rest.isEmpty {
+            let (token, next) = commandToken(rest)
+            if token.isEmpty { return false }
+            let bare = trimQuotes(token)
+            if bare.caseInsensitiveCompare("&") == .orderedSame
+                || bare == "."
+                || bare.caseInsensitiveCompare("call") == .orderedSame {
+                let trimmedNext = next.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmedNext == rest { return false }
+                rest = trimmedNext
+                continue
+            }
+            return isKnownAgentProgram(bare)
+        }
+        return false
+    }
+
+    private static func commandToken(_ input: String) -> (String, String) {
+        guard let first = input.first else { return ("", "") }
+        if first == "\"" || first == "'" {
+            let start = input.index(after: input.startIndex)
+            if let end = input[start...].firstIndex(of: first) {
+                let token = String(input[start..<end])
+                let after = input.index(after: end)
+                return (token, String(input[after...]))
+            }
+            return (String(input[start...]), "")
+        }
+        if let end = input.firstIndex(where: { $0.isWhitespace }) {
+            return (String(input[..<end]), String(input[end...]))
+        }
+        return (input, "")
+    }
+
+    private static func isKnownAgentProgram(_ token: String) -> Bool {
+        let trimmed = trimQuotes(token).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("-") else { return false }
+        let base = agentBase(trimmed)
+        if knownAgentPrograms.contains(base) { return true }
+        guard base.hasPrefix("muse-bin-") else { return false }
+        let rest = base.dropFirst("muse-bin-".count)
+        guard let scalar = rest.unicodeScalars.first else { return false }
+        return scalar.value >= 48 && scalar.value <= 57
+    }
+
+    private static func trimQuotes(_ token: String) -> String {
+        guard token.count >= 2,
+              let first = token.first, let last = token.last,
+              (first == "\"" && last == "\"") || (first == "'" && last == "'") else {
+            return token
+        }
+        return String(token.dropFirst().dropLast())
+    }
+
+    /// Shell basename. One leading `-` is a login argv0. Only `.exe` is
+    /// removed: pass 71 matched `powershell.exe` and `Pwsh.EXE`, and a
+    /// `.ps1` or `.cmd` name is not that binary.
+    private static func shellBase(_ name: String) -> String {
+        var base = pathBase(name)
+        if base.hasPrefix("-") { base.removeFirst() }
+        base = base.lowercased()
+        if base.hasSuffix(".exe"), base.count > 4 {
+            base.removeLast(4)
+        }
+        return base
+    }
+
+    /// Program basename for an agent herdr would recognize. No login
+    /// dash: a token that starts with `-` is a flag and was already
+    /// refused. One of the suffixes herdr strips, and only that one.
+    private static func agentBase(_ name: String) -> String {
+        var base = pathBase(name).lowercased()
+        for suffix in [".exe", ".cmd", ".bat", ".ps1", ".js"] {
+            if base.hasSuffix(suffix), base.count > suffix.count {
+                base.removeLast(suffix.count)
+                break
+            }
+        }
+        return base
+    }
+
+    private static func pathBase(_ name: String) -> String {
+        let afterSlash = name.split(separator: Character("/")).last.map(String.init) ?? name
+        return afterSlash.split(separator: Character("\\")).last.map(String.init) ?? afterSlash
     }
 }

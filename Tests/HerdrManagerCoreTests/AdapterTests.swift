@@ -1037,6 +1037,47 @@ struct ResponseEnvelopeTests {
         #expect(info.foregroundProcesses.count == 1)
         #expect(info.foregroundProcesses.first?.pid == 72004)
         #expect(info.foregroundProcesses.first?.name == "codex")
+        #expect(info.foregroundProcesses.first?.argv == nil)
+    }
+
+    @Test("pane.process_info keeps argv, and a non-string element drops the field")
+    func processInfoArgv() throws {
+        let response: [String: Any] = [
+            "process_info": [
+                "shell_pid": 1,
+                "foreground_processes": [
+                    [
+                        "pid": 2,
+                        "name": "sh",
+                        "argv0": "/bin/sh",
+                        "argv": ["/bin/sh", "/tmp/test-bin/pi"],
+                        "cmdline": "/bin/sh /tmp/test-bin/pi",
+                    ] as [String: Any],
+                ],
+            ] as [String: Any],
+        ]
+        let info = LiveHerdrAdapter.parseProcessInfo(response)
+        #expect(info.foregroundProcesses.first?.argv == ["/bin/sh", "/tmp/test-bin/pi"])
+
+        let mixed: [String: Any] = [
+            "foreground_processes": [
+                [
+                    "pid": 3,
+                    "name": "sh",
+                    "argv": ["/bin/sh", 1] as [Any],
+                ] as [String: Any],
+            ],
+        ]
+        let dropped = LiveHerdrAdapter.parseProcessInfo(mixed)
+        #expect(dropped.foregroundProcesses.first?.argv == nil)
+        #expect(dropped.foregroundProcesses.first?.name == "sh")
+
+        let empty: [String: Any] = [
+            "foreground_processes": [
+                ["pid": 4, "name": "bash", "argv": [String]()] as [String: Any],
+            ],
+        ]
+        #expect(LiveHerdrAdapter.parseProcessInfo(empty).foregroundProcesses.first?.argv == nil)
     }
 
     @Test("pane.process_info still accepts a flat result")
