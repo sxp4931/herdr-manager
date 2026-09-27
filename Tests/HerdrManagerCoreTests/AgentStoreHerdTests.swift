@@ -862,6 +862,141 @@ struct DiagnoseAllRaceTests {
     }
 }
 
+/// `processInfo` replaces the pane's session with `replacement` before the
+/// verdict is applied. The read itself still describes the occupant the
+/// pass started with.
+private final class SessionSwapAdapter: HerdrAdapter, @unchecked Sendable {
+    let store: AgentStore
+    let replacement: HerdSnapshot
+    let foreground: ProcessInfoResult
+    var connectionState: HerdrConnectionState = .connected
+
+    init(store: AgentStore, replacement: HerdSnapshot, foreground: ProcessInfoResult) {
+        self.store = store
+        self.replacement = replacement
+        self.foreground = foreground
+    }
+
+    func snapshot() async throws -> HerdrSnapshot {
+        throw NSError(domain: "Mock", code: 1)
+    }
+
+    func read(paneId: String, source: PaneReadSource, lines: Int?) async throws -> PaneReadResult {
+        throw NSError(domain: "Mock", code: 1)
+    }
+
+    func explain(paneId: String) async throws -> AgentExplainResult {
+        throw NSError(domain: "Mock", code: 1)
+    }
+
+    func processInfo(paneId: String) async throws -> ProcessInfoResult {
+        await MainActor.run {
+            let stamp = store.captureHerdRequest()
+            _ = store.applyHerdSnapshot(
+                replacement,
+                requestedAtEpoch: stamp.epoch,
+                requestedAtSerial: stamp.serial
+            )
+        }
+        return foreground
+    }
+
+    func focus(paneId: String) async throws {}
+    func events() -> AsyncStream<HerdrEvent> { AsyncStream { $0.finish() } }
+    func sendKeys(paneId: String, keys: [String]) async throws {}
+    func prompt(paneId: String, text: String) async throws {}
+    func closePane(paneId: String) async throws {}
+    func createWorkspace(cwd: String, label: String?) async throws -> WorkspaceCreation {
+        throw NSError(domain: "Mock", code: 1)
+    }
+    func startAgent(paneId: String, kind: String, name: String) async throws {}
+    func waitStatus(paneId: String, until: [String], timeoutMs: Int) async throws -> Bool { true }
+    func reportMetadata(paneId: String, source: String, tokens: [String: String], ttlMs: Int) async throws {}
+}
+
+@Suite("AgentStore.diagnoseAll session occupant")
+struct DiagnoseAllSessionTests {
+    @Test("A process-gone read is not stamped onto the session that replaced the pane")
+    @MainActor
+    func processGoneDoesNotLandOnTheNewSession() async throws {
+        let store = AgentStore()
+        let id = AgentID("wA:p1")
+        let seed = store.captureHerdRequest()
+        store.applyHerdSnapshot(
+            labeledHerd([
+                makeAgentInfo(
+                    paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4,
+                    session: session("abc")
+                )
+            ]),
+            requestedAtEpoch: seed.epoch,
+            requestedAtSerial: seed.serial
+        )
+        let entered = Date(timeIntervalSince1970: 1_700_000_000)
+        try pinEpisode(
+            store, id: id,
+            enteredAt: entered, lastOutputAt: entered,
+            verdict: .healthy
+        )
+        let adapter = SessionSwapAdapter(
+            store: store,
+            replacement: labeledHerd([
+                makeAgentInfo(
+                    paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4,
+                    session: session("other")
+                )
+            ]),
+            foreground: diagnosisBareShell
+        )
+        await store.diagnoseAll(adapter: adapter, diagnoser: Diagnoser())
+        let agent = try #require(store.agents[id])
+        #expect(agent.enteredAt != entered)
+        #expect(agent.verdict.isProcessGone == false)
+        #expect(agent.verdict.isHealthy == true)
+        #expect(store.sessionIdentity(for: id) == "agent|claude|session|other")
+    }
+
+    @Test("Learning the session during the read still applies that read")
+    @MainActor
+    func firstSessionStillTakesTheVerdict() async throws {
+        let store = AgentStore()
+        let id = AgentID("wA:p1")
+        let output = Date().addingTimeInterval(-20 * 60)
+        let seed = store.captureHerdRequest()
+        store.applyHerdSnapshot(
+            labeledHerd([
+                makeAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4)
+            ]),
+            requestedAtEpoch: seed.epoch,
+            requestedAtSerial: seed.serial
+        )
+        try pinEpisode(
+            store, id: id,
+            enteredAt: output.addingTimeInterval(-10 * 60), lastOutputAt: output,
+            verdict: .healthy
+        )
+        let adapter = SessionSwapAdapter(
+            store: store,
+            replacement: labeledHerd([
+                makeAgentInfo(
+                    paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 4,
+                    session: session("abc")
+                )
+            ]),
+            foreground: nodeRuntime
+        )
+        await store.diagnoseAll(adapter: adapter, diagnoser: Diagnoser())
+        let agent = try #require(store.agents[id])
+        #expect(agent.enteredAt == output.addingTimeInterval(-10 * 60))
+        guard case .silent(let since, _) = agent.verdict else {
+            Issue.record("Expected the read to land as silent, got \(agent.verdict)")
+            return
+        }
+        #expect(since == output)
+        #expect(store.sessionIdentity(for: id) == "agent|claude|session|abc")
+    }
+}
+
 // MARK: - silence vs output observed during the pass
 
 private let nodeRuntime = ProcessInfoResult(
@@ -2742,5 +2877,199 @@ struct PollBeforeMoveTests {
         #expect(store.agents[AgentID("wC:p8")]?.status == .blocked)
         #expect(store.agents[AgentID("wC:p8")]?.verdict.isSilent == true)
         #expect(store.agents[AgentID("wC:p8")]?.workspaceName == "wC")
+    }
+}
+
+@Suite("A new session in the same pane")
+struct SamePaneSessionTests {
+    private func identity(_ value: String) -> String {
+        "agent|claude|session|\(value)"
+    }
+
+    @Test("Same status and seq with a different session opens a new blocked episode")
+    @MainActor
+    func differentSessionAlertsAndDropsTheOldDwell() throws {
+        let store = AgentStore()
+        let id = AgentID("wA:p1")
+        let seed = store.captureHerdRequest()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: session("abc")),
+        ]), requestedAtEpoch: seed.epoch, requestedAtSerial: seed.serial)
+        let entered = Date(timeIntervalSince1970: 1_700_000_000)
+        try pinEpisode(
+            store, id: id,
+            enteredAt: entered, lastOutputAt: entered,
+            verdict: .silent(since: entered, cpu: nil)
+        )
+
+        let poll = store.captureHerdRequest()
+        let transitions = store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: session("other")),
+        ]), requestedAtEpoch: poll.epoch, requestedAtSerial: poll.serial)
+
+        #expect(transitions.count == 1)
+        #expect(transitions.first?.from == .blocked)
+        #expect(transitions.first?.to == .blocked)
+        #expect(blockedAlerts(transitions).count == 1)
+        let row = try #require(store.agents[id])
+        #expect(row.enteredAt != entered)
+        #expect(row.verdict.isSilent == false)
+        #expect(row.stateChangeSeq == 5)
+        #expect(store.sessionIdentity(for: id) == identity("other"))
+    }
+
+    @Test("A session value that only continues another is a different occupant")
+    @MainActor
+    func prefixedSessionDoesNotContinue() throws {
+        let store = AgentStore()
+        let id = AgentID("wA:p1")
+        let seed = store.captureHerdRequest()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: session("abc")),
+        ]), requestedAtEpoch: seed.epoch, requestedAtSerial: seed.serial)
+        let entered = Date(timeIntervalSince1970: 1_700_000_000)
+        try pinEpisode(
+            store, id: id,
+            enteredAt: entered, lastOutputAt: entered,
+            verdict: .healthy
+        )
+        let poll = store.captureHerdRequest()
+        let transitions = store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(
+                paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5,
+                session: session("abc|extra")
+            ),
+        ]), requestedAtEpoch: poll.epoch, requestedAtSerial: poll.serial)
+        #expect(transitions.count == 1)
+        #expect(store.agents[id]?.enteredAt != entered)
+        #expect(store.sessionIdentity(for: id) == identity("abc|extra"))
+    }
+
+    @Test("The first session value, and a list that omits one, keep the episode")
+    @MainActor
+    func firstOrMissingSessionKeepsTheEpisode() throws {
+        let store = AgentStore()
+        let id = AgentID("wA:p1")
+        let seed = store.captureHerdRequest()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5),
+        ]), requestedAtEpoch: seed.epoch, requestedAtSerial: seed.serial)
+        let entered = Date(timeIntervalSince1970: 1_700_000_000)
+        try pinEpisode(
+            store, id: id,
+            enteredAt: entered, lastOutputAt: entered,
+            verdict: .silent(since: entered, cpu: nil)
+        )
+
+        let named = store.captureHerdRequest()
+        let learned = store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: session("abc")),
+        ]), requestedAtEpoch: named.epoch, requestedAtSerial: named.serial)
+        #expect(learned.isEmpty)
+        #expect(store.agents[id]?.enteredAt == entered)
+        #expect(store.agents[id]?.verdict.isSilent == true)
+        #expect(store.sessionIdentity(for: id) == identity("abc"))
+
+        let again = store.captureHerdRequest()
+        let omitted = store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5),
+        ]), requestedAtEpoch: again.epoch, requestedAtSerial: again.serial)
+        #expect(omitted.isEmpty)
+        #expect(store.agents[id]?.enteredAt == entered)
+    }
+
+    @Test("pane_updated naming a new session opens the episode, and the earlier list cannot put it back")
+    @MainActor
+    func eventSessionSurvivesThePollThatStartedBeforeIt() throws {
+        let store = AgentStore()
+        let id = AgentID("wA:p1")
+        let seed = store.captureHerdRequest()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: session("abc")),
+        ]), requestedAtEpoch: seed.epoch, requestedAtSerial: seed.serial)
+        let entered = Date(timeIntervalSince1970: 1_700_000_000)
+        try pinEpisode(
+            store, id: id,
+            enteredAt: entered, lastOutputAt: entered,
+            verdict: .silent(since: entered, cpu: .deadlocked)
+        )
+        let early = store.captureHerdRequest()
+        let event = store.applyEvent(.paneUpdated(
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0, session: session("other"))
+        ))
+        #expect(event?.from == .blocked)
+        #expect(event?.to == .blocked)
+        let opened = try #require(store.agents[id])
+        #expect(opened.enteredAt != entered)
+        #expect(opened.verdict.isSilent == false)
+        #expect(store.sessionIdentity(for: id) == identity("other"))
+
+        let stale = store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: session("abc")),
+        ]), requestedAtEpoch: early.epoch, requestedAtSerial: early.serial)
+        #expect(stale.isEmpty)
+        #expect(store.agents[id]?.enteredAt == opened.enteredAt)
+        #expect(store.agents[id]?.verdict.isSilent == false)
+        #expect(store.sessionIdentity(for: id) == identity("other"))
+    }
+
+    @Test("A seq-less pane_updated that omits the session keeps the episode")
+    @MainActor
+    func seqlessUpdateWithoutSessionKeepsTheEpisode() throws {
+        let store = AgentStore()
+        let id = AgentID("wA:p1")
+        let seed = store.captureHerdRequest()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: session("abc")),
+        ]), requestedAtEpoch: seed.epoch, requestedAtSerial: seed.serial)
+        let entered = Date(timeIntervalSince1970: 1_700_000_000)
+        try pinEpisode(
+            store, id: id,
+            enteredAt: entered, lastOutputAt: entered,
+            verdict: .silent(since: entered, cpu: nil)
+        )
+        let event = store.applyEvent(.paneUpdated(
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0, title: "renamed")
+        ))
+        #expect(event == nil)
+        #expect(store.agents[id]?.enteredAt == entered)
+        #expect(store.agents[id]?.verdict.isSilent == true)
+        #expect(store.agents[id]?.name == "renamed")
+        #expect(store.sessionIdentity(for: id) == identity("abc"))
+    }
+
+    @Test("A move whose payload names a different session does not keep the dwell")
+    @MainActor
+    func moveToADifferentSessionOpensAnEpisode() throws {
+        let store = AgentStore()
+        let seed = store.captureHerdRequest()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: session("abc")),
+        ]), requestedAtEpoch: seed.epoch, requestedAtSerial: seed.serial)
+        let entered = Date(timeIntervalSince1970: 1_700_000_000)
+        try pinEpisode(
+            store, id: AgentID("wA:p1"),
+            enteredAt: entered, lastOutputAt: entered,
+            verdict: .silent(since: entered, cpu: nil)
+        )
+        let move = store.applyEvent(.paneMoved(
+            previousPaneId: "wA:p1",
+            pane: makeAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2",
+                agentStatus: "blocked", stateChangeSeq: 0, session: session("other")
+            ),
+            createdWorkspaceLabel: nil,
+            createdTabLabel: nil
+        ))
+        #expect(move?.from == .blocked)
+        #expect(move?.to == .blocked)
+        #expect(move?.agentId == AgentID("wB:p4"))
+        let landed = try #require(store.agents[AgentID("wB:p4")])
+        #expect(landed.enteredAt != entered)
+        #expect(landed.verdict.isSilent == false)
+        #expect(landed.status == .blocked)
+        #expect(store.agents[AgentID("wA:p1")] == nil)
+        #expect(store.sessionIdentity(for: AgentID("wB:p4")) == identity("other"))
+        #expect(store.sessionIdentity(for: AgentID("wA:p1")) == nil)
     }
 }

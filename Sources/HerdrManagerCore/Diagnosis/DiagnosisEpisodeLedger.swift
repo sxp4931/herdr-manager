@@ -204,8 +204,6 @@ public struct DiagnosisEpisodeLedger: Sendable {
     /// True when `incoming` is the occupant already stored, the first time
     /// that occupant has been named, or a read that did not name one.
     private static func sameOccupant(_ stored: String?, incoming: String?) -> Bool {
-        guard let incoming else { return true }
-        guard let stored else { return true }
-        return stored == incoming
+        !SessionIdentity.replaced(stored: stored, incoming: incoming)
     }
 }

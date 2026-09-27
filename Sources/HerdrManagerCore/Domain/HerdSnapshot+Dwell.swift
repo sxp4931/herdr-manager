@@ -8,14 +8,34 @@ extension HerdSnapshot {
     /// about the agents themselves; stamping a fresh `enteredAt` on all of
     /// them resets every dwell timer, which is the one number the caller is
     /// watching to see how long something has been stuck.
-    public func displayAgents(preserving previous: [Agent], now: Date = Date()) -> [Agent] {
+    ///
+    /// `sessions` is the identity the caller had stored for each pane, keyed
+    /// by pane id. When both that and this snapshot name one, and they
+    /// differ, the episode did move: the status and seq can stay put while
+    /// a new session takes the pane. Omit the map and every same-status row
+    /// keeps its dwell, which is what a caller that has not tracked sessions
+    /// does.
+    public func displayAgents(
+        preserving previous: [Agent],
+        sessions previousSessions: [String: String] = [:],
+        now: Date = Date()
+    ) -> [Agent] {
         let byId = Dictionary(
             previous.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last }
         )
+        var incomingSessions: [String: String] = [:]
+        for info in agents {
+            guard !info.paneId.isEmpty, let session = info.sessionIdentity else { continue }
+            incomingSessions[info.paneId] = session
+        }
         return displayAgents(now: now).map { agent in
             guard let old = byId[agent.id],
                   old.status == agent.status,
-                  old.stateChangeSeq == agent.stateChangeSeq else {
+                  old.stateChangeSeq == agent.stateChangeSeq,
+                  !SessionIdentity.replaced(
+                    stored: previousSessions[agent.id.raw],
+                    incoming: incomingSessions[agent.id.raw]
+                  ) else {
                 return agent
             }
             var merged = agent
@@ -55,7 +75,9 @@ extension HerdSnapshot {
 /// some row's id, status, or seq drops the copy: a seq-less `pane_updated`
 /// can open a new episode without advancing seq, and restoring across that
 /// would glue the two episodes together. Focus and a seq-less update that
-/// leaves the episode alone do not drop it.
+/// leaves the episode alone do not drop it. A session that replaces the
+/// one stored for that pane drops it too: status and seq can stay put
+/// while a different occupant takes the pane.
 public struct HerdLiveTable: Sendable {
     public private(set) var herd: HerdSnapshot
     public private(set) var agents: [Agent]
@@ -64,22 +86,43 @@ public struct HerdLiveTable: Sendable {
     /// A move has already restored from `rowsBeforeLayout`. The next layout
     /// refetch is a new burst and remembers the rows as they are then.
     private var restoredMoveSinceRefresh = false
+    /// Session identity last stored for a pane id. Empty values are not stored.
+    private var sessionByPane: [String: String]
 
     public init(herd: HerdSnapshot, agents: [Agent]) {
         self.herd = herd
         self.agents = agents
+        self.sessionByPane = Self.sessions(in: herd)
     }
 
     /// Apply one `herdSnapshot` taken because a layout event arrived.
     /// `nil` is a failed read: the table and any open burst stay as they are.
     public mutating func noteLayoutRefresh(_ refreshed: HerdSnapshot?, now: Date = Date()) {
         guard let refreshed else { return }
-        if rowsBeforeLayout == nil || restoredMoveSinceRefresh {
+        let previousSessions = sessionByPane
+        let armingBurst = rowsBeforeLayout == nil || restoredMoveSinceRefresh
+        if armingBurst {
             rowsBeforeLayout = agents
             restoredMoveSinceRefresh = false
         }
         herd = refreshed
-        agents = refreshed.displayAgents(preserving: agents, now: now)
+        agents = refreshed.displayAgents(
+            preserving: agents,
+            sessions: previousSessions,
+            now: now
+        )
+        // A later refetch in the same burst can replace a session too.
+        // That pane's pre-burst dwell must not be put back by the move.
+        if let saved = rowsBeforeLayout {
+            let kept = saved.filter { agent in
+                !SessionIdentity.replaced(
+                    stored: previousSessions[agent.id.raw],
+                    incoming: Self.session(in: refreshed, paneId: agent.id.raw)
+                )
+            }
+            rowsBeforeLayout = kept.isEmpty ? nil : kept
+        }
+        adoptSessions(from: refreshed, previous: previousSessions)
     }
 
     /// Stamp process-list reads onto the rows. See `ProcessGoneObservation.apply`.
@@ -99,17 +142,128 @@ public struct HerdLiveTable: Sendable {
         if case .workspacesChanged = event {
             return
         }
-        if case .paneMoved = event, let saved = rowsBeforeLayout {
+        let replaced = sessionReplaced(by: event)
+        if case .paneMoved = event, let saved = rowsBeforeLayout, !replaced {
             agents = applyingMove(event, savedRows: saved, now: now)
+            noteSession(from: event)
             restoredMoveSinceRefresh = true
             return
         }
         let before = episodeIdentity(of: agents)
         agents = herd.applying(event, to: agents, now: now)
-        if rowsBeforeLayout != nil, episodeIdentity(of: agents) != before {
+        if replaced, let paneId = Self.addressedPaneId(of: event) {
+            openFreshEpisode(paneId: paneId, now: now)
+        }
+        noteSession(from: event)
+        if rowsBeforeLayout != nil, replaced || episodeIdentity(of: agents) != before {
             rowsBeforeLayout = nil
             restoredMoveSinceRefresh = false
         }
+    }
+
+    /// True when this event names a session and the pane already had a
+    /// different one. A move that omits `agent_session` uses the session
+    /// the last snapshot stored for the destination: the layout refetch
+    /// already learned it, and the wire move often does not repeat it.
+    private func sessionReplaced(by event: HerdrEvent) -> Bool {
+        switch event {
+        case .paneUpdated(let info):
+            return SessionIdentity.replaced(
+                stored: sessionByPane[info.paneId],
+                incoming: info.sessionIdentity
+            )
+        case .paneMoved(let previousPaneId, let info, _, _):
+            let previousRaw = previousPaneId.isEmpty ? info.paneId : previousPaneId
+            let incoming = info.sessionIdentity ?? Self.session(in: herd, paneId: info.paneId)
+            return SessionIdentity.replaced(
+                stored: sessionByPane[previousRaw],
+                incoming: incoming
+            )
+        default:
+            return false
+        }
+    }
+
+    /// The pane a session-changing event addresses now. A move's id is the
+    /// new one; the row, if the event kept it, is what gets the fresh dwell.
+    private static func addressedPaneId(of event: HerdrEvent) -> String? {
+        switch event {
+        case .paneUpdated(let info):
+            return info.paneId.isEmpty ? nil : info.paneId
+        case .paneMoved(_, let info, _, _):
+            return info.paneId.isEmpty ? nil : info.paneId
+        default:
+            return nil
+        }
+    }
+
+    /// Drop the dwell and the crash mark. The status string did not have
+    /// to change for the occupant to.
+    private mutating func openFreshEpisode(paneId: String, now: Date) {
+        guard let index = agents.firstIndex(where: { $0.id.raw == paneId }) else { return }
+        agents[index].enteredAt = now
+        agents[index].verdict = HerdSnapshot.displayVerdict(for: agents[index].status, now: now)
+    }
+
+    private mutating func noteSession(from event: HerdrEvent) {
+        switch event {
+        case .paneUpdated(let info):
+            guard !info.paneId.isEmpty else { return }
+            guard agents.contains(where: { $0.id.raw == info.paneId }) else {
+                sessionByPane.removeValue(forKey: info.paneId)
+                return
+            }
+            if let incoming = info.sessionIdentity {
+                sessionByPane[info.paneId] = incoming
+            }
+        case .paneMoved(let previousPaneId, let info, _, _):
+            let previousRaw = previousPaneId.isEmpty ? info.paneId : previousPaneId
+            let carried = sessionByPane[previousRaw]
+            if previousRaw != info.paneId {
+                sessionByPane.removeValue(forKey: previousRaw)
+            }
+            guard agents.contains(where: { $0.id.raw == info.paneId }) else {
+                sessionByPane.removeValue(forKey: info.paneId)
+                return
+            }
+            if let incoming = info.sessionIdentity {
+                sessionByPane[info.paneId] = incoming
+            } else if previousRaw != info.paneId, let carried {
+                sessionByPane[info.paneId] = carried
+            }
+        case .paneClosed(let paneId), .paneExited(let paneId):
+            sessionByPane.removeValue(forKey: paneId)
+        default:
+            break
+        }
+    }
+
+    /// Sessions named by `herd`. Panes a burst is still restoring keep the
+    /// identity they had before the refetch, so the move can tell a new
+    /// session from the one that left.
+    private mutating func adoptSessions(from herd: HerdSnapshot, previous: [String: String]) {
+        var next = Self.sessions(in: herd)
+        if let saved = rowsBeforeLayout {
+            for agent in saved where next[agent.id.raw] == nil {
+                if let session = previous[agent.id.raw] {
+                    next[agent.id.raw] = session
+                }
+            }
+        }
+        sessionByPane = next
+    }
+
+    private static func sessions(in herd: HerdSnapshot) -> [String: String] {
+        var sessions: [String: String] = [:]
+        for info in herd.agents {
+            guard !info.paneId.isEmpty, let session = info.sessionIdentity else { continue }
+            sessions[info.paneId] = session
+        }
+        return sessions
+    }
+
+    private static func session(in herd: HerdSnapshot, paneId: String) -> String? {
+        herd.agents.first { $0.paneId == paneId }?.sessionIdentity
     }
 
     /// Re-key `current`, then keep the pre-refetch dwell when this move did

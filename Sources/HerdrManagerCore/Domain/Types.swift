@@ -640,6 +640,24 @@ public struct HerdrAgentInfo: Sendable, Equatable {
     }
 }
 
+// MARK: - SessionIdentity
+
+/// Whether two observations name different occupants.
+///
+/// `HerdrAgentInfo.sessionIdentity` is the string. A nil or empty side is
+/// not a change: `pane_updated` often omits `agent_session`, and the first
+/// list that names one is still the occupant already on the row. Two
+/// non-empty strings that differ are different occupants, including a value
+/// that only continues the other (`abc` and `abc|extra`).
+public enum SessionIdentity {
+    public static func replaced(stored: String?, incoming: String?) -> Bool {
+        guard let stored, !stored.isEmpty, let incoming, !incoming.isEmpty else {
+            return false
+        }
+        return stored != incoming
+    }
+}
+
 // MARK: - HerdSnapshot
 
 /// A fully-resolved view of the herd: agents (from `agent.list`, the

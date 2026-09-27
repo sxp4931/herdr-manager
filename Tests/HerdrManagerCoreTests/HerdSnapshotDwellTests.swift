@@ -8,7 +8,8 @@ private func makeDwellAgentInfo(
     tabId: String = "wA:t1",
     agent: String? = "claude",
     agentStatus: String = "working",
-    stateChangeSeq: UInt64 = 1
+    stateChangeSeq: UInt64 = 1,
+    session: HerdrSnapshot.AgentSession? = nil
 ) -> HerdrAgentInfo {
     HerdrAgentInfo(
         paneId: paneId,
@@ -20,7 +21,7 @@ private func makeDwellAgentInfo(
         title: "Claude",
         terminalTitleStripped: "Claude",
         agentStatus: agentStatus,
-        agentSession: nil,
+        agentSession: session,
         focused: false,
         stateChangeSeq: stateChangeSeq,
         cwd: "/tmp",
@@ -91,6 +92,39 @@ struct HerdSnapshotDwellTests {
         #expect(byId["wA:p1"]?.verdict == .processGone(lastLine: "zsh (pid 1)"))
         #expect(byId["wA:p2"]?.verdict.isProcessGone == false)
         #expect(byId["wA:p2"]?.status == .done)
+    }
+
+    @Test("Without a session map the dwell stays, and a different stored session drops it")
+    func differentSessionDoesNotPreserveDwell() {
+        func snapshot(_ infos: [HerdrAgentInfo]) -> HerdSnapshot {
+            HerdSnapshot(
+                version: "0.7.5", protocol: 17,
+                agents: infos,
+                workspaceNames: ["wA": "Cuedora"], tabNames: ["wA:t1": "Claude"],
+                focusedWorkspaceId: nil, focusedTabId: nil, focusedPaneId: nil
+            )
+        }
+        let started = Date(timeIntervalSince1970: 1_000)
+        let later = Date(timeIntervalSince1970: 9_000)
+        let same = HerdrSnapshot.AgentSession(source: "agent", agent: "claude", kind: "session", value: "abc")
+        let other = HerdrSnapshot.AgentSession(source: "agent", agent: "claude", kind: "session", value: "abc|extra")
+        let before = snapshot([
+            makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: same)
+        ]).displayAgents(now: started)
+        let next = snapshot([
+            makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: other)
+        ])
+        // A caller that has not tracked sessions still preserves. The map is
+        // what makes the two values a replacement.
+        let untracked = next.displayAgents(preserving: before, now: later)
+        #expect(untracked.first?.enteredAt == started)
+        let kept = next.displayAgents(
+            preserving: before,
+            sessions: ["wA:p1": "agent|claude|session|abc"],
+            now: later
+        )
+        #expect(kept.first?.enteredAt == later)
+        #expect(kept.first?.verdict.isProcessGone == false)
     }
 }
 
@@ -392,5 +426,152 @@ struct HerdLiveTableDwellTests {
             now: moveAt
         )
         #expect(live.agents.map(\.id.raw) == ["wA:p2"])
+    }
+
+    @Test("The same session still gets its pre-refetch dwell back")
+    func sameSessionMoveStillRestores() {
+        let same = HerdrSnapshot.AgentSession(source: "agent", agent: "claude", kind: "session", value: "abc")
+        let first = snapshot([
+            makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: same),
+            makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 3)
+        ])
+        var live = HerdLiveTable(herd: first, agents: first.displayAgents(now: started))
+        live.noteLayoutRefresh(
+            snapshot(
+                [
+                    makeDwellAgentInfo(
+                        paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                        agentStatus: "blocked", stateChangeSeq: 5, session: same
+                    ),
+                    makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 3)
+                ],
+                workspaces: ["wA": "Cuedora", "wB": "proj"],
+                tabs: ["wA:t1": "main", "wB:t1": "scratch"]
+            ),
+            now: refreshedAt
+        )
+        #expect(live.agents.first { $0.id.raw == "wB:p4" }?.enteredAt == refreshedAt)
+        live.apply(
+            .paneMoved(
+                previousPaneId: "wA:p1",
+                pane: makeDwellAgentInfo(
+                    paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                    agentStatus: "working", stateChangeSeq: 0
+                ),
+                createdWorkspaceLabel: nil,
+                createdTabLabel: nil
+            ),
+            now: moveAt
+        )
+        let moved = live.agents.first { $0.id.raw == "wB:p4" }
+        #expect(moved?.enteredAt == started)
+        #expect(moved?.status == .blocked)
+        #expect(moved?.stateChangeSeq == 5)
+        #expect(live.agents.first { $0.id.raw == "wA:p2" }?.enteredAt == started)
+    }
+
+    @Test("A different session on the same pane starts a dwell the move does not put back")
+    func differentSessionIsNotRestoredByTheMove() {
+        let same = HerdrSnapshot.AgentSession(source: "agent", agent: "claude", kind: "session", value: "abc")
+        let other = HerdrSnapshot.AgentSession(source: "agent", agent: "claude", kind: "session", value: "other")
+        let first = snapshot([
+            makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: same),
+            makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 3)
+        ])
+        var rows = first.displayAgents(now: started)
+        if let index = rows.firstIndex(where: { $0.id.raw == "wA:p1" }) {
+            rows[index].verdict = .processGone(lastLine: "zsh (pid 1)")
+        }
+        var live = HerdLiveTable(herd: first, agents: rows)
+        live.noteLayoutRefresh(
+            snapshot([
+                makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: other),
+                makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 3)
+            ]),
+            now: refreshedAt
+        )
+        let replaced = live.agents.first { $0.id.raw == "wA:p1" }
+        #expect(replaced?.enteredAt == refreshedAt)
+        #expect(replaced?.verdict.isProcessGone == false)
+        #expect(live.agents.first { $0.id.raw == "wA:p2" }?.enteredAt == started)
+
+        live.apply(
+            .paneMoved(
+                previousPaneId: "wA:p1",
+                pane: makeDwellAgentInfo(
+                    paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                    agentStatus: "blocked", stateChangeSeq: 0, session: other
+                ),
+                createdWorkspaceLabel: nil,
+                createdTabLabel: nil
+            ),
+            now: moveAt
+        )
+        let moved = live.agents.first { $0.id.raw == "wB:p4" }
+        #expect(moved?.enteredAt == refreshedAt)
+        #expect(moved?.verdict.isProcessGone == false)
+        #expect(live.agents.first { $0.id.raw == "wA:p2" }?.enteredAt == started)
+    }
+
+    @Test("The first session value on a pane keeps the dwell and the crash")
+    func firstSessionKeepsTheEpisode() {
+        let named = HerdrSnapshot.AgentSession(source: "agent", agent: "claude", kind: "session", value: "abc")
+        let first = snapshot([
+            makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5)
+        ])
+        var rows = first.displayAgents(now: started)
+        rows[0].verdict = .processGone(lastLine: "zsh (pid 1)")
+        var live = HerdLiveTable(herd: first, agents: rows)
+        live.noteLayoutRefresh(
+            snapshot([
+                makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: named)
+            ]),
+            now: refreshedAt
+        )
+        let row = live.agents.first { $0.id.raw == "wA:p1" }
+        #expect(row?.enteredAt == started)
+        #expect(row?.verdict == .processGone(lastLine: "zsh (pid 1)"))
+    }
+
+    @Test("pane_updated that names a new session opens one dwell, and the next copy does not")
+    func paneUpdatedSessionOpensOneEpisode() {
+        let same = HerdrSnapshot.AgentSession(source: "agent", agent: "claude", kind: "session", value: "abc")
+        let other = HerdrSnapshot.AgentSession(source: "agent", agent: "claude", kind: "session", value: "other")
+        let first = snapshot([
+            makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: same)
+        ])
+        var rows = first.displayAgents(now: started)
+        rows[0].verdict = .processGone(lastLine: "zsh (pid 1)")
+        var live = HerdLiveTable(herd: first, agents: rows)
+        live.apply(
+            .paneUpdated(makeDwellAgentInfo(
+                paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0, session: other
+            )),
+            now: moveAt
+        )
+        let opened = live.agents.first { $0.id.raw == "wA:p1" }
+        #expect(opened?.enteredAt == moveAt)
+        #expect(opened?.verdict.isProcessGone == false)
+
+        let later = Date(timeIntervalSince1970: 9_800)
+        live.apply(
+            .paneUpdated(makeDwellAgentInfo(
+                paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0, session: other
+            )),
+            now: later
+        )
+        #expect(live.agents.first { $0.id.raw == "wA:p1" }?.enteredAt == moveAt)
+
+        let omitted = Date(timeIntervalSince1970: 9_900)
+        var quiet = HerdLiveTable(herd: first, agents: rows)
+        quiet.apply(
+            .paneUpdated(makeDwellAgentInfo(
+                paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0
+            )),
+            now: omitted
+        )
+        let kept = quiet.agents.first { $0.id.raw == "wA:p1" }
+        #expect(kept?.enteredAt == started)
+        #expect(kept?.verdict == .processGone(lastLine: "zsh (pid 1)"))
     }
 }

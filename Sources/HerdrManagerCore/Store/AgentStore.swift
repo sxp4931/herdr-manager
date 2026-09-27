@@ -4,9 +4,10 @@ import Observation
 // MARK: - AgentStatusTransition
 
 /// A status change `AgentStore.applyEvent` or `applyHerdSnapshot`
-/// accepted. Notifications and diagnosis react to this, not to the raw
+/// accepted, or the same status opened again because the session occupant
+/// changed. Notifications and diagnosis react to this, not to the raw
 /// event: the store drops stale and untracked-pane events, and those must
-/// not notify either.
+/// not notify either. `from` equals `to` only for that occupant change.
 public struct AgentStatusTransition: Equatable, Sendable {
     public let agentId: AgentID
     /// Nil when the event or snapshot introduced a pane the store was not
@@ -269,6 +270,10 @@ public final class AgentStore {
         var newAgents: [AgentID: Agent] = [:]
         var transitions: [AgentStatusTransition] = []
         var listed: Set<AgentID> = []
+        /// Rows this snapshot was not allowed to replace. Their session
+        /// stays too: remembering the rejected list's occupant would make
+        /// the next read look like a new person and open the episode again.
+        var heldRows: Set<AgentID> = []
         let basesAtStart = paneBasis
         // The request socket and the event socket are independent. A poll
         // captured after a cross-workspace move can be applied before
@@ -313,6 +318,7 @@ public final class AgentStore {
                     if let stored {
                         newAgents[agentId] = stored
                     }
+                    heldRows.insert(agentId)
                     if requestedAtEpoch == nil {
                         paneBasis[agentId] = PaneBasis(
                             epoch: priorBasis.epoch,
@@ -346,11 +352,20 @@ public final class AgentStore {
             // that snapshot has landed, a later seq bump is a new dwell.
             let seqUnchanged = existing?.stateChangeSeq == info.stateChangeSeq
             let statusUnchanged = existing?.status == status
+            // A different session in this same pane is a different occupant,
+            // even at the same status and seq. A missing session is not:
+            // the field arrives late, and a seq-less event leaves it off.
+            // The prior row is a continuation of one session, so it does
+            // not count as the occupant this id already had.
+            let occupantReplaced = stored != nil && SessionIdentity.replaced(
+                stored: sessionByPane[agentId],
+                incoming: info.sessionIdentity
+            )
             // `continuesEpisode` belongs to an event on *this* id. A row
             // carried from another pane already has its seq on this poll;
             // borrowing the new id's flag would keep the mover's dwell
             // across a seq change that belongs to someone who left.
-            let sameEpisode = existing != nil && statusUnchanged
+            let sameEpisode = !occupantReplaced && existing != nil && statusUnchanged
                 && (seqUnchanged || (prior == nil && priorBasis?.continuesEpisode == true))
             let enteredAt = sameEpisode ? existing!.enteredAt : Date()
 
@@ -396,7 +411,11 @@ public final class AgentStore {
                 continued.insert(prior.id)
             }
             if existing != nil || hasAppliedHerd,
-               let transition = Self.transition(from: existing?.status, to: agent) {
+               let transition = Self.transition(
+                   from: existing?.status,
+                   to: agent,
+                   occupantChanged: occupantReplaced
+               ) {
                 transitions.append(transition)
             }
         }
@@ -417,6 +436,7 @@ public final class AgentStore {
                 if let existing = agents[agentId] {
                     newAgents[agentId] = existing
                 }
+                heldRows.insert(agentId)
                 if requestedAtEpoch == nil {
                     paneBasis[agentId] = PaneBasis(
                         epoch: priorBasis.epoch,
@@ -439,7 +459,7 @@ public final class AgentStore {
         if newAgents != agents {
             agents = newAgents
         }
-        rememberSessions(from: snapshot, keptIds: newAgents.keys)
+        rememberSessions(from: snapshot, keptIds: newAgents.keys, holding: heldRows)
         return transitions
     }
 
@@ -509,7 +529,15 @@ public final class AgentStore {
     /// later move cannot carry that occupant onto the wrong row. A pane
     /// held over from an earlier event is not in this list; its identity
     /// stays until a list names the pane.
-    private func rememberSessions(from snapshot: HerdSnapshot, keptIds: some Sequence<AgentID>) {
+    /// `holding` is the panes whose row this snapshot was not allowed to
+    /// replace. The list still names whoever was there when it was captured,
+    /// and adopting that session makes the occupant the event just stored
+    /// look replaced on the next read.
+    private func rememberSessions(
+        from snapshot: HerdSnapshot,
+        keptIds: some Sequence<AgentID>,
+        holding: Set<AgentID> = []
+    ) {
         var incoming: [AgentID: String] = [:]
         var listed: Set<AgentID> = []
         for info in snapshot.agents {
@@ -522,7 +550,9 @@ public final class AgentStore {
         }
         var next: [AgentID: String] = [:]
         for id in keptIds {
-            if let session = incoming[id] {
+            if holding.contains(id), let kept = sessionByPane[id] {
+                next[id] = kept
+            } else if let session = incoming[id] {
                 next[id] = session
             } else if !listed.contains(id), let kept = sessionByPane[id] {
                 next[id] = kept
@@ -645,14 +675,20 @@ public final class AgentStore {
             // `agent.list` does — see applyHerdSnapshot), so a real seq of 0
             // means "not provided here"; fall back to comparing agent_status
             // so a genuine transition still resets `enteredAt` in between
-            // periodic `agent.list` resyncs.
+            // periodic `agent.list` resyncs. A session that arrives on the
+            // event and differs from the one the row has is a new occupant
+            // even when the status string did not move.
+            let occupantReplaced = existing != nil && SessionIdentity.replaced(
+                stored: sessionByPane[agentId],
+                incoming: info.sessionIdentity
+            )
             let seqChanged = seqIsMeaningful && existing?.stateChangeSeq != info.stateChangeSeq
             let statusChanged = existing?.status != status
-            let isNewState = existing == nil || seqChanged || statusChanged
+            let isNewState = existing == nil || seqChanged || statusChanged || occupantReplaced
 
             let enteredAt = isNewState ? Date() : existing!.enteredAt
             let verdict = isNewState ? Self.verdict(for: status) : existing!.verdict
-            if statusChanged {
+            if statusChanged || occupantReplaced {
                 noteEventChange(
                     for: agentId,
                     seqFloor: seqIsMeaningful
@@ -692,7 +728,11 @@ public final class AgentStore {
             )
             agents[agentId] = updated
             carrySession(of: info, from: agentId, to: agentId)
-            return Self.transition(from: existing?.status, to: updated)
+            return Self.transition(
+                from: existing?.status,
+                to: updated,
+                occupantChanged: occupantReplaced
+            )
 
         case .paneFocused:
             // Focus changes don't affect dwell/verdict state, and `Agent`
@@ -780,9 +820,18 @@ public final class AgentStore {
         } else {
             status = AgentStatus(rawValue: info.agentStatus) ?? .unknown
         }
+        // The poll may already have published the new id and dropped the
+        // session off the old one. Either id can still be holding it.
+        let storedSession = sessionByPane[previousId]
+            ?? (previousId == newId ? nil : sessionByPane[newId])
+        let occupantReplaced = existing != nil && SessionIdentity.replaced(
+            stored: storedSession,
+            incoming: info.sessionIdentity
+        )
         let statusChanged = existing?.status != status
-        let enteredAt = (existing == nil || statusChanged) ? Date() : existing!.enteredAt
-        let verdict = (existing == nil || statusChanged) ? Self.verdict(for: status) : existing!.verdict
+        let opensEpisode = existing == nil || statusChanged || occupantReplaced
+        let enteredAt = opensEpisode ? Date() : existing!.enteredAt
+        let verdict = opensEpisode ? Self.verdict(for: status) : existing!.verdict
         let stateChangeSeq: UInt64
         if !seqIsMeaningful, let existing {
             stateChangeSeq = existing.stateChangeSeq
@@ -843,9 +892,13 @@ public final class AgentStore {
             from: previousId,
             to: newId,
             seqFloor: Self.seq(after: stateChangeSeq),
-            continuesEpisode: statusChanged || carriedEpisode
+            continuesEpisode: statusChanged || occupantReplaced || carriedEpisode
         )
-        return Self.transition(from: existing?.status, to: updated)
+        return Self.transition(
+            from: existing?.status,
+            to: updated,
+            occupantChanged: occupantReplaced
+        )
     }
 
     /// Remember a move. The previous id is a tombstone so a list captured
@@ -901,8 +954,12 @@ public final class AgentStore {
         seq == .max ? seq : seq + 1
     }
 
-    private static func transition(from previous: AgentStatus?, to agent: Agent) -> AgentStatusTransition? {
-        guard previous != agent.status else { return nil }
+    private static func transition(
+        from previous: AgentStatus?,
+        to agent: Agent,
+        occupantChanged: Bool = false
+    ) -> AgentStatusTransition? {
+        guard occupantChanged || previous != agent.status else { return nil }
         return AgentStatusTransition(
             agentId: agent.id,
             from: previous,
@@ -972,6 +1029,16 @@ public final class AgentStore {
         let nonIdle = agents.values
             .filter { $0.status != .idle }
             .sorted { first.contains($0.id) && !first.contains($1.id) }
+        // Captured with the copies above, before any await. A session that
+        // arrives while explain is in flight is still this occupant. A
+        // different one is not, and the verdict was read from the pane the
+        // old session occupied.
+        var sessionAtStart: [AgentID: String] = [:]
+        for agent in nonIdle {
+            if let session = sessionByPane[agent.id] {
+                sessionAtStart[agent.id] = session
+            }
+        }
 
         // Snapshot per-agent thresholds off the actor before the loop so we
         // don't hop into SettingsStore on every iteration.
@@ -1012,7 +1079,11 @@ public final class AgentStore {
             // does not get a quiet alert.
             if var current = agents[agent.id],
                current.status == agent.status,
-               current.stateChangeSeq == agent.stateChangeSeq {
+               current.stateChangeSeq == agent.stateChangeSeq,
+               !SessionIdentity.replaced(
+                   stored: sessionAtStart[agent.id],
+                   incoming: sessionByPane[agent.id]
+               ) {
                 current.verdict = Self.silenceOnCurrentClock(
                     verdict,
                     agent: current,
