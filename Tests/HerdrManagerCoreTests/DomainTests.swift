@@ -209,6 +209,113 @@ struct SecretRedactorTests {
         #expect(twice.redactedText == once.redactedText)
         #expect(twice.redactionCount == 0)
     }
+
+    @Test("Redacts a quoted JSON assignment the env pattern used to skip")
+    func redactsQuotedJSONAssignment() {
+        let redactor = SecretRedactor()
+        let once = redactor.redact(
+            #"{"api_key": "supersecretvalue", "token": "anothersecretvalue"}"#
+        )
+        #expect(once.redactedText == #"{"api_key=[REDACTED]", "token=[REDACTED]"}"#)
+        #expect(once.redactionCount == 2)
+        #expect(!once.redactedText.contains("supersecretvalue"))
+        #expect(!once.redactedText.contains("anothersecretvalue"))
+        let twice = redactor.redact(once.redactedText)
+        #expect(twice.redactedText == once.redactedText)
+        #expect(twice.redactionCount == 0)
+
+        // No space, single quotes, a space before the colon, and a line
+        // break before the value are the same assignment.
+        #expect(
+            redactor.redact(#"{"api_key":"supersecretvalue"}"#).redactedText
+                == #"{"api_key=[REDACTED]"}"#
+        )
+        #expect(
+            redactor.redact("{'api_key': 'supersecretvalue'}").redactedText
+                == "{'api_key=[REDACTED]'}"
+        )
+        #expect(
+            redactor.redact(#""api_key" : "supersecretvalue""#).redactedText
+                == #""api_key=[REDACTED]""#
+        )
+        #expect(
+            redactor.redact("\"api_key\":\n  \"supersecretvalue\"").redactedText
+                == #""api_key=[REDACTED]""#
+        )
+        #expect(
+            redactor.redact("\"api_key\":\r\n  \"supersecretvalue\"").redactedText
+                == #""api_key=[REDACTED]""#
+        )
+        // The closing quote stays, which is what keeps a second pass from
+        // treating the placeholder as a new value.
+        #expect(redactor.redact("token=\"hunter2hunter2\"").redactedText == "token=[REDACTED]\"")
+        #expect(redactor.redact("token='hunter2hunter2'").redactedText == "token=[REDACTED]'")
+    }
+
+    @Test("A quoted passphrase keeps its spaces and apostrophes")
+    func redactsQuotedPassphrase() {
+        let redactor = SecretRedactor()
+        let phrase = "correct horse's battery staple"
+        let once = redactor.redact(#"{"password": "\#(phrase)"}"#)
+        #expect(once.redactedText == #"{"password=[REDACTED]"}"#)
+        #expect(once.redactionCount == 1)
+        #expect(!once.redactedText.contains("horse"))
+        let twice = redactor.redact(once.redactedText)
+        #expect(twice.redactedText == once.redactedText)
+        #expect(twice.redactionCount == 0)
+
+        #expect(
+            redactor.redact("password=\"\(phrase)\"").redactedText
+                == "password=[REDACTED]\""
+        )
+        #expect(
+            redactor.redact("{'password': 'correct horse battery staple'}").redactedText
+                == "{'password=[REDACTED]'}"
+        )
+        // The keyword is a suffix, so the prefix stays on the label.
+        #expect(
+            redactor.redact(
+                #"{"access_token": "supersecretvalue", "client_secret": "anothersecretvalue"}"#
+            ).redactedText
+                == #"{"access_token=[REDACTED]", "client_secret=[REDACTED]"}"#
+        )
+        #expect(
+            redactor.redact(
+                #"{"apiKey": "supersecretvalue", "api-key": "anothersecretvalue"}"#
+            ).redactedText
+                == #"{"apiKey=[REDACTED]", "api-key=[REDACTED]"}"#
+        )
+    }
+
+    @Test("A recognized key inside JSON keeps its own label and counts once")
+    func recognizedKeyInsideJSONCountsOnce() {
+        let redactor = SecretRedactor()
+        let key = "xai-abcdefghijklmnopqrstuvwxyz0123456789"
+        let once = redactor.redact(
+            "{\"api_key\": \"\(key)\", \"token\": \"supersecretvalue\"}"
+        )
+        #expect(once.redactedText == #"{"api_key": "xai-[REDACTED]", "token=[REDACTED]"}"#)
+        #expect(once.redactionCount == 2)
+        #expect(!once.redactedText.contains("abcdefghijklmnopqrstuvwxyz0123456789"))
+        #expect(!once.redactedText.contains("supersecretvalue"))
+        let twice = redactor.redact(once.redactedText)
+        #expect(twice.redactedText == once.redactedText)
+        #expect(twice.redactionCount == 0)
+    }
+
+    @Test("Ordinary JSON and a short quoted value stay")
+    func leavesOrdinaryJSON() {
+        let redactor = SecretRedactor()
+        let clean = #"{"name": "claude", "status": "working", "max_tokens": 123456789}"#
+        let cleanResult = redactor.redact(clean)
+        #expect(cleanResult.redactionCount == 0)
+        #expect(cleanResult.redactedText == clean)
+        #expect(redactor.redact(#""token": "hunter2""#).redactedText == #""token": "hunter2""#)
+        #expect(redactor.redact(#""token": "1234567""#).redactedText == #""token": "1234567""#)
+        #expect(redactor.redact(#""token": "12345678""#).redactedText == #""token=[REDACTED]""#)
+        #expect(redactor.redact(#""token": "[REDACTED]""#).redactionCount == 0)
+        #expect(redactor.redact("The token is not a secret.").redactionCount == 0)
+    }
 }
 
 // MARK: - DwellTracker Tests
