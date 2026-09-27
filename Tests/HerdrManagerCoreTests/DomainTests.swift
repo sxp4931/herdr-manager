@@ -791,6 +791,83 @@ struct SecretRedactorTests {
         #expect(!far.redactedText.contains("host/repo"))
     }
 
+    @Test("A bare GitLab token is redacted once and keeps its prefix")
+    func redactsGitLabTokens() {
+        let redactor = SecretRedactor()
+        let body = "abcdefghij" + "klmnopqrstuvwx"
+        let shortBody = "abcdefghij" + "klmnopqrs"
+        func token(_ prefix: String) -> String { prefix + body }
+
+        let pat = token("gl" + "pat-")
+        let bare = redactor.redact("cloned with \(pat)")
+        #expect(bare.redactedText == "cloned with glpat-[REDACTED]")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains(body))
+        let bareAgain = redactor.redact(bare.redactedText)
+        #expect(bareAgain.redactedText == bare.redactedText)
+        #expect(bareAgain.redactionCount == 0)
+
+        // The assignment and the JSON key already name `token`. The
+        // prefix stays, and the placeholder is not a second secret.
+        let assigned = redactor.redact("GITLAB_TOKEN=\(pat)")
+        #expect(assigned.redactedText == "GITLAB_TOKEN=glpat-[REDACTED]")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        let quoted = redactor.redact(#"{"token": "\#(pat)"}"#)
+        #expect(quoted.redactedText == #"{"token": "glpat-[REDACTED]"}"#)
+        #expect(quoted.redactionCount == 1)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        // The user and the host stay. The CI username ends in `token`,
+        // which is an assignment keyword; the host still stays.
+        let remote = redactor.redact("https://oauth2:\(pat)@gitlab.com/group/repo.git")
+        #expect(remote.redactedText == "https://oauth2:glpat-[REDACTED]@gitlab.com/group/repo.git")
+        #expect(remote.redactionCount == 1)
+        let remoteAgain = redactor.redact(remote.redactedText)
+        #expect(remoteAgain.redactionCount == 0)
+        let job = token("gl" + "cbt-")
+        let ci = redactor.redact("https://gitlab-ci-token:\(job)@gitlab.com/group/repo.git")
+        #expect(ci.redactedText == "https://gitlab-ci-token:glcbt-[REDACTED]@gitlab.com/group/repo.git")
+        #expect(ci.redactionCount == 1)
+        #expect(ci.redactedText.contains("gitlab.com/group/repo.git"))
+
+        let prefixes = [
+            "gldt-", "glrtr-", "glrt-", "glptt-", "gloas-", "glagent-",
+            "glsoat-", "glffct-", "glimt-", "glft-", "gltok-"
+        ]
+        let line = prefixes.map { token($0) }.joined(separator: " ")
+        let many = redactor.redact(line)
+        #expect(many.redactionCount == prefixes.count)
+        #expect(many.redactedText == prefixes.map { $0 + "[REDACTED]" }.joined(separator: " "))
+        #expect(!many.redactedText.contains(body))
+        let manyAgain = redactor.redact(many.redactedText)
+        #expect(manyAgain.redactedText == many.redactedText)
+        #expect(manyAgain.redactionCount == 0)
+
+        // `glrtr-` is the registration token, not `glrt-` plus a leftover.
+        let registration = token("gl" + "rtr-")
+        let runner = redactor.redact(registration)
+        #expect(runner.redactedText == "glrtr-[REDACTED]")
+        #expect(runner.redactionCount == 1)
+        #expect(!runner.redactedText.contains(body))
+
+        let short = ("gl" + "pat-") + shortBody
+        let keptShort = redactor.redact("prefix \(short) stays")
+        #expect(keptShort.redactedText == "prefix \(short) stays")
+        #expect(keptShort.redactionCount == 0)
+
+        let mention = redactor.redact("tokens start with glpat- on GitLab")
+        #expect(mention.redactedText == "tokens start with glpat- on GitLab")
+        #expect(mention.redactionCount == 0)
+
+        // A period ends the token. The sentence keeps it.
+        let sentence = redactor.redact("saw \(pat). next")
+        #expect(sentence.redactedText == "saw glpat-[REDACTED]. next")
+        #expect(sentence.redactionCount == 1)
+    }
+
     @Test("Redacts an HTTP Basic credential and leaves the header")
     func redactsAuthorizationBasic() {
         let redactor = SecretRedactor()

@@ -42,6 +42,27 @@ public final class SecretRedactor: Sendable {
             ("ghr_[A-Za-z0-9]{36}", "ghr_[REDACTED]"),
             // GitHub fine-grained PATs
             ("github_pat_[A-Za-z0-9_]{20,}", "github_pat_[REDACTED]"),
+            // GitLab credentials. The body is the secret. An assignment
+            // named token already hides `GITLAB_TOKEN=…`; a pane log and
+            // a CI trace print the token with no keyword. `glrt-` does
+            // not match a `glrtr-` registration token: the hyphen sits
+            // one character later. Twenty characters is the length
+            // GitLab's own detector uses. A shorter string stays. A `.`
+            // or `=` ends the match: those are not in this alphabet, and
+            // a period is how a sentence ends.
+            ("glpat-[A-Za-z0-9_-]{20,}", "glpat-[REDACTED]"),
+            ("gldt-[A-Za-z0-9_-]{20,}", "gldt-[REDACTED]"),
+            ("glrtr-[A-Za-z0-9_-]{20,}", "glrtr-[REDACTED]"),
+            ("glrt-[A-Za-z0-9_-]{20,}", "glrt-[REDACTED]"),
+            ("glcbt-[A-Za-z0-9_-]{20,}", "glcbt-[REDACTED]"),
+            ("glptt-[A-Za-z0-9_-]{20,}", "glptt-[REDACTED]"),
+            ("gloas-[A-Za-z0-9_-]{20,}", "gloas-[REDACTED]"),
+            ("glagent-[A-Za-z0-9_-]{20,}", "glagent-[REDACTED]"),
+            ("glsoat-[A-Za-z0-9_-]{20,}", "glsoat-[REDACTED]"),
+            ("glffct-[A-Za-z0-9_-]{20,}", "glffct-[REDACTED]"),
+            ("glimt-[A-Za-z0-9_-]{20,}", "glimt-[REDACTED]"),
+            ("glft-[A-Za-z0-9_-]{20,}", "glft-[REDACTED]"),
+            ("gltok-[A-Za-z0-9_-]{20,}", "gltok-[REDACTED]"),
             // xAI API keys
             ("xai-[A-Za-z0-9]{20,}", "xai-[REDACTED]"),
             // Slack bot / user / app tokens
