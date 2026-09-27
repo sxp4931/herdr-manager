@@ -521,19 +521,13 @@ actor MCPServer {
                            agent.id.workspaceId.lowercased().contains(workspace.lowercased())
                 }
             }
-            if let query = arguments["query"] as? String, !query.isEmpty {
-                let needle = query.lowercased()
-                agentList = agentList.filter { agent in
-                    [
-                        agent.id.raw,
-                        agent.name,
-                        agent.displayName,
-                        agent.workspaceName,
-                        agent.tabName,
-                        agent.cwd,
-                        HerdReport.kindText(agent.kind)
-                    ].contains { $0.lowercased().contains(needle) }
-                }
+            // Same fields as inspect, tail, and diagnose. The collapsed
+            // row name hid a pane label or a terminal title those tools
+            // still found, and the session kind this list prints did not
+            // resolve there. A blank query is not a filter.
+            if let query = arguments["query"] as? String,
+               let ids = herd.paneIds(matchingQuery: query) {
+                agentList = agentList.filter { ids.contains($0.id.raw) }
             }
 
             let text = HerdReport.agentList(
@@ -2256,7 +2250,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "agent.list",
-            "description": "List all agents with their current status. The ID column is the agent_id other tools accept, in workspace:pane form (for example w5:p2), not the bare pane suffix. Optionally filter by status or workspace.",
+            "description": "List all agents with their current status. The ID column is the agent_id other tools accept, in workspace:pane form (for example w5:p2), not the bare pane suffix. Optionally filter by status, workspace, or the same query text agent.inspect accepts.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -2271,7 +2265,7 @@ actor MCPServer {
                     ],
                     "query": [
                         "type": "string",
-                        "description": "Filter by human-facing agent title/name, kind, workspace, tab, cwd, or pane ID"
+                        "description": "Substring match on the same text as agent.inspect: title, rename, pane label, terminal title, detected or session kind, workspace, tab, directory, or pane id. A blank query does not filter."
                     ]
                 ] as [String: Any]
             ] as [String: Any]
@@ -2288,7 +2282,7 @@ actor MCPServer {
                     ],
                     "query": [
                         "type": "string",
-                        "description": "Human-facing title/name, workspace, tab, cwd, kind, or pane ID; must match exactly one agent"
+                        "description": "Same text as agent.list's query (title, rename, pane label, terminal title, kind, workspace, tab, directory, or pane id); must match exactly one agent"
                     ]
                 ] as [String: Any]
             ] as [String: Any]
@@ -2305,7 +2299,7 @@ actor MCPServer {
                     ],
                     "query": [
                         "type": "string",
-                        "description": "Human-facing title/name, workspace, tab, cwd, kind, or pane ID; must match exactly one agent"
+                        "description": "Same text as agent.list's query (title, rename, pane label, terminal title, kind, workspace, tab, directory, or pane id); must match exactly one agent"
                     ],
                     "lines": [
                         "type": "integer",
@@ -2333,7 +2327,7 @@ actor MCPServer {
                     ],
                     "query": [
                         "type": "string",
-                        "description": "Human-facing title/name, workspace, tab, cwd, kind, or pane ID; must match exactly one agent"
+                        "description": "Same text as agent.list's query (title, rename, pane label, terminal title, kind, workspace, tab, directory, or pane id); must match exactly one agent"
                     ]
                 ] as [String: Any]
             ] as [String: Any]

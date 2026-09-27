@@ -144,12 +144,92 @@ struct HerdResolveTests {
         #expect(pane(named.resolveAgent(agentId: nil, query: "api")) == "w1:p1")
     }
 
+    @Test("A list query matches the fields inspect uses, including a name the row does not show")
+    func listQueryMatchesInspectFields() {
+        let claude = info(
+            pane: "w1:p1",
+            workspace: "w1",
+            title: "Review",
+            agent: "claude",
+            displayAgent: "Reviewer",
+            name: "renamed",
+            terminalTitle: "Action Required",
+            session: HerdrSnapshot.AgentSession(
+                source: "agent", agent: "OpenCode", kind: "session", value: "sess-1"
+            ),
+            cwd: "/hidden",
+            foregroundCwd: "/work"
+        )
+        let other = info(pane: "w2:p1", workspace: "w2", title: "Build", agent: "codex")
+        let herd = snapshot([claude, other], paneLabels: ["w1:p1": "api"])
+
+        #expect(pane(herd.resolveAgent(agentId: nil, query: "api")) == "w1:p1")
+        #expect(pane(herd.resolveAgent(agentId: nil, query: "  API  ")) == "w1:p1")
+        #expect(pane(herd.resolveAgent(agentId: nil, query: "Action Required")) == "w1:p1")
+        #expect(pane(herd.resolveAgent(agentId: nil, query: "Reviewer")) == "w1:p1")
+        #expect(pane(herd.resolveAgent(agentId: nil, query: "renamed")) == "w1:p1")
+        #expect(pane(herd.resolveAgent(agentId: nil, query: "OpenCode")) == "w1:p1")
+        #expect(pane(herd.resolveAgent(agentId: nil, query: "/work")) == "w1:p1")
+        #expect(herd.resolveAgent(agentId: nil, query: "/hidden") == .failure(
+            "No agent matches query '/hidden'"
+        ))
+        // The Kind column is the session agent. It does not contain the
+        // detected kind, and the detected kind does not contain it.
+        #expect(herd.paneIds(matchingQuery: "OpenCode") == Optional(Set(["w1:p1"])))
+        #expect(herd.paneIds(matchingQuery: "opencode") == Optional(Set(["w1:p1"])))
+        #expect(herd.paneIds(matchingQuery: "claude") == Optional(Set(["w1:p1"])))
+        #expect(herd.paneIds(matchingQuery: "codex") == Optional(Set(["w2:p1"])))
+        #expect(herd.paneIds(matchingQuery: "api") == Optional(Set(["w1:p1"])))
+        #expect(herd.paneIds(matchingQuery: "  API  ") == Optional(Set(["w1:p1"])))
+        #expect(herd.paneIds(matchingQuery: "  ") == nil)
+        #expect(herd.paneIds(matchingQuery: "") == nil)
+    }
+
+    @Test("An ambiguous query names a covered pane label, and that label leads the terminal title")
+    func ambiguousQueryNamesPaneLabel() {
+        let covered = snapshot([
+            info(pane: "w1:p1", workspace: "w1", title: "Review", terminalTitle: "Bash"),
+            info(pane: "w2:p1", workspace: "w2", title: "Review", terminalTitle: "Bash")
+        ], paneLabels: ["w1:p1": "api", "w2:p1": "web"])
+        #expect(covered.resolveAgent(agentId: nil, query: "Review") == .failure(
+            "Query 'Review' is ambiguous. Matches: w1:p1 (Review, pane api, Proj / main); w2:p1 (Review, pane web, Other / side)"
+        ))
+        #expect(covered.paneIds(matchingQuery: "Review") == Optional(Set(["w1:p1", "w2:p1"])))
+
+        let labeled = snapshot([
+            info(pane: "w1:p1", workspace: "w1", title: "", terminalTitle: "Bash"),
+            info(pane: "w2:p1", workspace: "w2", title: "", terminalTitle: "Bash")
+        ], paneLabels: ["w1:p1": "api", "w2:p1": "web"])
+        #expect(labeled.resolveAgent(agentId: nil, query: "Bash") == .failure(
+            "Query 'Bash' is ambiguous. Matches: w1:p1 (api, Proj / main); w2:p1 (web, Other / side)"
+        ))
+        #expect(pane(labeled.resolveAgent(agentId: nil, query: "api")) == "w1:p1")
+    }
+
+    @Test("An ambiguous query says when more than eight panes match")
+    func ambiguousQueryCountsTheRest() {
+        let agents = (1...9).map { info(pane: "w1:p\($0)", workspace: "w1", title: "Review") }
+        let herd = snapshot(agents)
+        let result = herd.resolveAgent(agentId: nil, query: "Review")
+        guard case .failure(let message) = result else {
+            Issue.record("expected an ambiguous query")
+            return
+        }
+        #expect(message.contains("w1:p1 ("))
+        #expect(message.contains("w1:p8 ("))
+        #expect(!message.contains("w1:p9"))
+        #expect(message.hasSuffix("and 1 more"))
+    }
+
     private func pane(_ resolution: AgentResolution) -> String? {
         guard case .found(let info) = resolution else { return nil }
         return info.paneId
     }
 
-    private func snapshot(_ agents: [HerdrAgentInfo]) -> HerdSnapshot {
+    private func snapshot(
+        _ agents: [HerdrAgentInfo],
+        paneLabels: [String: String] = [:]
+    ) -> HerdSnapshot {
         HerdSnapshot(
             version: "0.7.5",
             protocol: 17,
@@ -158,7 +238,8 @@ struct HerdResolveTests {
             tabNames: ["w1:t1": "main", "w2:t1": "side", "other:t1": "odd"],
             focusedWorkspaceId: nil,
             focusedTabId: nil,
-            focusedPaneId: nil
+            focusedPaneId: nil,
+            paneLabels: paneLabels
         )
     }
 
@@ -166,23 +247,30 @@ struct HerdResolveTests {
         pane: String,
         workspace: String,
         tab: String? = nil,
-        title: String
+        title: String,
+        agent: String = "claude",
+        displayAgent: String? = nil,
+        name: String? = nil,
+        terminalTitle: String? = nil,
+        session: HerdrSnapshot.AgentSession? = nil,
+        cwd: String? = nil,
+        foregroundCwd: String? = nil
     ) -> HerdrAgentInfo {
         HerdrAgentInfo(
             paneId: pane,
             workspaceId: workspace,
             tabId: tab ?? "\(workspace):t1",
-            agent: "claude",
-            displayAgent: nil,
-            name: nil,
+            agent: agent,
+            displayAgent: displayAgent,
+            name: name,
             title: title,
-            terminalTitleStripped: title,
+            terminalTitleStripped: terminalTitle ?? title,
             agentStatus: "blocked",
-            agentSession: nil,
+            agentSession: session,
             focused: false,
             stateChangeSeq: 1,
-            cwd: nil,
-            foregroundCwd: nil,
+            cwd: cwd,
+            foregroundCwd: foregroundCwd,
             revision: nil,
             tokens: [:],
             stateLabels: [:],
