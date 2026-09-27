@@ -1369,6 +1369,88 @@ struct DiagnoserFinishedClassificationTests {
         #expect(finished == .running)
     }
 
+    @Test("Nushell, PowerShell, and csh are the shell a crashed agent leaves")
+    func configuredShellsAreProcessGone() async {
+        let working = Agent(id: AgentID("w1:p1"), kind: .claude, status: .working)
+        let diagnoser = Diagnoser()
+
+        func observe(_ processes: [ForegroundProcess]) async -> ProcessGoneObservation {
+            await diagnoser.observeProcessGone(
+                agent: working,
+                adapter: MockHerdrAdapter(processInfoResult: ProcessInfoResult(
+                    shellPid: 10,
+                    foregroundProcesses: processes
+                ))
+            )
+        }
+
+        // herdr's documented default_shell example. The comm is `nu`.
+        let nu = await observe([
+            ForegroundProcess(pid: 11, name: "nu", argv0: nil, cmdline: nil, cwd: nil)
+        ])
+        #expect(nu == .gone(lastLine: "nu (pid 11)"))
+
+        // Login argv0 when the comm is not itself a shell name, including case.
+        let login = await observe([
+            ForegroundProcess(pid: 12, name: "MainThread", argv0: "-Nu", cmdline: nil, cwd: nil)
+        ])
+        #expect(login == .gone(lastLine: "MainThread (pid 12)"))
+        let homebrew = await observe([
+            ForegroundProcess(
+                pid: 13, name: "MainThread", argv0: "/opt/homebrew/bin/nu", cmdline: nil, cwd: nil
+            )
+        ])
+        #expect(homebrew == .gone(lastLine: "MainThread (pid 13)"))
+
+        let powershell = await observe([
+            ForegroundProcess(
+                pid: 14,
+                name: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                argv0: nil,
+                cmdline: nil,
+                cwd: nil
+            )
+        ])
+        #expect(powershell == .gone(lastLine: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe (pid 14)"))
+        let pwsh = await observe([
+            ForegroundProcess(pid: 15, name: "Pwsh.EXE", argv0: nil, cmdline: nil, cwd: nil)
+        ])
+        #expect(pwsh == .gone(lastLine: "Pwsh.EXE (pid 15)"))
+        let csh = await observe([
+            ForegroundProcess(pid: 16, name: "csh", argv0: "-csh", cmdline: nil, cwd: nil)
+        ])
+        #expect(csh == .gone(lastLine: "csh (pid 16)"))
+
+        // A runtime beside the shell is the agent, not a crash. A name that
+        // only starts with `nu`, and tmux, are not this shell.
+        let mixed = await observe([
+            ForegroundProcess(pid: 11, name: "nu", argv0: nil, cmdline: nil, cwd: nil),
+            ForegroundProcess(pid: 17, name: "node", argv0: "/usr/local/bin/node", cmdline: nil, cwd: nil),
+        ])
+        #expect(mixed == .running)
+        let nush = await observe([
+            ForegroundProcess(pid: 18, name: "nush", argv0: nil, cmdline: nil, cwd: nil)
+        ])
+        #expect(nush == .running)
+        let tmux = await observe([
+            ForegroundProcess(pid: 19, name: "tmux", argv0: "tmux", cmdline: nil, cwd: nil)
+        ])
+        #expect(tmux == .running)
+
+        // Finished has returned to the shell on purpose. The name is not asked.
+        let done = Agent(id: AgentID("w1:p1"), kind: .claude, status: .done)
+        let finished = await diagnoser.observeProcessGone(
+            agent: done,
+            adapter: MockHerdrAdapter(processInfoResult: ProcessInfoResult(
+                shellPid: 10,
+                foregroundProcesses: [
+                    ForegroundProcess(pid: 11, name: "nu", argv0: nil, cmdline: nil, cwd: nil)
+                ]
+            ))
+        )
+        #expect(finished == .running)
+    }
+
     @Test("Blocked with a bare shell is process-gone, not awaiting input")
     func blockedBareShellIsGone() async {
         let agent = Agent(id: AgentID("w1:p1"), kind: .claude, status: .blocked)

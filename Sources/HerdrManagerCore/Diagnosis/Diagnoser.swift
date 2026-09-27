@@ -139,8 +139,9 @@ public actor Diagnoser {
 
             // Corroborate: only a bare shell in the foreground means the agent's
             // process group vanished. Anything else (a runtime hosting it) means
-            // the agent is still there.
-            let foregroundIsBareShell = procs.allSatisfy { Self.isShellProcessName($0.name) }
+            // the agent is still there. `name` and `argv0` are that one process;
+            // either one naming the shell is enough.
+            let foregroundIsBareShell = procs.allSatisfy { Self.isBareShell($0) }
             guard foregroundIsBareShell else { return .running }
 
             let lastLine = procs.last.map { "\($0.name) (pid \($0.pid))" }
@@ -318,14 +319,34 @@ public actor Diagnoser {
 
     // MARK: - Helpers
 
-    /// True when a foreground process name looks like a login/interactive shell.
-    /// Used to corroborate S3: a "gone" agent leaves a bare shell in the pane,
-    /// whereas a healthy agent leaves its runtime (node/bun/…) in the foreground.
+    /// True when this foreground process is the pane's own shell.
+    ///
+    /// herdr starts a pane with `$SHELL`, or with `[terminal] default_shell`.
+    /// The documented example of that setting is `nu`. PowerShell is `pwsh`
+    /// or `powershell`, including the `.exe` a remote pane reports. `csh` is
+    /// the shell beside `tcsh`. A login shell's argv0 is `-nu` or a path, and
+    /// the comm name can be the other spelling of the same binary, so either
+    /// field counts. A runtime (`node`, `tmux`) does not: the agent may still
+    /// be the program that name is running. One non-shell in the group keeps
+    /// the row alive.
+    private static func isBareShell(_ process: ForegroundProcess) -> Bool {
+        if isShellProcessName(process.name) { return true }
+        if let argv0 = process.argv0, isShellProcessName(argv0) { return true }
+        return false
+    }
+
     private static func isShellProcessName(_ name: String) -> Bool {
-        let base = name.split(separator: "/").last.map(String.init) ?? name
-        let n = base.hasPrefix("-") ? String(base.dropFirst()) : base
-        return ["zsh", "bash", "sh", "fish", "tcsh", "ksh", "dash", "login"]
-            .contains(n.lowercased())
+        let afterSlash = name.split(separator: "/").last.map(String.init) ?? name
+        let base = afterSlash.split(separator: "\\").last.map(String.init) ?? afterSlash
+        let stripped = base.hasPrefix("-") ? String(base.dropFirst()) : base
+        var normalized = stripped.lowercased()
+        if normalized.hasSuffix(".exe") {
+            normalized.removeLast(4)
+        }
+        return [
+            "zsh", "bash", "sh", "fish", "tcsh", "ksh", "dash", "csh",
+            "nu", "pwsh", "powershell", "login",
+        ].contains(normalized)
     }
 
     /// Silent threshold for an agent kind.
