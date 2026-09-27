@@ -1999,6 +1999,150 @@ struct SecretRedactorTests {
         #expect(dottedResult.redactionCount == 1)
         #expect(dottedResult.redactedText.contains("tailsecret"))
     }
+
+    @Test("A Hugging Face token and a RubyGems API key are redacted once and keep their prefix")
+    func redactsModelAndGemTokens() {
+        let redactor = SecretRedactor()
+        let hfBody = "abcdefghijklmnopqrstuvwxyzABCDEFGH"
+        #expect(hfBody.count == 34)
+        let hf = "hf_" + hfBody
+        let hfKept = "hf_[REDACTED]"
+        let orgBody = String(repeating: "a", count: 17) + String(repeating: "B", count: 17)
+        #expect(orgBody.count == 34)
+        let org = "api_org_" + orgBody
+        let orgKept = "api_org_[REDACTED]"
+        let gemBody = String(repeating: "cec9db93", count: 6)
+        #expect(gemBody.count == 48)
+        let gem = "rubygems_" + gemBody
+        let gemKept = "rubygems_[REDACTED]"
+
+        let bare = redactor.redact("downloaded with \(hf)")
+        #expect(bare.redactedText == "downloaded with \(hfKept)")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains(hfBody))
+        let bareAgain = redactor.redact(bare.redactedText)
+        #expect(bareAgain.redactedText == bare.redactedText)
+        #expect(bareAgain.redactionCount == 0)
+
+        // `HF_TOKEN` already ends in the assignment keyword. The prefix
+        // stays, and the placeholder is not a second secret.
+        let assigned = redactor.redact("HF_TOKEN=\(hf)")
+        #expect(assigned.redactedText == "HF_TOKEN=\(hfKept)")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        let quoted = redactor.redact(#"{"token": "\#(hf)"}"#)
+        #expect(quoted.redactedText == #"{"token": "\#(hfKept)"}"#)
+        #expect(quoted.redactionCount == 1)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+        let remote = redactor.redact("https://user:\(hf)@huggingface.co/org/model")
+        #expect(remote.redactedText == "https://user:\(hfKept)@huggingface.co/org/model")
+        #expect(remote.redactionCount == 1)
+        #expect(remote.redactedText.contains("huggingface.co/org/model"))
+        let remoteAgain = redactor.redact(remote.redactedText)
+        #expect(remoteAgain.redactionCount == 0)
+        let sentence = redactor.redact("saw \(hf). next")
+        #expect(sentence.redactedText == "saw \(hfKept). next")
+        #expect(sentence.redactionCount == 1)
+        let query = redactor.redact(hf + "?x=1")
+        #expect(query.redactedText == hfKept + "?x=1")
+        #expect(query.redactionCount == 1)
+        let noted = redactor.redact(hf + "-note")
+        #expect(noted.redactedText == hfKept + "-note")
+        #expect(noted.redactionCount == 1)
+        #expect(!noted.redactedText.contains(hfBody))
+
+        // `@` is still not the end of an ordinary assignment.
+        let leftover = redactor.redact("token=\(hf)@leftoversecret")
+        #expect(leftover.redactedText == "token=[REDACTED]")
+        #expect(leftover.redactionCount == 2)
+        #expect(!leftover.redactedText.contains("leftoversecret"))
+        #expect(!leftover.redactedText.contains(hfBody))
+
+        let orgBare = redactor.redact("org token \(org)")
+        #expect(orgBare.redactedText == "org token \(orgKept)")
+        #expect(orgBare.redactionCount == 1)
+        #expect(!orgBare.redactedText.contains(orgBody))
+        let orgAgain = redactor.redact(orgBare.redactedText)
+        #expect(orgAgain.redactionCount == 0)
+        let orgAssigned = redactor.redact("HF_ORG_TOKEN=\(org)")
+        #expect(orgAssigned.redactedText == "HF_ORG_TOKEN=\(orgKept)")
+        #expect(orgAssigned.redactionCount == 1)
+        let orgAssignedAgain = redactor.redact(orgAssigned.redactedText)
+        #expect(orgAssignedAgain.redactionCount == 0)
+        let orgJSON = redactor.redact(#"{"token": "\#(org)"}"#)
+        #expect(orgJSON.redactedText == #"{"token": "\#(orgKept)"}"#)
+        #expect(orgJSON.redactionCount == 1)
+
+        let pushed = redactor.redact("gem push \(gem)")
+        #expect(pushed.redactedText == "gem push \(gemKept)")
+        #expect(pushed.redactionCount == 1)
+        #expect(!pushed.redactedText.contains(gemBody))
+        let pushedAgain = redactor.redact(pushed.redactedText)
+        #expect(pushedAgain.redactedText == pushed.redactedText)
+        #expect(pushedAgain.redactionCount == 0)
+
+        // `GEM_HOST_API_KEY` and the credentials name end in `key`.
+        let gemEnv = redactor.redact("GEM_HOST_API_KEY=\(gem)")
+        #expect(gemEnv.redactedText == "GEM_HOST_API_KEY=\(gemKept)")
+        #expect(gemEnv.redactionCount == 1)
+        let gemEnvAgain = redactor.redact(gemEnv.redactedText)
+        #expect(gemEnvAgain.redactionCount == 0)
+        let creds = redactor.redact(":rubygems_api_key: \(gem)")
+        #expect(creds.redactedText == ":rubygems_api_key: \(gemKept)")
+        #expect(creds.redactionCount == 1)
+        let credsAgain = redactor.redact(creds.redactedText)
+        #expect(credsAgain.redactionCount == 0)
+        let gemJSON = redactor.redact(#"{"api_key": "\#(gem)"}"#)
+        #expect(gemJSON.redactedText == #"{"api_key": "\#(gemKept)"}"#)
+        #expect(gemJSON.redactionCount == 1)
+        let gemURL = redactor.redact("https://user:\(gem)@rubygems.org/api/v1/gems")
+        #expect(gemURL.redactedText == "https://user:\(gemKept)@rubygems.org/api/v1/gems")
+        #expect(gemURL.redactionCount == 1)
+        #expect(gemURL.redactedText.contains("rubygems.org/api/v1/gems"))
+        let gemURLAgain = redactor.redact(gemURL.redactedText)
+        #expect(gemURLAgain.redactionCount == 0)
+        let gemSentence = redactor.redact("saw \(gem). next")
+        #expect(gemSentence.redactedText == "saw \(gemKept). next")
+        #expect(gemSentence.redactionCount == 1)
+
+        let pair = redactor.redact("\(hf) \(org) \(gem)")
+        #expect(pair.redactedText == "\(hfKept) \(orgKept) \(gemKept)")
+        #expect(pair.redactionCount == 3)
+        let pairAgain = redactor.redact(pair.redactedText)
+        #expect(pairAgain.redactionCount == 0)
+
+        let kept = [
+            "tokens start with hf_ and api_org_ and rubygems_",
+            "hf_" + String(repeating: "a", count: 33),
+            "hf_" + String(repeating: "a", count: 35),
+            "hf_" + String(repeating: "a", count: 33) + "1",
+            "hf_" + hfBody + "1",
+            "HF_" + hfBody,
+            "x" + hf,
+            "_" + hf,
+            "api_org_" + String(repeating: "a", count: 33),
+            "api_org_" + String(repeating: "a", count: 35),
+            "api_org_" + orgBody + "9",
+            "API_ORG_" + orgBody,
+            "x" + org,
+            "rubygems_" + String(repeating: "ab", count: 16),
+            "rubygems_" + String(repeating: "ab", count: 24) + "c",
+            "rubygems_701243f217cdf23b1370c7b66b65ca97",
+            "rubygems_123456",
+            "rubygems_" + gemBody.uppercased(),
+            "RUBYGEMS_" + gemBody,
+            "x" + gem,
+            "_" + gem,
+            ":rubygems_api_key: short",
+        ]
+        for line in kept {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line.prefix(80))")
+            #expect(result.redactedText == line)
+        }
+    }
 }
 
 // MARK: - DwellTracker Tests

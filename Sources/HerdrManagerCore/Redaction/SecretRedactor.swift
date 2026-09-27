@@ -122,6 +122,42 @@ public final class SecretRedactor: Sendable {
                 "(?<![A-Za-z0-9_])pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,1000}(?![A-Za-z0-9_-])",
                 "pypi-[REDACTED]"
             ),
+            // Hugging Face user access tokens. The body is exactly 34
+            // letters: that is the shape GitHub secret scanning and
+            // gitleaks both accept, and a digit is not in it. An
+            // assignment named token already hides `HF_TOKEN=…`. A pane
+            // log and the CLI print the token with no keyword, and the
+            // token can read or write private models. A shorter body
+            // stays, and a longer one stays whole, so a tail is not
+            // left behind. A letter, digit, or underscore glued to the
+            // front is not the prefix. The prefix is the lowercase form
+            // Hugging Face issues. A digit in the body stays whole.
+            (
+                "(?<![A-Za-z0-9_])hf_[A-Za-z]{34}(?![A-Za-z0-9])",
+                "hf_[REDACTED]"
+            ),
+            // Hugging Face organization tokens. `api_org_` is the other
+            // credential from the same issuer, with the same 34-letter
+            // body. It is not an assignment name. The same boundaries
+            // apply, including a body that contains a digit.
+            (
+                "(?<![A-Za-z0-9_])api_org_[A-Za-z]{34}(?![A-Za-z0-9])",
+                "api_org_[REDACTED]"
+            ),
+            // RubyGems API keys. The generator is `rubygems_` plus
+            // `SecureRandom.hex(24)`, which is 48 lowercase hex
+            // characters, and that key can push gems. An assignment
+            // named key already hides `GEM_HOST_API_KEY` and
+            // `:rubygems_api_key:`. A credentials paste and `gem push`
+            // print the key in the open. A shorter body stays, and a
+            // longer one stays whole. A letter, digit, or underscore
+            // glued to the front is not the prefix. Uppercase hex is
+            // not what `SecureRandom.hex` writes. The 32-hex sample in
+            // the API guide is not this length.
+            (
+                "(?<![A-Za-z0-9_])rubygems_[a-f0-9]{48}(?![A-Za-z0-9])",
+                "rubygems_[REDACTED]"
+            ),
             // xAI API keys
             ("xai-[A-Za-z0-9]{20,}", "xai-[REDACTED]"),
             // Slack app-level tokens (`xapp-1-<app>-<id>-<secret>`). The
