@@ -1038,8 +1038,11 @@ actor MCPServer {
                     ))
 
                     let outcome = await sayWaitOutcome(paneId: current.paneId, decision: waitDecision)
+                    let resolvedField = ConfirmedPaneFollow.resolvedAgentField(
+                        current.paneId == agentIdStr ? nil : current.paneId
+                    )
                     return makeToolResult(
-                        "{\"sent\":true,\"actionId\":\"\(actionId)\",\(SayWait.outcomeSuffix(for: outcome))}"
+                        "{\"sent\":true,\"actionId\":\"\(actionId)\",\(SayWait.outcomeSuffix(for: outcome))\(resolvedField)}"
                     )
                 } else if finalState == .denied {
                     await journal.record(JournalEntry(
@@ -1134,7 +1137,7 @@ actor MCPServer {
                 postState: "sent", outcome: "executed"
             ))
 
-            let resolvedField = resolvedAgentId.map { ",\"resolvedAgentId\":\"\($0)\"" } ?? ""
+            let resolvedField = ConfirmedPaneFollow.resolvedAgentField(resolvedAgentId)
             let outcome = await sayWaitOutcome(paneId: confirmed.paneId, decision: waitDecision)
             return makeToolResult(
                 "{\"sent\":true,\"actionId\":\"\(actionId)\",\(SayWait.outcomeSuffix(for: outcome))\(resolvedField)}"
@@ -1299,7 +1302,12 @@ actor MCPServer {
                     caller: "mcp", preState: "status=\(paneInfo.agentStatus)",
                     postState: "interrupted", outcome: "executed"
                 ))
-                return makeToolResult("{\"sent\":true,\"actionId\":\"\(actionId)\",\"level\":\"\(level)\"}")
+                let resolvedField = ConfirmedPaneFollow.resolvedAgentField(
+                    current.paneId == agentIdStr ? nil : current.paneId
+                )
+                return makeToolResult(
+                    "{\"sent\":true,\"actionId\":\"\(actionId)\",\"level\":\"\(level)\"\(resolvedField)}"
+                )
             } else if finalState == .denied {
                 await journal.record(JournalEntry(
                     actionId: actionId, tool: "agent.interrupt",
@@ -1429,7 +1437,12 @@ actor MCPServer {
                     postState: "closed", outcome: "executed",
                     keepForever: true
                 ))
-                return makeToolResult("{\"closed\":true,\"actionId\":\"\(actionId)\"}")
+                let resolvedField = ConfirmedPaneFollow.resolvedAgentField(
+                    current.paneId == agentIdStr ? nil : current.paneId
+                )
+                return makeToolResult(
+                    "{\"closed\":true,\"actionId\":\"\(actionId)\"\(resolvedField)}"
+                )
             } else if finalState == .denied {
                 await journal.record(JournalEntry(
                     actionId: actionId, tool: "agent.stop",
@@ -2501,7 +2514,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "agent.say",
-            "description": "Send free-text prompt to an agent via agent.prompt (atomic, bracketed-paste aware). Auto-allowed when idle/done; requires confirmation when working/blocked. Max 2000 chars. Optional wait_for accepts \(SayWait.statusWords) only, and is refused before any text is sent when the status or timeout is not usable. outcome \(SayWait.waitFailedToken) means the text was already sent. outcome \(SayWait.enterUnconfirmedToken) means the text is already in the pane and Enter did not finish; do not send that text again.",
+            "description": "Send free-text prompt to an agent via agent.prompt (atomic, bracketed-paste aware). Auto-allowed when idle/done; requires confirmation when working/blocked. Max 2000 chars. Optional wait_for accepts \(SayWait.statusWords) only, and is refused before any text is sent when the status or timeout is not usable. outcome \(SayWait.waitFailedToken) means the text was already sent. outcome \(SayWait.enterUnconfirmedToken) means the text is already in the pane and Enter did not finish; do not send that text again. When the pane moved before the text was sent, resolvedAgentId is the pane that received it.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -2528,7 +2541,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "agent.interrupt",
-            "description": "Interrupt a running agent. escape sends Esc, sigint sends Ctrl+C. Always requires confirmation.",
+            "description": "Interrupt a running agent. escape sends Esc, sigint sends Ctrl+C. Always requires confirmation. When the pane moved before the keys were sent, resolvedAgentId is the pane that received them.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -2547,7 +2560,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "agent.stop",
-            "description": "Close an agent's pane. Always requires confirmation. Never accepts a list — one confirmation per agent.",
+            "description": "Close an agent's pane. Always requires confirmation. Never accepts a list — one confirmation per agent. When the pane moved before the close, resolvedAgentId is the pane that was closed.",
             "inputSchema": [
                 "type": "object",
                 "properties": [

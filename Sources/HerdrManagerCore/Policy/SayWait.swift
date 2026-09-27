@@ -126,9 +126,7 @@ public enum SayWait: Sendable {
     public static func enterUnconfirmedResult(actionId: String, resolvedAgentId: String?) -> String {
         var result = "{\"sent\":false,\"textInserted\":true,\"actionId\":\"\(actionId)\","
         result += outcomeSuffix(for: enterUnconfirmedToken)
-        if let resolvedAgentId {
-            result += ",\"resolvedAgentId\":\"\(resolvedAgentId)\""
-        }
+        result += ConfirmedPaneFollow.resolvedAgentField(resolvedAgentId)
         result += "}"
         return result
     }

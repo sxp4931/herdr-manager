@@ -122,4 +122,14 @@ struct SayWaitTests {
         #expect(moved.hasSuffix("}"))
         #expect(!moved.contains("waitNote"))
     }
+
+    @Test("Enter unconfirmed names a moved pane without breaking the JSON")
+    func enterUnconfirmedMovedPaneStaysJSON() throws {
+        let moved = SayWait.enterUnconfirmedResult(actionId: "A1", resolvedAgentId: "w\"2")
+        let object = try JSONSerialization.jsonObject(with: Data(moved.utf8)) as? [String: Any]
+        #expect(object?["sent"] as? Bool == false)
+        #expect(object?["textInserted"] as? Bool == true)
+        #expect(object?["resolvedAgentId"] as? String == "w\"2")
+        #expect(object?["outcome"] as? String == SayWait.enterUnconfirmedToken)
+    }
 }

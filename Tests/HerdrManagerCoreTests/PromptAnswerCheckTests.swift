@@ -756,6 +756,27 @@ struct ConfirmedPaneFollowTests {
             ) == .failure(.paneGone)
         )
     }
+
+    @Test("A moved pane is named, and a quote in that id stays inside the JSON string")
+    func resolvedAgentFieldStaysJSON() throws {
+        #expect(ConfirmedPaneFollow.resolvedAgentField(nil) == "")
+        #expect(ConfirmedPaneFollow.resolvedAgentField("") == "")
+        #expect(ConfirmedPaneFollow.resolvedAgentField("w2:p4") == ",\"resolvedAgentId\":\"w2:p4\"")
+
+        let quoted = "{\"sent\":true\(ConfirmedPaneFollow.resolvedAgentField("w\"2"))}"
+        let quotedObject = try JSONSerialization.jsonObject(with: Data(quoted.utf8)) as? [String: Any]
+        #expect(quotedObject?["sent"] as? Bool == true)
+        #expect(quotedObject?["resolvedAgentId"] as? String == "w\"2")
+
+        let slashed = "{\"closed\":true\(ConfirmedPaneFollow.resolvedAgentField("a\\b"))}"
+        let slashedObject = try JSONSerialization.jsonObject(with: Data(slashed.utf8)) as? [String: Any]
+        #expect(slashedObject?["resolvedAgentId"] as? String == "a\\b")
+
+        let broken = "{\"level\":\"escape\"\(ConfirmedPaneFollow.resolvedAgentField("w2\np4\u{0001}"))}"
+        let brokenObject = try JSONSerialization.jsonObject(with: Data(broken.utf8)) as? [String: Any]
+        #expect(brokenObject?["resolvedAgentId"] as? String == "w2\np4\u{0001}")
+        #expect(brokenObject?["level"] as? String == "escape")
+    }
 }
 
 @Suite("A gated say follows the session and stays idle or done")

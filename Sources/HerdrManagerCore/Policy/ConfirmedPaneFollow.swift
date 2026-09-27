@@ -77,6 +77,49 @@ public enum ConfirmedPaneFollow: Sendable {
         )
     }
 
+    /// JSON fragment for a tool result that followed a move.
+    ///
+    /// Empty when `resolved` is nil or empty. Callers pass nil when the
+    /// write stayed on the pane that was named. The approval wait is long
+    /// enough for a cross-workspace move, and the result is what the
+    /// caller reads next. Omitting the new id sends the follow-up at the
+    /// pane the agent left. A quote, backslash, or control character in
+    /// the id is escaped: the results are built by hand, and one of those
+    /// characters would end the object.
+    public static func resolvedAgentField(_ resolved: String?) -> String {
+        guard let resolved, !resolved.isEmpty else { return "" }
+        return ",\"resolvedAgentId\":\"\(jsonEscaped(resolved))\""
+    }
+
+    /// A value placed between JSON string quotes.
+    static func jsonEscaped(_ value: String) -> String {
+        var out = ""
+        out.reserveCapacity(value.count)
+        for scalar in value.unicodeScalars {
+            switch scalar.value {
+            case 0x5C:
+                out += "\\\\"
+            case 0x22:
+                out += "\\\""
+            case 0x0A:
+                out += "\\n"
+            case 0x0D:
+                out += "\\r"
+            case 0x09:
+                out += "\\t"
+            default:
+                if scalar.value < 0x20 {
+                    let hex = String(scalar.value, radix: 16)
+                    let pad = String(repeating: "0", count: max(0, 4 - hex.count))
+                    out += "\\u" + pad + hex
+                } else {
+                    out.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        return out
+    }
+
     /// The one other agent whose session identity is `sessionIdentity`.
     /// Zero matches and two matches both return nil: the caller must not
     /// pick an arbitrary pane.
