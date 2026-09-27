@@ -2184,6 +2184,114 @@ struct DiagnoserFinishedClassificationTests {
         #expect(helper == .gone(lastLine: "bash (pid 74)"))
     }
 
+    @Test("A symlink to an agent basename is not a crashed agent")
+    func symlinkToAgentBasenameIsNotProcessGone() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("herdr-agent-link-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        func place(_ name: String, body: String = "#!/bin/sh\n") throws -> URL {
+            let url = root.appendingPathComponent(name)
+            try Data(body.utf8).write(to: url)
+            return url
+        }
+        func link(named name: String, to target: URL) throws -> URL {
+            let url = root.appendingPathComponent(name)
+            try FileManager.default.createSymbolicLink(at: url, withDestinationURL: target)
+            return url
+        }
+
+        let cursor = try place("cursor-agent")
+        let cursorLink = try link(named: "agent", to: cursor)
+        let muse = try place("muse-bin-1.2.3")
+        let museLink = try link(named: "launcher", to: muse)
+        let spaced = try place("Kimi Code")
+        let spacedLink = try link(named: "tool", to: spaced)
+        let script = try place("claude.js", body: "")
+        let scriptLink = try link(named: "wrapper", to: script)
+        let notes = try place("notes.txt", body: "hello")
+        let notesLink = try link(named: "helper", to: notes)
+        // The target is an entrypoint herdr names. The link's own path is
+        // not, and canonicalizing only checks the target's basename.
+        let cli = root
+            .appendingPathComponent("node_modules")
+            .appendingPathComponent("@earendil-works")
+            .appendingPathComponent("pi-coding-agent")
+            .appendingPathComponent("dist")
+            .appendingPathComponent("cli.js")
+        try FileManager.default.createDirectory(
+            at: cli.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try Data().write(to: cli)
+        let cliLink = try link(named: "pi-shim", to: cli)
+
+        let working = Agent(id: AgentID("w1:p1"), kind: .custom("cursor"), status: .working)
+        let diagnoser = Diagnoser()
+        func observe(
+            _ argv: [String],
+            pid: Int32,
+            name: String
+        ) async -> ProcessGoneObservation {
+            await diagnoser.observeProcessGone(
+                agent: working,
+                adapter: MockHerdrAdapter(processInfoResult: ProcessInfoResult(
+                    shellPid: 10,
+                    foregroundProcesses: [
+                        ForegroundProcess(
+                            pid: pid, name: name, argv0: nil, cmdline: nil, cwd: nil,
+                            argv: argv
+                        )
+                    ]
+                ))
+            )
+        }
+
+        // herdr canonicalizes the script a `#!/bin/sh` wrapper is still
+        // running. The link name is not the agent; the target's is.
+        let shCursor = await observe(
+            ["/bin/sh", cursorLink.path], pid: 91, name: "sh"
+        )
+        #expect(shCursor == .running)
+        let museLaunch = await observe(
+            ["/bin/bash", museLink.path], pid: 92, name: "bash"
+        )
+        #expect(museLaunch == .running)
+        let spacedLaunch = await observe(
+            ["zsh", spacedLink.path], pid: 93, name: "zsh"
+        )
+        #expect(spacedLaunch == .running)
+        // One suffix herdr strips, after the link is resolved.
+        let suffix = await observe(
+            ["pwsh", "-File", scriptLink.path], pid: 94, name: "pwsh"
+        )
+        #expect(suffix == .running)
+
+        // The target's basename is not an agent. A package path that
+        // exists only after the link is followed is not re-checked:
+        // herdr canonicalizes the basename and leaves the package
+        // match on the path it was given.
+        let notesLaunch = await observe(
+            ["sh", notesLink.path], pid: 95, name: "sh"
+        )
+        #expect(notesLaunch == .gone(lastLine: "sh (pid 95)"))
+        let packageAfterLink = await observe(
+            ["sh", cliLink.path], pid: 96, name: "sh"
+        )
+        #expect(packageAfterLink == .gone(lastLine: "sh (pid 96)"))
+        // A relative path is not resolved against this process's directory.
+        let relative = await observe(
+            ["sh", "agent"], pid: 97, name: "sh"
+        )
+        #expect(relative == .gone(lastLine: "sh (pid 97)"))
+        let missing = await observe(
+            ["sh", root.appendingPathComponent("missing-helper").path],
+            pid: 98,
+            name: "sh"
+        )
+        #expect(missing == .gone(lastLine: "sh (pid 98)"))
+    }
+
     @Test("Blocked with a bare shell is process-gone, not awaiting input")
     func blockedBareShellIsGone() async {
         let agent = Agent(id: AgentID("w1:p1"), kind: .claude, status: .blocked)

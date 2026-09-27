@@ -372,8 +372,11 @@ public actor Diagnoser {
 /// path on those shells, so a later argument stays the prompt. A shell
 /// whose program is an npm entrypoint herdr names (`dist/cli.js` for Pi,
 /// omp, and Mastracode, `dist/index.js` for Qwen, `dist/main.mjs` for
-/// Kimi) is that agent. Any other `cli.js` stays the prompt. `cmd` is
-/// a shell only when an argument vector is present, so a payload that
+/// Kimi) is that agent. Any other `cli.js` stays the prompt. An absolute
+/// path whose own basename is not an agent is still that agent when the
+/// file is a symlink to one: herdr canonicalizes it, and a `#!/bin/sh`
+/// wrapper stays `sh` in the foreground with the link as its program.
+/// `cmd` is a shell only when an argument vector is present, so a payload that
 /// omits `argv` and `cmdline` does not start calling every `cmd.exe` a
 /// crash. One
 /// non-shell in the group keeps the row alive; the caller applies that.
@@ -817,16 +820,36 @@ private enum ShellForeground {
     private static func isKnownAgentProgram(_ token: String) -> Bool {
         let trimmed = trimQuotes(token).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !trimmed.hasPrefix("-") else { return false }
-        let base = agentBase(trimmed)
+        if isKnownAgentBasename(agentBase(trimmed)) { return true }
+        if isKnownPackageEntrypoint(trimmed) { return true }
+        return isCanonicalAgentBasename(trimmed)
+    }
+
+    /// Basename herdr's lookup accepts, including `muse-bin-<version>`.
+    private static func isKnownAgentBasename(_ base: String) -> Bool {
         if knownAgentPrograms.contains(base) { return true }
-        if base.hasPrefix("muse-bin-") {
-            let rest = base.dropFirst("muse-bin-".count)
-            if let scalar = rest.unicodeScalars.first,
-               scalar.value >= 48 && scalar.value <= 57 {
-                return true
-            }
-        }
-        return isKnownPackageEntrypoint(trimmed)
+        guard base.hasPrefix("muse-bin-") else { return false }
+        let rest = base.dropFirst("muse-bin-".count)
+        guard let scalar = rest.unicodeScalars.first else { return false }
+        return scalar.value >= 48 && scalar.value <= 57
+    }
+
+    /// Absolute path herdr would `canonicalize` before the basename check.
+    ///
+    /// The link's own name is not the agent (`agent` → `cursor-agent`).
+    /// A shebang script stays the shell in `pane.process_info`, with the
+    /// link as the program argument, so the basename check alone called
+    /// that pane a crash. A relative path is left alone: resolving it
+    /// would use this process's directory, not the pane's. A missing
+    /// path does not change its basename, and that name was already
+    /// refused. The package-path check stays on the path herdr sent;
+    /// canonicalizing does not search `node_modules` in the target.
+    private static func isCanonicalAgentBasename(_ token: String) -> Bool {
+        guard token.hasPrefix("/") else { return false }
+        let resolved = URL(fileURLWithPath: token).resolvingSymlinksInPath().path
+        let base = agentBase(resolved)
+        guard base != agentBase(token) else { return false }
+        return isKnownAgentBasename(base)
     }
 
     /// npm entrypoints whose basename is not the agent name.
