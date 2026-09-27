@@ -893,10 +893,22 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                 createdWorkspaceLabel: Self.createdContainerLabel(data["created_workspace"]),
                 createdTabLabel: Self.createdContainerLabel(data["created_tab"])
             )
+        case "workspace_renamed":
+            // The label is the whole event. Folding it into a refetch drops
+            // the name when the request socket is the one that is down.
+            let workspaceId = data["workspace_id"] as? String ?? ""
+            let workspaceLabel = data["label"] as? String ?? ""
+            guard !workspaceId.isEmpty, !workspaceLabel.isEmpty else { return .ignored }
+            return .workspaceRenamed(workspaceId: workspaceId, label: workspaceLabel)
+        case "tab_renamed":
+            let renamedTabId = data["tab_id"] as? String ?? ""
+            let tabLabel = data["label"] as? String ?? ""
+            guard !renamedTabId.isEmpty, !tabLabel.isEmpty else { return .ignored }
+            return .tabRenamed(tabId: renamedTabId, label: tabLabel)
         case "workspace_created", "workspace_updated", "workspace_metadata_updated",
-             "workspace_closed", "workspace_renamed", "workspace_moved", "workspace_focused",
+             "workspace_closed", "workspace_moved", "workspace_focused",
              "worktree_created", "worktree_opened", "worktree_removed",
-             "tab_created", "tab_closed", "tab_renamed", "tab_moved", "tab_focused",
+             "tab_created", "tab_closed", "tab_moved", "tab_focused",
              "layout_updated":
             return .workspacesChanged
         default:

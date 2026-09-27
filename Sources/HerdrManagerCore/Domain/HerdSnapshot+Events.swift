@@ -1,6 +1,38 @@
 import Foundation
 
 extension HerdSnapshot {
+    /// `workspaceNames` after a rename. An empty id or label is not a
+    /// rename. The same label returns this snapshot: a copy would look
+    /// like a new herd to a caller that compares by value.
+    public func renamingWorkspace(_ workspaceId: String, to label: String) -> HerdSnapshot {
+        guard !workspaceId.isEmpty, !label.isEmpty, workspaceNames[workspaceId] != label else {
+            return self
+        }
+        var names = workspaceNames
+        names[workspaceId] = label
+        return replacing(workspaceNames: names, tabNames: tabNames)
+    }
+
+    public func renamingTab(_ tabId: String, to label: String) -> HerdSnapshot {
+        guard !tabId.isEmpty, !label.isEmpty, tabNames[tabId] != label else { return self }
+        var names = tabNames
+        names[tabId] = label
+        return replacing(workspaceNames: workspaceNames, tabNames: names)
+    }
+
+    private func replacing(workspaceNames: [String: String], tabNames: [String: String]) -> HerdSnapshot {
+        HerdSnapshot(
+            version: version,
+            protocol: `protocol`,
+            agents: agents,
+            workspaceNames: workspaceNames,
+            tabNames: tabNames,
+            focusedWorkspaceId: focusedWorkspaceId,
+            focusedTabId: focusedTabId,
+            focusedPaneId: focusedPaneId
+        )
+    }
+
     /// herdmgr's live table after one subscription event. Rows an event
     /// introduces are labelled from this snapshot; the same staleness rules
     /// as `AgentStore.applyEvent` apply. An existing row also takes the
@@ -11,7 +43,16 @@ extension HerdSnapshot {
     /// and a placeholder row for it showed as an unknown agent until the
     /// next resync. An agent gets a row from the `pane_updated` that first
     /// names its kind, whether or not a `pane_created` came before it.
-    public func applying(_ event: HerdrEvent, to agents: [Agent], now: Date = Date()) -> [Agent] {
+    ///
+    /// `tabIds` maps a pane id to the tab it is in. A tab rename has no
+    /// other way to find the row: `Agent` stores the tab's label, not its
+    /// id. Omit the map and a tab rename changes nothing.
+    public func applying(
+        _ event: HerdrEvent,
+        to agents: [Agent],
+        tabIds: [String: String] = [:],
+        now: Date = Date()
+    ) -> [Agent] {
         var agents = agents
         switch event {
         case .agentStatusChanged(let paneId, let agentStatus, let seq):
@@ -74,6 +115,18 @@ extension HerdSnapshot {
                 to: agents,
                 now: now
             )
+
+        case .workspaceRenamed(let workspaceId, let label):
+            guard !workspaceId.isEmpty, !label.isEmpty else { break }
+            for index in agents.indices where agents[index].id.workspaceId == workspaceId {
+                agents[index].workspaceName = label
+            }
+
+        case .tabRenamed(let tabId, let label):
+            guard !tabId.isEmpty, !label.isEmpty else { break }
+            for index in agents.indices where tabIds[agents[index].id.raw] == tabId {
+                agents[index].tabName = label
+            }
 
         case .paneCreated, .paneFocused, .workspacesChanged, .connected, .disconnected, .ignored:
             break

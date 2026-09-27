@@ -642,4 +642,46 @@ struct HerdLiveTableDwellTests {
         #expect(opened?.verdict.isProcessGone == false)
         #expect(live.agents.first { $0.id.raw == "wA:p2" }?.enteredAt == started)
     }
+
+    @Test("A rename during a layout burst keeps the dwell, and the next event keeps the label")
+    func renameDuringBurstKeepsDwellAndLabel() {
+        var live = initialTable()
+        live.applyProcessGone([
+            AgentID("wA:p1"): .gone(lastLine: "zsh (pid 4)")
+        ], now: started)
+        refreshAfterMove(on: &live, at: refreshedAt)
+        live.apply(.workspaceRenamed(workspaceId: "wB", label: "Renamed"), now: refreshedAt)
+        live.apply(.tabRenamed(tabId: "wB:t1", label: "suite"), now: refreshedAt)
+
+        let renamed = live.agents.first { $0.id.raw == "wB:p4" }
+        #expect(renamed?.workspaceName == "Renamed")
+        #expect(renamed?.tabName == "suite")
+        #expect(renamed?.enteredAt == refreshedAt)
+        #expect(renamed?.status == .blocked)
+        #expect(live.agents.first { $0.id.raw == "wA:p2" }?.workspaceName == "Cuedora")
+        #expect(live.agents.first { $0.id.raw == "wA:p2" }?.tabName == "main")
+
+        // The snapshot map has to carry the rename. A pane_updated otherwise
+        // writes the name the refetch stored.
+        live.apply(
+            .paneUpdated(makeDwellAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                agentStatus: "blocked", stateChangeSeq: 0
+            )),
+            now: refreshedAt
+        )
+        #expect(live.agents.first?.workspaceName == "Renamed")
+        #expect(live.agents.first?.tabName == "suite")
+        #expect(live.agents.first?.enteredAt == refreshedAt)
+
+        live.apply(moveEvent(), now: moveAt)
+        #expect(live.agents.first?.id.raw == "wB:p4")
+        #expect(live.agents.first?.enteredAt == started)
+        #expect(live.agents.first?.status == .blocked)
+        #expect(live.agents.first?.stateChangeSeq == 5)
+        #expect(live.agents.first?.workspaceName == "Renamed")
+        #expect(live.agents.first?.tabName == "suite")
+        #expect(live.agents.first?.verdict == .processGone(lastLine: "zsh (pid 4)"))
+        #expect(live.agents.first { $0.id.raw == "wA:p2" }?.enteredAt == started)
+    }
 }

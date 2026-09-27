@@ -768,8 +768,15 @@ public enum HerdrEvent: Sendable {
     case paneUpdated(HerdrAgentInfo)
     case paneFocused(paneId: String, workspaceId: String?)
     case paneExited(paneId: String)
-    /// Any workspace_*/tab_*/worktree_*/layout_updated event. These change
-    /// labels, not agent state — the caller should resync via `herdSnapshot()`.
+    /// `workspace.renamed`. The label is on the event. A herd refetch is how
+    /// a created or closed container is learned; a rename does not need one,
+    /// and the request socket can be down while this event is still arriving.
+    case workspaceRenamed(workspaceId: String, label: String)
+    /// `tab.renamed`. Same as a workspace rename: the label is already here.
+    case tabRenamed(tabId: String, label: String)
+    /// Any other workspace_*/tab_*/worktree_*/layout_updated event. These
+    /// can add or drop a container — the caller should resync via
+    /// `herdSnapshot()`. A rename is not in this case.
     case workspacesChanged
     case connected
     case disconnected

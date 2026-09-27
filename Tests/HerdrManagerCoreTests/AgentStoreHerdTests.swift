@@ -3091,3 +3091,134 @@ struct SamePaneSessionTests {
         #expect(store.sessionIdentity(for: AgentID("wA:p1")) == nil)
     }
 }
+
+@Suite("Container renames")
+struct ContainerRenameTests {
+
+    @MainActor
+    private func seed(_ store: AgentStore) -> HerdRequestStamp {
+        let seed = store.captureHerdRequest()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5),
+            makeAgentInfo(paneId: "wA:p2", tabId: "wA:t9", agentStatus: "working", stateChangeSeq: 3),
+            makeAgentInfo(paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2", agentStatus: "idle", stateChangeSeq: 1),
+        ]), requestedAtEpoch: seed.epoch, requestedAtSerial: seed.serial)
+        return seed
+    }
+
+    @Test("A rename sticks, and a poll captured before it cannot put the old label back")
+    @MainActor
+    func renameSurvivesThePollThatStartedBeforeIt() throws {
+        let store = AgentStore()
+        _ = seed(store)
+        let id = AgentID("wA:p1")
+        let entered = Date(timeIntervalSince1970: 1_700_000_000)
+        try pinEpisode(
+            store, id: id,
+            enteredAt: entered, lastOutputAt: entered,
+            verdict: .processGone(lastLine: "zsh (pid 4)")
+        )
+        let early = store.captureHerdRequest()
+        #expect(store.applyEvent(.workspaceRenamed(workspaceId: "wA", label: "Renamed")) == nil)
+        #expect(store.applyEvent(.tabRenamed(tabId: "wA:t9", label: "suite")) == nil)
+        // The same label is not another event. A second bump would pin a
+        // poll that had already seen this name.
+        let epoch = store.currentHerdEpoch
+        #expect(store.applyEvent(.workspaceRenamed(workspaceId: "wA", label: "Renamed")) == nil)
+        #expect(store.currentHerdEpoch == epoch)
+
+        #expect(store.agents[id]?.workspaceName == "Renamed")
+        #expect(store.agents[id]?.tabName == "main")
+        #expect(store.agents[id]?.enteredAt == entered)
+        #expect(store.agents[id]?.verdict == .processGone(lastLine: "zsh (pid 4)"))
+        #expect(store.agents[AgentID("wA:p2")]?.workspaceName == "Renamed")
+        #expect(store.agents[AgentID("wA:p2")]?.tabName == "suite")
+        #expect(store.agents[AgentID("wB:p4")]?.workspaceName == "Beta")
+        #expect(store.agents[AgentID("wB:p4")]?.tabName == "logs")
+        #expect(store.workspaceLabels["wA"] == "Renamed")
+        #expect(store.tabLabels["wA:t9"] == "suite")
+
+        let stale = store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5),
+            makeAgentInfo(paneId: "wA:p2", tabId: "wA:t9", agentStatus: "working", stateChangeSeq: 3),
+            makeAgentInfo(paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2", agentStatus: "idle", stateChangeSeq: 1),
+        ]), requestedAtEpoch: early.epoch, requestedAtSerial: early.serial)
+        #expect(stale.isEmpty)
+        #expect(store.agents[id]?.workspaceName == "Renamed")
+        #expect(store.agents[id]?.enteredAt == entered)
+        #expect(store.agents[id]?.verdict == .processGone(lastLine: "zsh (pid 4)"))
+        #expect(store.agents[AgentID("wA:p2")]?.tabName == "suite")
+        #expect(store.workspaceLabels["wA"] == "Renamed")
+        #expect(store.tabLabels["wA:t9"] == "suite")
+
+        store.applyEvent(.paneUpdated(makeAgentInfo(
+            paneId: "wA:p2", tabId: "wA:t9", agentStatus: "working", stateChangeSeq: 0, title: "Claude"
+        )))
+        #expect(store.agents[AgentID("wA:p2")]?.workspaceName == "Renamed")
+        #expect(store.agents[AgentID("wA:p2")]?.tabName == "suite")
+
+        let after = store.captureHerdRequest()
+        store.applyHerdSnapshot(HerdSnapshot(
+            version: "0.7.5", protocol: 17,
+            agents: [
+                makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5),
+                makeAgentInfo(paneId: "wA:p2", tabId: "wA:t9", agentStatus: "working", stateChangeSeq: 3),
+                makeAgentInfo(paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2", agentStatus: "idle", stateChangeSeq: 1),
+            ],
+            workspaceNames: ["wA": "Later", "wB": "Beta"],
+            tabNames: ["wA:t1": "main", "wA:t9": "suite", "wB:t2": "logs"],
+            focusedWorkspaceId: nil, focusedTabId: nil, focusedPaneId: nil
+        ), requestedAtEpoch: after.epoch, requestedAtSerial: after.serial)
+        #expect(store.agents[id]?.workspaceName == "Later")
+        #expect(store.agents[id]?.enteredAt == entered)
+        #expect(store.workspaceLabels["wA"] == "Later")
+    }
+
+    @Test("A poll with no request epoch still applies the label it read")
+    @MainActor
+    func nilEpochSnapshotAppliesItsOwnLabel() {
+        let store = AgentStore()
+        _ = seed(store)
+        store.applyEvent(.workspaceRenamed(workspaceId: "wA", label: "Renamed"))
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5),
+        ]))
+        #expect(store.agents[AgentID("wA:p1")]?.workspaceName == "Alpha")
+        #expect(store.workspaceLabels["wA"] == "Alpha")
+    }
+
+    @Test("A rename does not undo a status event a poll captured before both")
+    @MainActor
+    func heldRowKeepsTheRename() throws {
+        let store = AgentStore()
+        _ = seed(store)
+        let id = AgentID("wA:p1")
+        let early = store.captureHerdRequest()
+        store.applyEvent(.paneUpdated(makeAgentInfo(
+            paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 0, title: "Claude"
+        )))
+        let opened = try #require(store.agents[id])
+        store.applyEvent(.workspaceRenamed(workspaceId: "wA", label: "Renamed"))
+        let stale = store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5),
+            makeAgentInfo(paneId: "wA:p2", tabId: "wA:t9", agentStatus: "working", stateChangeSeq: 3),
+            makeAgentInfo(paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2", agentStatus: "idle", stateChangeSeq: 1),
+        ]), requestedAtEpoch: early.epoch, requestedAtSerial: early.serial)
+        #expect(stale.isEmpty)
+        let row = try #require(store.agents[id])
+        #expect(row.status == .working)
+        #expect(row.enteredAt == opened.enteredAt)
+        #expect(row.workspaceName == "Renamed")
+    }
+
+    @Test("An empty label is not a rename")
+    @MainActor
+    func emptyLabelIsIgnored() {
+        let store = AgentStore()
+        _ = seed(store)
+        #expect(store.applyEvent(.workspaceRenamed(workspaceId: "wA", label: "")) == nil)
+        #expect(store.applyEvent(.tabRenamed(tabId: "wA:t1", label: "")) == nil)
+        #expect(store.agents[AgentID("wA:p1")]?.workspaceName == "Alpha")
+        #expect(store.agents[AgentID("wA:p1")]?.tabName == "main")
+    }
+}

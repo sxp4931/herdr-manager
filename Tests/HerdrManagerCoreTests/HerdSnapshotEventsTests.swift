@@ -497,4 +497,43 @@ struct HerdSnapshotEventsTests {
         #expect(afterClose.map(\.id.raw) == ["wA:p2"])
         #expect(labels.applying(.paneExited(paneId: "wA:p2"), to: afterClose).isEmpty)
     }
+
+    @Test("A rename relabels that container and leaves the other row's episode")
+    func renameRelabelsOneContainer() {
+        let rows = [
+            Agent(
+                id: AgentID("wA:p1"), status: .blocked, stateChangeSeq: 5,
+                workspaceName: "Alpha", tabName: "main"
+            ),
+            Agent(
+                id: AgentID("wB:p4"), status: .idle, stateChangeSeq: 1,
+                workspaceName: "Beta", tabName: "logs"
+            ),
+        ]
+        let renamed = labels.applying(
+            .workspaceRenamed(workspaceId: "wA", label: "Proj"),
+            to: rows,
+            now: now
+        )
+        #expect(renamed[0].workspaceName == "Proj")
+        #expect(renamed[0].status == .blocked)
+        #expect(renamed[0].stateChangeSeq == 5)
+        #expect(renamed[1].workspaceName == "Beta")
+
+        let tabs = labels.applying(
+            .tabRenamed(tabId: "wA:t9", label: "suite"),
+            to: renamed,
+            tabIds: ["wA:p1": "wA:t9"],
+            now: now
+        )
+        #expect(tabs[0].tabName == "suite")
+        #expect(tabs[1].tabName == "logs")
+
+        let unchanged = labels.renamingWorkspace("wA", to: "Cuedora")
+        #expect(unchanged.workspaceNames["wA"] == "Cuedora")
+        #expect(unchanged.tabNames == labels.tabNames)
+        let next = labels.renamingTab("wA:t1", to: "suite")
+        #expect(next.tabNames["wA:t1"] == "suite")
+        #expect(next.workspaceNames == labels.workspaceNames)
+    }
 }

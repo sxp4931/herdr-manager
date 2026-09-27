@@ -228,10 +228,9 @@ final class AppModel {
         )
         guard store.lastAppliedHerdRequestSerial == requestedAt.serial else { return }
         lastHerdAgents = snapshot.agents
-        lastTabNames = snapshot.tabNames
-        workspaceOptions = snapshot.workspaceNames
-            .map { WorkspaceOption(id: $0.key, name: $0.value) }
-            .sorted { $0.name < $1.name }
+        // The store keeps a rename a poll captured earlier must not undo.
+        // The menu reads that, not the raw snapshot maps.
+        adoptContainerLabels()
         considerFirstSuccess()
         // Copied before any await. A later snapshot replaces `sessionMoves`.
         let moves = store.sessionMoves
@@ -262,6 +261,22 @@ final class AppModel {
             for (to, observed) in carried {
                 store.applyObservedOutput([to: observed])
             }
+        }
+    }
+
+    /// Workspace and tab names for the new-agent menu. Copied from the store
+    /// so a rename the store pinned is the name the menu shows, including
+    /// after a poll that was already in flight when the rename arrived.
+    private func adoptContainerLabels() {
+        let tabs = store.tabLabels
+        if lastTabNames != tabs {
+            lastTabNames = tabs
+        }
+        let options = store.workspaceLabels
+            .map { WorkspaceOption(id: $0.key, name: $0.value) }
+            .sorted { $0.name < $1.name }
+        if workspaceOptions != options {
+            workspaceOptions = options
         }
     }
 
@@ -634,6 +649,11 @@ final class AppModel {
             // treats the new id as a first look and swallows its screen.
             let movedHeartbeat = heartbeatRetarget(for: event)
             let transition = store.applyEvent(event)
+            if case .workspaceRenamed = event {
+                adoptContainerLabels()
+            } else if case .tabRenamed = event {
+                adoptContainerLabels()
+            }
             // After the store re-keys. A move it ignored leaves no row, so
             // the alert stays on the old id and the next pass drops it. A
             // move that keeps the quiet row would otherwise look like a new

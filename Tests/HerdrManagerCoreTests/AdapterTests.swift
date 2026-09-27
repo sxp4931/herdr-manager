@@ -430,6 +430,45 @@ struct ParseEventTests {
         }
     }
 
+    @Test("workspace_renamed and tab_renamed carry the new label")
+    func renameEventsCarryTheLabel() throws {
+        let workspace = """
+        {"event":"workspace_renamed","data":{"type":"workspace_renamed","workspace_id":"wA","label":"Proj"}}
+        """
+        let workspaceEvent = LiveHerdrAdapter.parseEvent(
+            try JSONSerialization.jsonObject(with: Data(workspace.utf8)) as! [String: Any]
+        )
+        if case .workspaceRenamed(let id, let label) = workspaceEvent {
+            #expect(id == "wA")
+            #expect(label == "Proj")
+        } else {
+            Issue.record("Expected .workspaceRenamed, got \(workspaceEvent)")
+        }
+
+        let tab = """
+        {"event":"tab.renamed","data":{"tab_id":"wA:t9","workspace_id":"wA","label":"suite"}}
+        """
+        let tabEvent = LiveHerdrAdapter.parseEvent(
+            try JSONSerialization.jsonObject(with: Data(tab.utf8)) as! [String: Any]
+        )
+        if case .tabRenamed(let id, let label) = tabEvent {
+            #expect(id == "wA:t9")
+            #expect(label == "suite")
+        } else {
+            Issue.record("Expected .tabRenamed, got \(tabEvent)")
+        }
+
+        let empty = LiveHerdrAdapter.parseEvent([
+            "event": "workspace_renamed",
+            "data": ["workspace_id": "wA", "label": ""] as [String: Any]
+        ])
+        if case .ignored = empty {
+            // An empty label must not become a refetch either.
+        } else {
+            Issue.record("Expected .ignored for an empty rename label, got \(empty)")
+        }
+    }
+
     @Test("workspace_focused (real wire format) yields .workspacesChanged")
     func workspaceFocusedRealWireFormat() {
         let dict: [String: Any] = [

@@ -60,9 +60,35 @@ public final class AgentStore {
 
     /// Cached workspace/tab label maps from the last `applyHerdSnapshot`, used
     /// to resolve names for single-pane `paneUpdated` events between periodic
-    /// resnapshots (those events only carry raw ids, not labels).
+    /// resnapshots (those events only carry raw ids, not labels). A rename
+    /// event writes here too, and `workspaceLabels` / `tabLabels` are what
+    /// the menu reads so it does not keep the pre-rename snapshot.
     private var workspaceNameCache: [String: String] = [:]
     private var tabNameCache: [String: String] = [:]
+
+    /// Workspace and tab labels the panel should show, including a rename
+    /// the next `agent.list` has not returned yet.
+    public var workspaceLabels: [String: String] { workspaceNameCache }
+    public var tabLabels: [String: String] { tabNameCache }
+
+    /// A rename the store has accepted and a snapshot captured earlier must
+    /// not undo. `epoch` is `herdEpoch` when the label changed. A snapshot
+    /// requested before that keeps this label; one requested at or after it
+    /// is the herd, and the stamp goes. Not panel state.
+    private struct LabelStamp {
+        var label: String
+        var epoch: UInt64
+    }
+
+    @ObservationIgnored
+    private var workspaceLabelStamps: [String: LabelStamp] = [:]
+    @ObservationIgnored
+    private var tabLabelStamps: [String: LabelStamp] = [:]
+
+    /// Tab id last stored for a pane. `Agent` keeps the label, and
+    /// `tab.renamed` names the id. Empty values are not stored.
+    @ObservationIgnored
+    private var tabIdByPane: [AgentID: String] = [:]
 
     /// One status or presence event. `seqFloor` is the lowest `agent.list`
     /// seq that can reflect the event. `epoch` is `herdEpoch` when the event
@@ -340,8 +366,24 @@ public final class AgentStore {
             }
 
             let status = AgentStatus(rawValue: info.agentStatus) ?? .unknown
-            let wsName = snapshot.workspaceNames[info.workspaceId] ?? info.workspaceId
-            let tabName = snapshot.tabNames[info.tabId] ?? info.tabId
+            let wsName = Self.containerLabel(
+                pinned: Self.pinnedLabel(
+                    info.workspaceId,
+                    in: workspaceLabelStamps,
+                    requestedAtEpoch: requestedAtEpoch
+                ),
+                snapshot: snapshot.workspaceNames[info.workspaceId],
+                fallback: info.workspaceId
+            )
+            let tabName = Self.containerLabel(
+                pinned: Self.pinnedLabel(
+                    info.tabId,
+                    in: tabLabelStamps,
+                    requestedAtEpoch: requestedAtEpoch
+                ),
+                snapshot: snapshot.tabNames[info.tabId],
+                fallback: info.tabId
+            )
 
             // stateChangeSeq is the authoritative "did this agent's state
             // genuinely change" signal. Also reset when the status string
@@ -450,17 +492,59 @@ public final class AgentStore {
         }
         hasAppliedHerd = true
 
-        // Cache labels so single-pane `paneUpdated` events (which only carry
-        // raw workspace/tab ids) can still resolve human-readable names
-        // between periodic resyncs.
-        workspaceNameCache = snapshot.workspaceNames
-        tabNameCache = snapshot.tabNames
-
         if newAgents != agents {
             agents = newAgents
         }
         rememberSessions(from: snapshot, keptIds: newAgents.keys, holding: heldRows)
+        rememberTabIds(from: snapshot, keptIds: newAgents.keys, holding: heldRows)
+        // After the rows are built. A stamp the snapshot is allowed to
+        // replace is dropped here, and what remains is written over the
+        // snapshot's maps so the next pane_updated does not restore it.
+        retainLabelStamps(requestedAtEpoch: requestedAtEpoch)
+        var workspaceNames = snapshot.workspaceNames
+        for (id, stamp) in workspaceLabelStamps {
+            workspaceNames[id] = stamp.label
+        }
+        var tabNames = snapshot.tabNames
+        for (id, stamp) in tabLabelStamps {
+            tabNames[id] = stamp.label
+        }
+        workspaceNameCache = workspaceNames
+        tabNameCache = tabNames
         return transitions
+    }
+
+    /// The rename, when this snapshot was captured before it. Nil when
+    /// there is no stamp, or when the snapshot is new enough to name the
+    /// container itself. A missing request epoch is that second case:
+    /// callers that omit it apply in completion order.
+    private static func pinnedLabel(
+        _ id: String,
+        in stamps: [String: LabelStamp],
+        requestedAtEpoch: UInt64?
+    ) -> String? {
+        guard !id.isEmpty, let stamp = stamps[id] else { return nil }
+        let predates = requestedAtEpoch.map { $0 < stamp.epoch } ?? false
+        return predates ? stamp.label : nil
+    }
+
+    /// Pin, then the snapshot's label, then `fallback` (the raw id on a
+    /// rebuild). An empty snapshot string is a label; only a missing one
+    /// falls through.
+    private static func containerLabel(pinned: String?, snapshot: String?, fallback: String) -> String {
+        if let pinned { return pinned }
+        if let snapshot { return snapshot }
+        return fallback
+    }
+
+    private func retainLabelStamps(requestedAtEpoch: UInt64?) {
+        if let requestedAtEpoch {
+            workspaceLabelStamps = workspaceLabelStamps.filter { requestedAtEpoch < $0.value.epoch }
+            tabLabelStamps = tabLabelStamps.filter { requestedAtEpoch < $0.value.epoch }
+        } else {
+            workspaceLabelStamps.removeAll()
+            tabLabelStamps.removeAll()
+        }
     }
 
     /// Panes this snapshot introduced whose session value belongs to exactly
@@ -559,6 +643,35 @@ public final class AgentStore {
         sessionByPane = next
     }
 
+    /// Tab ids for the panes this snapshot kept. A list that names one
+    /// replaces it, except while `holding` that pane: the list was captured
+    /// before an event this snapshot was not allowed to paint over. A list
+    /// that leaves `tab_id` off keeps the id already stored, so a later
+    /// `tab.renamed` still finds the row. A pane that left is not in
+    /// `keptIds`, and its id goes with it.
+    private func rememberTabIds(
+        from snapshot: HerdSnapshot,
+        keptIds: some Sequence<AgentID>,
+        holding: Set<AgentID>
+    ) {
+        var incoming: [AgentID: String] = [:]
+        for info in snapshot.agents {
+            guard !info.paneId.isEmpty, !info.tabId.isEmpty else { continue }
+            incoming[AgentID(info.paneId)] = info.tabId
+        }
+        var next: [AgentID: String] = [:]
+        for id in keptIds {
+            if holding.contains(id), let kept = tabIdByPane[id] {
+                next[id] = kept
+            } else if let tab = incoming[id] {
+                next[id] = tab
+            } else if let kept = tabIdByPane[id] {
+                next[id] = kept
+            }
+        }
+        tabIdByPane = next
+    }
+
     /// Session identity last stored for `id`, without the pane id.
     ///
     /// The menu bar copies this before awaiting the herd re-read that
@@ -592,6 +705,62 @@ public final class AgentStore {
             sessionByPane[newId] = incoming
         } else if previousId != newId, let carried = sessionByPane.removeValue(forKey: previousId) {
             sessionByPane[newId] = carried
+        }
+    }
+
+    /// The tab moves with the row. A payload that names one wins. A move
+    /// that leaves `tab_id` off keeps the id the last list stored, so a
+    /// later rename still finds the pane.
+    private func carryTab(of info: HerdrAgentInfo, from previousId: AgentID, to newId: AgentID) {
+        if !info.tabId.isEmpty {
+            if previousId != newId {
+                tabIdByPane.removeValue(forKey: previousId)
+            }
+            tabIdByPane[newId] = info.tabId
+        } else if previousId != newId, let carried = tabIdByPane.removeValue(forKey: previousId) {
+            tabIdByPane[newId] = carried
+        }
+    }
+
+    /// Write `label` onto every row in that container and onto the cache a
+    /// later `pane_updated` reads. The same label is not an event: bumping
+    /// the epoch for it would pin a poll that had already seen the name.
+    /// An empty label is not a rename.
+    private func renameContainer(_ id: String, to label: String, workspace: Bool) {
+        guard !id.isEmpty, !label.isEmpty else { return }
+        var next = agents
+        var rowsChanged = false
+        for (agentId, var agent) in agents {
+            let matches = workspace
+                ? agent.id.workspaceId == id
+                : tabIdByPane[agentId] == id
+            let current = workspace ? agent.workspaceName : agent.tabName
+            guard matches, current != label else { continue }
+            if workspace {
+                agent.workspaceName = label
+            } else {
+                agent.tabName = label
+            }
+            next[agentId] = agent
+            rowsChanged = true
+        }
+        let cacheChanged = workspace
+            ? workspaceNameCache[id] != label
+            : tabNameCache[id] != label
+        guard rowsChanged || cacheChanged else { return }
+        if cacheChanged {
+            herdEpoch += 1
+            let stamp = LabelStamp(label: label, epoch: herdEpoch)
+            if workspace {
+                workspaceLabelStamps[id] = stamp
+                workspaceNameCache[id] = label
+            } else {
+                tabLabelStamps[id] = stamp
+                tabNameCache[id] = label
+            }
+        }
+        if rowsChanged {
+            agents = next
         }
     }
 
@@ -726,6 +895,7 @@ public final class AgentStore {
             )
             agents[agentId] = updated
             carrySession(of: info, from: agentId, to: agentId)
+            carryTab(of: info, from: agentId, to: agentId)
             return Self.transition(
                 from: existing?.status,
                 to: updated,
@@ -740,10 +910,16 @@ public final class AgentStore {
         case .paneExited(let paneId):
             removeAfterEvent(AgentID(paneId))
 
+        case .workspaceRenamed(let workspaceId, let label):
+            renameContainer(workspaceId, to: label, workspace: true)
+
+        case .tabRenamed(let tabId, let label):
+            renameContainer(tabId, to: label, workspace: false)
+
         case .workspacesChanged:
-            // Labels changed; the caller is responsible for triggering a
-            // fresh `herdSnapshot()` to resync workspace/tab names — this
-            // store has no adapter reference to do that itself.
+            // A container was created, closed, or focused. The label of a
+            // rename is its own event. This store has no adapter reference,
+            // so the caller refetches when it needs the new set of containers.
             break
 
         case .connected, .disconnected, .ignored:
@@ -886,6 +1062,7 @@ public final class AgentStore {
             agents = next
         }
         carrySession(of: info, from: previousId, to: newId)
+        carryTab(of: info, from: previousId, to: newId)
         notePaneMove(
             from: previousId,
             to: newId,
@@ -928,6 +1105,7 @@ public final class AgentStore {
     private func removeAfterEvent(_ agentId: AgentID, seq: UInt64? = nil) {
         guard let removed = agents.removeValue(forKey: agentId) else { return }
         sessionByPane.removeValue(forKey: agentId)
+        tabIdByPane.removeValue(forKey: agentId)
         noteEventChange(for: agentId, seqFloor: seq ?? Self.seq(after: removed.stateChangeSeq))
     }
 
