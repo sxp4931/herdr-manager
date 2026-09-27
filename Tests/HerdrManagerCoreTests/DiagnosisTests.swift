@@ -1483,7 +1483,8 @@ struct DiagnoserCpuSamplePidTests {
         )
         #expect(Diagnoser.cpuSamplePid([helper, afterRun]) == 20)
 
-        // The path is the script. A host:port is the address, and the script follows.
+        // The path is the script. A separate port is the missing script,
+        // so the agent path after it is not this process.
         let inspectPath = process(20, "bun", argv: ["bun", "--inspect", "./codex"])
         let inspectWaitPath = process(20, "bun", argv: ["bun", "--inspect-wait", "./codex"])
         let inspectBrkPath = process(4, "bun", argv: ["bun", "--inspect-brk", "/tmp/server.js"])
@@ -1507,10 +1508,10 @@ struct DiagnoserCpuSamplePidTests {
             "bun",
             argv: ["bun", "--inspect=0.0.0.0:9229", "/tmp/codex"]
         )
-        #expect(Diagnoser.cpuSamplePid([helper, address]) == 20)
-        #expect(Diagnoser.cpuSamplePid([helper, portOnly]) == 20)
-        #expect(Diagnoser.cpuSamplePid([helper, prefix]) == 20)
-        #expect(Diagnoser.cpuSamplePid([helper, v6]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, address]) == 10)
+        #expect(Diagnoser.cpuSamplePid([helper, portOnly]) == 10)
+        #expect(Diagnoser.cpuSamplePid([helper, prefix]) == 10)
+        #expect(Diagnoser.cpuSamplePid([helper, v6]) == 10)
         #expect(Diagnoser.cpuSamplePid([helper, attachedInspect]) == 20)
 
         let windows = process(20, "bun.exe", argv: ["bun.exe", "--inspect", "C:\\Users\\codex.js"])
@@ -1523,7 +1524,7 @@ struct DiagnoserCpuSamplePidTests {
             argv: ["bun", "--inspect-wait", "localhost:9229", "/usr/local/bin/codex"]
         )
         #expect(Diagnoser.cpuSamplePid([mcp, leader]) == 10)
-        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 10)
 
         let letta = process(
             30,
@@ -3087,6 +3088,178 @@ struct DiagnoserCpuSamplePidTests {
         )
         #expect(Diagnoser.cpuSamplePid([denoValue, claude]) == 12)
         #expect(Diagnoser.cpuSamplePid([helper, denoScript]) == 20)
+    }
+
+    @Test("a bun inspect address is not the agent script")
+    func bunInspectAddressIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // A path stays the script, including when the inspector pauses
+        // on it. The port glued to the flag stays in that word.
+        let path = process(20, "bun", argv: ["bun", "--inspect", "./codex"])
+        let waitPath = process(20, "bun", argv: ["bun", "--inspect-wait", "/tmp/codex"])
+        let brkPath = process(
+            20, "bun", argv: ["bun", "--inspect-brk", "/usr/local/bin/codex"]
+        )
+        let equals = process(
+            20, "bun", argv: ["bun", "--inspect=9229", "/tmp/codex"]
+        )
+        let equalsHost = process(
+            20, "bun", argv: ["bun", "--inspect=0.0.0.0:9229", "/usr/local/bin/codex"]
+        )
+        let brkEquals = process(
+            20, "bun.exe", argv: ["bun.exe", "--inspect-brk=9229", "/tmp/codex"]
+        )
+        let watched = process(
+            20, "bun", argv: ["bun", "--inspect", "--watch", "/tmp/codex"]
+        )
+        let runPath = process(
+            20, "bun", argv: ["bun", "run", "--inspect", "/usr/local/bin/codex"]
+        )
+        let windows = process(
+            20, "bun.exe", argv: ["bun.exe", "--inspect", "C:\\Users\\codex.js"]
+        )
+        let scriptFirst = process(
+            20, "bun", argv: ["bun", "/usr/local/bin/codex", "--inspect", "9229"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, path]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, waitPath]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, brkPath]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, equals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, equalsHost]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, brkEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, watched]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, runPath]) == 20)
+        #expect(Diagnoser.cpuSamplePid([windows, claude]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, scriptFirst]) == 20)
+        #expect(Diagnoser.cpuSamplePid([mcp, brkPath]) == 10)
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, brkPath], foregroundProcessGroupId: 20) == 20
+        )
+
+        // The address is the missing script. The agent path after it,
+        // including one whose own basename is an agent, is not the program.
+        let port = process(
+            4, "bun", argv: ["bun", "--inspect", "9229", "/usr/local/bin/codex"]
+        )
+        let brkPort = process(
+            4, "bun", argv: ["bun", "--inspect-brk", "9333", "/tmp/codex"]
+        )
+        let host = process(
+            4,
+            "bun",
+            argv: ["bun", "--inspect-wait", "127.0.0.1:9229", "/tmp/codex"]
+        )
+        let prefix = process(
+            4,
+            "bun",
+            argv: ["bun", "--inspect", "localhost:6499/prefix", "/tmp/codex"]
+        )
+        let namedPrefix = process(
+            20,
+            "bun",
+            argv: ["bun", "--inspect", "localhost:6499/codex", "/tmp/server.js"]
+        )
+        let v6 = process(
+            4, "bun", argv: ["bun", "--inspect-wait", "[::1]:9229", "/tmp/codex"]
+        )
+        let v6Named = process(
+            20,
+            "bun",
+            argv: ["bun", "--inspect-brk", "[::1]:9229/codex", "/tmp/server.js"]
+        )
+        let hostNamed = process(
+            20, "bun", argv: ["bun", "--inspect", "codex:9229", "/usr/local/bin/codex"]
+        )
+        let runPort = process(
+            4,
+            "bun",
+            argv: ["bun", "run", "--inspect", "9229", "/usr/local/bin/codex"]
+        )
+        let packagePort = process(
+            4, "bun", argv: ["bun", "x", "--inspect", "9229", "/tmp/codex"]
+        )
+        let watchAfter = process(
+            4,
+            "bun",
+            argv: ["bun", "--inspect", "9229", "--watch", "/usr/local/bin/codex"]
+        )
+        let bunExe = process(
+            4, "bun.exe", argv: ["bun.exe", "--inspect-brk", "9229", "/tmp/codex"]
+        )
+        let missing = process(4, "bun", argv: ["bun", "--inspect"])
+        #expect(Diagnoser.cpuSamplePid([port, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([brkPort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([host, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([prefix, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([namedPrefix, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([v6, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([v6Named, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([hostNamed, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([runPort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([packagePort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([watchAfter, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([bunExe, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([missing, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([mcp, port]) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, namedPrefix]) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, v6Named]) == 10)
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, port], foregroundProcessGroupId: 4) == 10
+        )
+        #expect(
+            Diagnoser.cpuSamplePid(
+                [mcp, namedPrefix], foregroundProcessGroupId: 20
+            ) == 10
+        )
+
+        // The path after a real flag is Letta. An address in front of
+        // that path is not, including when the address's own basename is.
+        let letta = process(
+            30,
+            "bun",
+            argv: ["bun", "--inspect", "/home/user/node_modules/.bin/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, letta]) == 30)
+        let oneShot = process(
+            8,
+            "bun",
+            argv: [
+                "bun", "--inspect-wait", "127.0.0.1:9229",
+                "/home/user/node_modules/.bin/letta", "--prompt", "hello",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([oneShot, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([oneShot]) == 8)
+        #expect(
+            Diagnoser.cpuSamplePid([oneShot, interactive], foregroundProcessGroupId: 8) == 30
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, oneShot]) == 10)
+        let addressLetta = process(
+            40,
+            "bun",
+            argv: ["bun", "--inspect-brk", "[::1]:9229/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([addressLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([helper, addressLetta]) == 10)
+        #expect(Diagnoser.cpuSamplePid([addressLetta]) == 40)
+
+        // Node and Deno still do not consume a separate address.
+        let nodePort = process(
+            4, "node", argv: ["node", "--inspect", "9229", "/tmp/codex"]
+        )
+        let nodePath = process(20, "node", argv: ["node", "--inspect", "./codex"])
+        let denoPort = process(
+            4, "deno", argv: ["deno", "run", "--inspect", "127.0.0.1:9229", "/tmp/codex"]
+        )
+        let denoPath = process(20, "deno", argv: ["deno", "run", "--inspect", "./codex"])
+        #expect(Diagnoser.cpuSamplePid([nodePort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, nodePath]) == 20)
+        #expect(Diagnoser.cpuSamplePid([denoPort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, denoPath]) == 20)
     }
 }
 

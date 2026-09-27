@@ -1198,9 +1198,12 @@ private enum ShellForeground {
                 // `--experimental-loader` and space-separated
                 // `--inspect-port` are the same shape on Bun 1.4.2.
                 // `--loader` without a colon makes bun exit, so the
-                // next word is not Letta. Node's `--debug-port`
-                // consumes a port word. A dash word, or no word, makes
-                // that node exit.
+                // next word is not Letta. A space-separated `--inspect`
+                // address does too: bun looks that word up as the
+                // script and exits, so neither it nor the path after
+                // it is Letta. A path, and `--inspect=9229`, still are.
+                // Node's `--debug-port` consumes a port word. A dash
+                // word, or no word, makes that node exit.
                 if runtimeName == "bun",
                    bunConfigFlagWidth(arg) != nil || bunFlagNamesTheScript(arg) {
                     index += 1
@@ -1212,6 +1215,19 @@ private enum ShellForeground {
                     following: index + 1 < argv.count ? argv[index + 1] : nil
                    ) {
                     switch loader {
+                    case .skip(let width):
+                        index += width
+                    case .exits:
+                        return nil
+                    }
+                    continue
+                }
+                if runtimeName == "bun",
+                   let inspect = bunInspect(
+                    arg,
+                    following: index + 1 < argv.count ? argv[index + 1] : nil
+                   ) {
+                    switch inspect {
                     case .skip(let width):
                         index += width
                     case .exits:
@@ -1232,11 +1248,7 @@ private enum ShellForeground {
                     }
                     continue
                 }
-                if let width = valueFlagWidth(
-                    arg,
-                    runtime: runtimeName,
-                    following: index + 1 < argv.count ? argv[index + 1] : nil
-                ) {
+                if let width = valueFlagWidth(arg, runtime: runtimeName) {
                     index += width
                 } else {
                     index += lettaOptionTakesValue(arg) ? 2 : 1
@@ -1487,11 +1499,13 @@ private enum ShellForeground {
     /// `--loader=script.js`, `-lnocolon`) makes bun exit, so the path
     /// after it is not a program. Node's `--loader` is still a module
     /// specifier: the script is the word after the value.
-    /// `--inspect`, `--inspect-wait`, and `--inspect-brk` take the next
-    /// word only when it is a port or host:port, and only on bun.
-    /// `bun --inspect ./codex` keeps the path. Node's and Deno's
-    /// `--inspect` do not take that word: `deno run --inspect ./codex`
-    /// is the script.
+    /// Bun's `--inspect`, `--inspect-wait`, and `--inspect-brk` do not
+    /// take a separate address. `bun --inspect ./codex` and
+    /// `bun --inspect=9229 ./codex` run that file. `bun --inspect 9229
+    /// ./codex` exits with script not found `9229`, so the path after
+    /// the address is not a program. Node's and Deno's `--inspect` do
+    /// not take that word either: `node --inspect 9229 ./codex` names
+    /// `9229`, and `deno run --inspect ./codex` is the script.
     private static func runtimeScriptIsAgent(_ process: ForegroundProcess) -> Bool {
         guard let argv = launchArguments(process), let script = runtimeScript(argv) else {
             return false
@@ -1566,6 +1580,18 @@ private enum ShellForeground {
                 }
                 continue
             }
+            // A port or host:port after `--inspect` is the script name
+            // bun looks up. That lookup fails, so the path after it is
+            // not a program. A path is the script on the next word.
+            if runtime == "bun", let inspect = bunInspect(arg, following: following) {
+                switch inspect {
+                case .skip(let width):
+                    index += width
+                case .exits:
+                    return nil
+                }
+                continue
+            }
             if runtime == "deno", let width = denoFlagWidth(arg, following: following) {
                 index += width
                 continue
@@ -1628,11 +1654,7 @@ private enum ShellForeground {
                 index += 1
                 continue
             }
-            if let width = valueFlagWidth(
-                arg,
-                runtime: runtime,
-                following: following
-            ) {
+            if let width = valueFlagWidth(arg, runtime: runtime) {
                 index += width
                 continue
             }
@@ -1812,29 +1834,55 @@ private enum ShellForeground {
         "--network-family-autoselection-attempt-timeout",
     ]
 
-    /// Optional address. `bun --inspect ./codex` is the script. A separate
-    /// port or host:port is the address, and the script is the word after it.
+    /// `--inspect`, `--inspect-wait`, and `--inspect-brk`. The `=` form
+    /// is not in this set: `--inspect=9229` stays one word.
     private static let bunInspectFlags: Set<String> = [
         "--inspect", "--inspect-wait", "--inspect-brk",
     ]
 
+    /// How Bun's inspector flag occupies argv. Nil when `arg` is not
+    /// one of those flags. Node and Deno do not use this check.
+    private enum BunInspect {
+        /// Words to advance, including the flag. The next word is the script.
+        case skip(Int)
+        /// Bun looks the next word up as a script and does not run one.
+        case exits
+    }
+
+    /// Bun 1.4.2 does not take a separate address for these flags.
+    ///
+    /// `bun --inspect ./codex`, `bun --inspect-brk ./codex`,
+    /// `bun --inspect --watch ./codex`, and `bun --inspect=9229 ./codex`
+    /// run that file. `--inspect-brk` on a path stays up under the
+    /// inspector. `bun --inspect 9229 ./codex`, `bun --inspect-wait
+    /// 127.0.0.1:9229 ./codex`, `bun --inspect localhost:6499/codex`,
+    /// and `bun --inspect-brk [::1]:9229 ./codex` exit with that word
+    /// as the missing script, so neither the address nor the path
+    /// after it is a program. A Windows path is not an address. A
+    /// missing word prints help and exits; there is no script.
+    private static func bunInspect(_ arg: String, following: String?) -> BunInspect? {
+        guard bunInspectFlags.contains(arg) else { return nil }
+        if let following, looksLikeInspectAddress(following) {
+            return .exits
+        }
+        return .skip(1)
+    }
+
     /// Words this flag occupies, including itself. Nil when `arg` is not
     /// one of bun's or node's value flags. A required value always takes
-    /// the next word. An inspect flag takes it only when that word is an
-    /// address, and only on bun.
-    private static func valueFlagWidth(_ arg: String, runtime: String, following: String?) -> Int? {
-        if let width = bunFlagWidth(arg, runtime: runtime, following: following) {
+    /// the next word. Bun's `--inspect` is `bunInspect`: an address-shaped
+    /// word makes bun exit, and a path is the script.
+    private static func valueFlagWidth(_ arg: String, runtime: String) -> Int? {
+        if let width = bunFlagWidth(arg, runtime: runtime) {
             return width
         }
         return nodeFlagWidth(arg, runtime: runtime)
     }
 
-    private static func bunFlagWidth(_ arg: String, runtime: String, following: String?) -> Int? {
+    private static func bunFlagWidth(_ arg: String, runtime: String) -> Int? {
         guard runtime == "bun" else { return nil }
-        if bunRequiredValueFlags.contains(arg) { return 2 }
-        guard bunInspectFlags.contains(arg) else { return nil }
-        if let following, looksLikeInspectAddress(following) { return 2 }
-        return 1
+        guard bunRequiredValueFlags.contains(arg) else { return nil }
+        return 2
     }
 
     private static func nodeFlagWidth(_ arg: String, runtime: String) -> Int? {
