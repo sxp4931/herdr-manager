@@ -4604,29 +4604,268 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([helper, bunOneShot]) == 10)
         #expect(Diagnoser.cpuSamplePid([bunOneShot, interactive]) == 30)
 
-        // Deno was not installed. An unknown short is still skipped, and
-        // so are Node and Bun `--help` / `--version`, which do not run
-        // the file. `--not-a-flag` exits on Node and runs on Bun.
+        // Deno was not installed. An unknown short is still skipped.
+        // `--help` and `--version` are the next test. `node --not-a-flag`
+        // still exits and still names the path.
         let denoUnknown = process(
             20, "deno", argv: ["deno", "run", "-z", "/usr/local/bin/codex"]
-        )
-        let nodeLongHelp = process(
-            20, "node", argv: ["node", "--help", "/usr/local/bin/codex"]
-        )
-        let nodeLongVersion = process(
-            20, "node", argv: ["node", "--version", "/tmp/codex"]
-        )
-        let bunLongHelp = process(
-            20, "bun", argv: ["bun", "--help", "/usr/local/bin/codex"]
         )
         let nodeBadLong = process(
             20, "node", argv: ["node", "--not-a-flag", "/usr/local/bin/codex"]
         )
         #expect(Diagnoser.cpuSamplePid([helper, denoUnknown]) == 20)
-        #expect(Diagnoser.cpuSamplePid([helper, nodeLongHelp]) == 20)
-        #expect(Diagnoser.cpuSamplePid([helper, nodeLongVersion]) == 20)
-        #expect(Diagnoser.cpuSamplePid([helper, bunLongHelp]) == 20)
         #expect(Diagnoser.cpuSamplePid([helper, nodeBadLong]) == 20)
+    }
+
+    @Test("node and bun help and version are not the agent script")
+    func nodeAndBunHelpAreNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23 and Bun 1.4.2 print and exit. The path is not the
+        // file, including an attached `=` and a boolean in front.
+        // Bun's `--revision` is the same print.
+        let nodeHelp = process(
+            4, "node", argv: ["node", "--help", "/usr/local/bin/codex"]
+        )
+        let nodeVersion = process(
+            4, "nodejs", argv: ["nodejs", "--version", "/tmp/codex"]
+        )
+        let nodeHelpEquals = process(
+            4, "node.exe", argv: ["node.exe", "--help=1", "/usr/local/bin/codex"]
+        )
+        let nodeVersionEquals = process(
+            4, "Node.EXE", argv: ["Node.EXE", "--version=", "/tmp/codex"]
+        )
+        let nodeStrictHelp = process(
+            4, "node", argv: ["node", "--use-strict", "--help", "/usr/local/bin/codex"]
+        )
+        let nodeWarningsVersion = process(
+            4, "node", argv: ["node", "--no-warnings", "--version", "/tmp/codex"]
+        )
+        let bunHelp = process(
+            4, "bun", argv: ["bun", "--help", "/usr/local/bin/codex"]
+        )
+        let bunVersion = process(
+            4, "bun.exe", argv: ["bun.exe", "--version", "/tmp/codex"]
+        )
+        let bunRevision = process(
+            4, "bun", argv: ["bun", "--revision", "/usr/local/bin/codex"]
+        )
+        let bunHelpEquals = process(
+            4, "bun", argv: ["bun", "--help=1", "/tmp/codex"]
+        )
+        let bunVersionEquals = process(
+            4, "bun", argv: ["bun", "--version=", "/usr/local/bin/codex"]
+        )
+        let bunRevisionEquals = process(
+            4, "bun", argv: ["bun", "--revision=1", "/tmp/codex"]
+        )
+        let bunBunHelp = process(
+            4, "bun", argv: ["bun", "--bun", "--help", "/usr/local/bin/codex"]
+        )
+        let bunHotVersion = process(
+            4, "bun", argv: ["bun", "--hot", "--version", "/tmp/codex"]
+        )
+        let bunRunHelp = process(
+            4, "bun", argv: ["bun", "run", "--help", "/usr/local/bin/codex"]
+        )
+        let bunRunHelpEquals = process(
+            4, "bun.exe", argv: ["bun.exe", "run", "--help=1", "/tmp/codex"]
+        )
+        let bunHelpBeforeRun = process(
+            4, "bun", argv: ["bun", "--help", "run", "/usr/local/bin/codex"]
+        )
+        let bunHelpEqualsBeforeRun = process(
+            4, "bun", argv: ["bun", "--help=1", "run", "/tmp/codex"]
+        )
+        let exited = [
+            nodeHelp, nodeVersion, nodeHelpEquals, nodeVersionEquals,
+            nodeStrictHelp, nodeWarningsVersion, bunHelp, bunVersion,
+            bunRevision, bunHelpEquals, bunVersionEquals, bunRevisionEquals,
+            bunBunHelp, bunHotVersion, bunRunHelp, bunRunHelpEquals,
+            bunHelpBeforeRun, bunHelpEqualsBeforeRun,
+        ]
+        for sample in exited {
+            #expect(Diagnoser.cpuSamplePid([sample, claude]) == 12)
+        }
+        #expect(Diagnoser.cpuSamplePid([mcp, nodeHelp], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, bunVersion], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, bunRunHelp], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([nodeHelp]) == 4)
+        #expect(Diagnoser.cpuSamplePid([bunRevision]) == 4)
+
+        // Flags that still run the file name it, including when that
+        // process is the group leader. Version before `run` still runs
+        // the file, and so does help or version around `x`. A version
+        // word that is `--title`'s value is not the print, and `run`
+        // in that slot is not the subcommand.
+        let nodeScriptFirst = process(
+            20, "node", argv: ["node", "/usr/local/bin/codex", "--help"]
+        )
+        let nodeEndOptions = process(
+            20, "node", argv: ["node", "--", "/usr/local/bin/codex"]
+        )
+        let nodeInteractive = process(
+            20, "node", argv: ["node", "--interactive", "/tmp/codex"]
+        )
+        let nodeWatch = process(
+            20, "nodejs", argv: ["nodejs", "--watch", "/usr/local/bin/codex"]
+        )
+        let nodeStrict = process(
+            20, "node.exe", argv: ["node.exe", "--use-strict", "/tmp/codex"]
+        )
+        let nodeTitleEquals = process(
+            20, "node", argv: ["node", "--title=--version", "/usr/local/bin/codex"]
+        )
+        let bunUnknown = process(
+            20, "bun", argv: ["bun", "--not-a-flag", "/tmp/codex"]
+        )
+        let bunBun = process(
+            20, "bun", argv: ["bun", "--bun", "/usr/local/bin/codex"]
+        )
+        let bunHot = process(
+            20, "bun", argv: ["bun", "--hot", "/tmp/codex"]
+        )
+        let bunWatch = process(
+            20, "bun.exe", argv: ["bun.exe", "--watch", "/usr/local/bin/codex"]
+        )
+        let bunSmol = process(
+            20, "bun", argv: ["bun", "--smol", "/tmp/codex"]
+        )
+        let bunRunVersion = process(
+            20, "bun", argv: ["bun", "run", "--version", "/usr/local/bin/codex"]
+        )
+        let bunRunVersionEquals = process(
+            20, "bun", argv: ["bun", "run", "--version=1", "/tmp/codex"]
+        )
+        let bunVersionBeforeRun = process(
+            20, "bun", argv: ["bun", "--version", "run", "/usr/local/bin/codex"]
+        )
+        let bunRevisionBeforeRun = process(
+            20, "bun.exe", argv: ["bun.exe", "--revision", "run", "/tmp/codex"]
+        )
+        let bunVersionEqualsBeforeRun = process(
+            20, "bun", argv: ["bun", "--version=1", "run", "/usr/local/bin/codex"]
+        )
+        let bunRevisionEqualsBeforeRun = process(
+            20, "bun", argv: ["bun", "--revision=1", "run", "/tmp/codex"]
+        )
+        let bunRunRevision = process(
+            20, "bun.exe", argv: ["bun.exe", "run", "--revision", "/usr/local/bin/codex"]
+        )
+        let bunRunRevisionEquals = process(
+            20, "bun", argv: ["bun", "run", "--revision=1", "/tmp/codex"]
+        )
+        let bunExecVersion = process(
+            20, "bun", argv: ["bun", "x", "--version", "/usr/local/bin/codex"]
+        )
+        let bunExecHelp = process(
+            20, "bun", argv: ["bun", "x", "--help", "/tmp/codex"]
+        )
+        let bunHelpBeforeExec = process(
+            20, "bun", argv: ["bun", "--help", "x", "/usr/local/bin/codex"]
+        )
+        let bunVersionBeforeExec = process(
+            20, "bun", argv: ["bun", "--version", "x", "/tmp/codex"]
+        )
+        let bunTitleRun = process(
+            20, "bun", argv: ["bun", "--title", "run", "/usr/local/bin/codex"]
+        )
+        let bunTitleVersion = process(
+            20, "bun", argv: ["bun", "--title", "--version", "/usr/local/bin/codex"]
+        )
+        let bunTitleHelp = process(
+            20, "bun", argv: ["bun", "--title", "--help", "/tmp/codex"]
+        )
+        let bunTitleRevision = process(
+            20, "bun", argv: ["bun", "--title", "--revision", "/usr/local/bin/codex"]
+        )
+        let bunUserAgent = process(
+            20, "bun", argv: ["bun", "--user-agent", "--version", "/tmp/codex"]
+        )
+        let bunScriptFirst = process(
+            20, "bun", argv: ["bun", "/usr/local/bin/codex", "--version"]
+        )
+        let bunRunScriptFirst = process(
+            20, "bun", argv: ["bun", "run", "/usr/local/bin/codex", "--help"]
+        )
+        let kept = [
+            nodeScriptFirst, nodeEndOptions, nodeInteractive, nodeWatch,
+            nodeStrict, nodeTitleEquals, bunUnknown, bunBun, bunHot, bunWatch,
+            bunSmol, bunRunVersion, bunRunVersionEquals, bunVersionBeforeRun,
+            bunRevisionBeforeRun, bunVersionEqualsBeforeRun, bunRevisionEqualsBeforeRun,
+            bunRunRevision, bunRunRevisionEquals, bunExecVersion, bunExecHelp,
+            bunHelpBeforeExec, bunVersionBeforeExec, bunTitleRun, bunTitleVersion,
+            bunTitleHelp, bunTitleRevision, bunUserAgent, bunScriptFirst,
+            bunRunScriptFirst,
+        ]
+        for running in kept {
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20)
+        }
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, nodeWatch], foregroundProcessGroupId: 20) == 20
+        )
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, bunRunVersion], foregroundProcessGroupId: 20) == 20
+        )
+        #expect(
+            Diagnoser.cpuSamplePid(
+                [mcp, bunVersionBeforeRun], foregroundProcessGroupId: 20
+            ) == 20
+        )
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, bunTitleHelp], foregroundProcessGroupId: 20) == 20
+        )
+
+        // Help in front of a Letta path is not the TUI. `--bun` in front
+        // of one still is.
+        let nodeFalseLetta = process(
+            8,
+            "node",
+            argv: ["node", "--help", "/home/user/node_modules/.bin/letta"]
+        )
+        let bunFalseLetta = process(
+            8,
+            "bun",
+            argv: ["bun", "--version", "/home/user/node_modules/.bin/letta"]
+        )
+        let bunLetta = process(
+            40,
+            "bun",
+            argv: ["bun", "--bun", "/tmp/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([nodeFalseLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([nodeFalseLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([bunFalseLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([nodeFalseLetta]) == 8)
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, nodeFalseLetta], foregroundProcessGroupId: 8) == 10
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, bunLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([bunLetta, interactive]) == 40)
+
+        // Deno was not installed. Its long help and version are still
+        // skipped, and so is a node option the binary rejects that is
+        // not exactly `--help` or `--version`.
+        let denoHelp = process(
+            20, "deno", argv: ["deno", "run", "--help", "/usr/local/bin/codex"]
+        )
+        let denoVersion = process(
+            20, "deno", argv: ["deno", "run", "--version", "/tmp/codex"]
+        )
+        let nodeBad = process(
+            20, "node", argv: ["node", "--not-a-flag", "/usr/local/bin/codex"]
+        )
+        let nodeRevision = process(
+            20, "node", argv: ["node", "--revision", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, denoHelp]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, denoVersion]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeBad]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeRevision]) == 20)
     }
 }
 

@@ -1550,9 +1550,19 @@ private enum ShellForeground {
     /// lone `-` does not run the path after it, and `-W` / `-X` take a
     /// value. `-qS`, `-bb`, `-OO`, `-vu`, `-R`, and `-t` still name the
     /// file. Node and Bun shorts are `runtimeShort`: an unknown short,
-    /// help, version, and stdin do not name the path. Deno still skips
-    /// an unknown short. Bun still runs the file after an unknown long
-    /// option. Node and Bun still consume the long flags they accept.
+    /// help, version, and stdin do not name the path. `--help` and
+    /// `--version` print and exit on Node 22.23, including an attached
+    /// `=`, so the path after them is not a script. Bun 1.4.2 prints
+    /// those, and `--revision`, only when the invocation is not `run`
+    /// or `x`. `bun --version run file` and `bun run --version file`
+    /// still run the file. `bun --help run file` does not. `bun --help x`
+    /// and `bun --version x` still run the package. A version word that
+    /// is the value of `--title` is not a print, and `run` in that slot
+    /// is not the subcommand. `--interactive`, `--watch`, `--hot`,
+    /// `--bun`, and `bun --not-a-flag` still run the file.
+    /// `node --not-a-flag` still exits and is still skipped. Deno still
+    /// skips an unknown short and was not checked for these long flags.
+    /// Node and Bun still consume the long flags they accept.
     /// Bun's own value flags are not that node rule. `--title --watch`
     /// and `--user-agent --watch` run the file. `--port`, `--shell`,
     /// `--install`, and the other flags in `bunDashRejectedFlags` exit
@@ -1766,9 +1776,15 @@ private enum ShellForeground {
                 continue
             }
             // Node and Bun shorts that were not claimed above. An unknown
-            // short, help, version, and stdin are not a script. A long
-            // option, and a Deno short, still skip one word.
+            // short, help, version, and stdin are not a script. `--help`
+            // and `--version` print and exit, so the path is not a script
+            // either, unless bun is `run` or `x` and that flag still
+            // reaches the file. Any other long option, and a Deno short,
+            // still skip one word. `node --not-a-flag` is that skip.
             if arg.hasPrefix("-") {
+                if runtimePrintsAndExits(arg, runtime: runtime, argv: argv) {
+                    return nil
+                }
                 if let short = runtimeShort(arg, runtime: runtime, following: following) {
                     switch short {
                     case .skip(let width):
@@ -2931,6 +2947,7 @@ private enum ShellForeground {
     /// take the rest of the cluster or the next word. `d` and `l` do
     /// too, and still require their separator. `e` and `p` are eval.
     /// Any other letter exits, and so does `-b=1`. A lone `-` is stdin.
+    /// `--help` and `--version` are `runtimePrintsAndExits`.
     /// `--not-a-flag` is not this check: Bun still runs the file.
     private static func runtimeShort(
         _ arg: String,
@@ -2945,6 +2962,100 @@ private enum ShellForeground {
             return bunBareShort(arg, following: following)
         }
         return nil
+    }
+
+    /// Node 22.23 and Bun 1.4.2 print and exit before the file runs.
+    ///
+    /// `--help` and `--version` do that on Node, including `--help=1`
+    /// and an empty `--version=`, wherever the flag sits before the
+    /// script. `node --use-strict --version /tmp/codex` does not run
+    /// the file. Bun prints `--help`, `--version`, and `--revision`
+    /// only when the invocation is not `run` or `x`. The subcommand
+    /// counts when the flag comes first: `bun --version run /tmp/codex`
+    /// and `bun --version=1 run /tmp/codex` still run the file, and so
+    /// do `bun run --version` and `bun run --revision`. `bun --help run`
+    /// and `bun run --help` do not. `bun --help x` and `bun x --version`
+    /// still run the package. `--title run` is not that subcommand:
+    /// `run` is the title. A version word that is the value of
+    /// `--title` or `--user-agent` was consumed before this check.
+    /// `--interactive`, `--watch`, `--hot`, `--bun`, and
+    /// `bun --not-a-flag` are not this exit. `node --not-a-flag` exits
+    /// too and stays a skipped long option. Deno was not installed, so
+    /// its long flags are not this check. A script written before the
+    /// flag is already returned. `--` is handled before this check, so
+    /// the word after it stays the script.
+    private static func runtimePrintsAndExits(
+        _ arg: String,
+        runtime: String,
+        argv: [String]
+    ) -> Bool {
+        let help = arg == "--help" || arg.hasPrefix("--help=")
+        if isNodeRuntime(runtime) {
+            return help || arg == "--version" || arg.hasPrefix("--version=")
+        }
+        guard runtime == "bun" else { return false }
+        let command = bunLeadingCommand(argv)
+        if command == "x" { return false }
+        if help { return true }
+        if command == "run" { return false }
+        if arg == "--version" || arg.hasPrefix("--version=") { return true }
+        return arg == "--revision" || arg.hasPrefix("--revision=")
+    }
+
+    /// `run` or `x` before the script. Flags may come first:
+    /// `bun --version run file` is `run`. The value of `--title`,
+    /// `-r`, or another flag is not the subcommand, so `--title run`
+    /// is a script whose title is `run`. Nil when a flag exits before
+    /// any positional, or the first positional is the script.
+    private static func bunLeadingCommand(_ argv: [String]) -> String? {
+        var index = 1
+        while index < argv.count {
+            let arg = argv[index]
+            let following = index + 1 < argv.count ? argv[index + 1] : nil
+            if arg == "--" { return nil }
+            if arg.hasPrefix("-") {
+                guard let width = bunCommandSkip(arg, following: following, argv: argv) else {
+                    return nil
+                }
+                index += width
+                continue
+            }
+            if arg == "run" || arg == "x" { return arg }
+            return nil
+        }
+        return nil
+    }
+
+    /// Words this bun flag occupies while looking for `run` or `x`.
+    /// Nil when the flag exits and no script runs, which is the same
+    /// answer as there being no subcommand. A long option is one word
+    /// unless a value flag already claimed it. `bunBareShort` is only
+    /// for a single dash: `--version` is not a cluster.
+    private static func bunCommandSkip(
+        _ arg: String,
+        following: String?,
+        argv: [String]
+    ) -> Int? {
+        if bunConfigFlagWidth(arg) != nil || bunFlagNamesTheScript(arg) { return 1 }
+        if let loader = bunLoader(arg, following: following) {
+            if case .skip(let width) = loader { return width }
+            return nil
+        }
+        if let inspect = bunInspect(arg, following: following) {
+            if case .skip(let width) = inspect { return width }
+            return nil
+        }
+        if bunRejectedShort(arg) || runtimeAbandonsScript(arg) { return nil }
+        if bunSeparateValueIsTheWordBun(arg, following: following) { return nil }
+        if bunValueExits(arg, following: following, argv: argv) { return nil }
+        if runtimeValueFlags.contains(arg) { return 2 }
+        if runtimeFlagAttachesValue(arg) { return 1 }
+        if let width = valueFlagWidth(arg, runtime: "bun") { return width }
+        if !arg.hasPrefix("--"), let short = bunBareShort(arg, following: following) {
+            if case .skip(let width) = short { return width }
+            return nil
+        }
+        return 1
     }
 
     /// Exactly `-i`. Node 22.23 rejects every other single-dash word
