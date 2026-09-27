@@ -403,7 +403,8 @@ actor MCPServer {
                 title: info.title,
                 displayAgent: info.displayAgent,
                 name: info.name,
-                terminalTitleStripped: info.terminalTitleStripped
+                terminalTitleStripped: info.terminalTitleStripped,
+                paneLabel: herd.paneLabels[info.paneId]
             ) ?? agentKind
 
             let agent = Agent(
@@ -614,7 +615,8 @@ actor MCPServer {
                 procInfo: procInfo,
                 recentOutput: readResult?.text,
                 workspaceNames: herd.workspaceNames,
-                tabNames: herd.tabNames
+                tabNames: herd.tabNames,
+                paneLabel: herd.paneLabels[info.paneId]
             )
             let redacted = redactor.redact(text)
             return makeToolResult(redacted.redactedText)
@@ -1965,7 +1967,8 @@ actor MCPServer {
         procInfo: ProcessInfoResult?,
         recentOutput: String?,
         workspaceNames: [String: String],
-        tabNames: [String: String]
+        tabNames: [String: String],
+        paneLabel: String? = nil
     ) -> String {
         var lines: [String] = []
         let agentId = AgentID(info.paneId)
@@ -1975,7 +1978,8 @@ actor MCPServer {
             title: info.title,
             displayAgent: info.displayAgent,
             name: info.name,
-            terminalTitleStripped: info.terminalTitleStripped
+            terminalTitleStripped: info.terminalTitleStripped,
+            paneLabel: paneLabel
         ) ?? info.agent ?? "unknown"
 
         lines.append("Agent: \(title) (\(agentId.raw))")

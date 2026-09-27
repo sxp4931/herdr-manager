@@ -566,6 +566,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
             let workspaceNames = snap.workspaceNameMap
             let tabNames = snap.tabNameMap
+            let paneLabels = LiveHerdrAdapter.paneLabelIndex(in: snap.panes)
 
             return HerdSnapshot(
                 version: snap.version,
@@ -575,7 +576,9 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                 tabNames: tabNames,
                 focusedWorkspaceId: snap.focusedWorkspaceId,
                 focusedTabId: snap.focusedTabId,
-                focusedPaneId: snap.focusedPaneId
+                focusedPaneId: snap.focusedPaneId,
+                paneLabels: paneLabels.labels,
+                snapshotPaneIds: paneLabels.ids
             )
         }
         recordProtocol(result.protocol, readSerial: readSerial, epoch: epochBox.value)
@@ -832,7 +835,8 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                     stateChangeSeq: JSONNumber.uint64(p["state_change_seq"]),
                     cwd: p["cwd"] as? String,
                     foregroundCwd: p["foreground_cwd"] as? String,
-                    revision: JSONNumber.uint64(p["revision"])
+                    revision: JSONNumber.uint64(p["revision"]),
+                    label: p["label"] as? String
                 ))
             }
         }
@@ -977,8 +981,29 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             tokens: dict["tokens"] as? [String: String] ?? [:],
             stateLabels: dict["state_labels"] as? [String: String] ?? [:],
             interactiveReady: dict["interactive_ready"] as? Bool ?? false,
-            launchPending: dict["launch_pending"] as? Bool ?? false
+            launchPending: dict["launch_pending"] as? Bool ?? false,
+            paneLabel: AgentLabel.nonempty(dict["label"] as? String)
         )
+    }
+
+    /// Pane labels from a session snapshot. Every nonempty pane id is
+    /// listed, so a pane with no `label` is a clear. An empty string is
+    /// not a label. A later duplicate id wins.
+    internal static func paneLabelIndex(
+        in panes: [HerdrSnapshot.PaneInfo]
+    ) -> (labels: [String: String], ids: Set<String>) {
+        var labels: [String: String] = [:]
+        var ids = Set<String>()
+        for pane in panes {
+            guard !pane.paneId.isEmpty else { continue }
+            ids.insert(pane.paneId)
+            if let label = AgentLabel.nonempty(pane.label) {
+                labels[pane.paneId] = label
+            } else {
+                labels.removeValue(forKey: pane.paneId)
+            }
+        }
+        return (labels, ids)
     }
 
     /// Parses `agent.list`'s `{"agents":[AgentInfo, ...]}` result, dropping

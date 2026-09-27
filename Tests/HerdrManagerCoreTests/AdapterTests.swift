@@ -76,6 +76,70 @@ struct ParseSnapshotTests {
         #expect(snap.panes.first?.stateChangeSeq == 42)
         #expect(snap.focusedWorkspaceId == "w1")
         #expect(snap.focusedPaneId == "w1:p1")
+        #expect(snap.panes.first?.label == nil)
+    }
+
+    @Test("A pane rename is the label, and an empty one is a clear")
+    func paneRenameLabel() throws {
+        let jsonString = """
+        {
+            "version": "0.1.0",
+            "protocol": 17,
+            "workspaces": [],
+            "tabs": [],
+            "panes": [
+                {"pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "t1", "agent_status": "working", "label": "api"},
+                {"pane_id": "w1:p2", "workspace_id": "w1", "tab_id": "t1", "agent_status": "idle", "label": ""},
+                {"pane_id": "w1:p3", "workspace_id": "w1", "tab_id": "t1", "agent_status": "idle", "label": " "},
+                {"pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "t1", "agent_status": "working", "label": "web"}
+            ]
+        }
+        """
+        let data = jsonString.data(using: .utf8)!
+        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let snap = try LiveHerdrAdapter.parseSnapshot(json)
+        let indexed = LiveHerdrAdapter.paneLabelIndex(in: snap.panes)
+        #expect(indexed.ids == Set(["w1:p1", "w1:p2", "w1:p3"]))
+        #expect(indexed.labels["w1:p1"] == "web")
+        #expect(indexed.labels["w1:p2"] == nil)
+        #expect(indexed.labels["w1:p3"] == " ")
+
+        let updated = LiveHerdrAdapter.parseEvent([
+            "event": "pane_updated",
+            "data": [
+                "type": "pane_updated",
+                "pane": [
+                    "pane_id": "w1:p1",
+                    "workspace_id": "w1",
+                    "tab_id": "t1",
+                    "agent": "claude",
+                    "agent_status": "working",
+                    "label": "api"
+                ] as [String: Any]
+            ] as [String: Any]
+        ])
+        guard case .paneUpdated(let info) = updated else {
+            Issue.record("Expected pane_updated, got \(updated)")
+            return
+        }
+        #expect(info.paneLabel == "api")
+
+        let cleared = LiveHerdrAdapter.parseEvent([
+            "event": "pane.updated",
+            "data": [
+                "pane": [
+                    "pane_id": "w1:p1",
+                    "agent": "claude",
+                    "agent_status": "working",
+                    "label": ""
+                ] as [String: Any]
+            ] as [String: Any]
+        ])
+        guard case .paneUpdated(let empty) = cleared else {
+            Issue.record("Expected pane_updated, got \(cleared)")
+            return
+        }
+        #expect(empty.paneLabel == nil)
     }
 
     @Test("Missing protocol defaults to 0")

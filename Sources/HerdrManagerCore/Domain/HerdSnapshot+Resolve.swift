@@ -68,7 +68,8 @@ extension HerdSnapshot {
                 info.terminalTitleStripped ?? "",
                 workspaceNames[info.workspaceId] ?? info.workspaceId,
                 tabNames[info.tabId] ?? info.tabId,
-                info.workingDirectory ?? ""
+                info.workingDirectory ?? "",
+                paneLabels[info.paneId] ?? ""
             ]
             return fields.contains { $0.lowercased().contains(needle) }
         }

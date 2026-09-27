@@ -15,7 +15,8 @@ private func makeDwellAgentInfo(
     name: String? = nil,
     terminalTitleStripped: String? = "Claude",
     cwd: String? = "/tmp",
-    foregroundCwd: String? = "/tmp"
+    foregroundCwd: String? = "/tmp",
+    paneLabel: String? = nil
 ) -> HerdrAgentInfo {
     HerdrAgentInfo(
         paneId: paneId,
@@ -36,7 +37,8 @@ private func makeDwellAgentInfo(
         tokens: [:],
         stateLabels: [:],
         interactiveReady: true,
-        launchPending: false
+        launchPending: false,
+        paneLabel: paneLabel
     )
 }
 
@@ -143,13 +145,17 @@ struct HerdLiveTableDwellTests {
     private func snapshot(
         _ infos: [HerdrAgentInfo],
         workspaces: [String: String] = ["wA": "Cuedora"],
-        tabs: [String: String] = ["wA:t1": "main"]
+        tabs: [String: String] = ["wA:t1": "main"],
+        paneLabels: [String: String] = [:],
+        snapshotPaneIds: Set<String> = []
     ) -> HerdSnapshot {
         HerdSnapshot(
             version: "0.7.5", protocol: 17,
             agents: infos,
             workspaceNames: workspaces, tabNames: tabs,
-            focusedWorkspaceId: nil, focusedTabId: nil, focusedPaneId: nil
+            focusedWorkspaceId: nil, focusedTabId: nil, focusedPaneId: nil,
+            paneLabels: paneLabels,
+            snapshotPaneIds: snapshotPaneIds
         )
     }
 
@@ -1139,5 +1145,102 @@ struct HerdLiveTableDwellTests {
         #expect(live.agents.first?.id.raw == "wB:p4")
         #expect(live.agents.first?.name == "Bash")
         #expect(live.agents.first?.enteredAt == started)
+    }
+
+    @Test("A pane rename beats the terminal title until the snapshot clears it, and a move keeps it")
+    func paneLabelSurvivesTitleAndMove() {
+        let herd = snapshot(
+            [
+                makeDwellAgentInfo(
+                    paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5,
+                    title: nil, terminalTitleStripped: "Action Required"
+                )
+            ],
+            paneLabels: ["wA:p1": "api"],
+            snapshotPaneIds: ["wA:p1"]
+        )
+        var live = HerdLiveTable(herd: herd, agents: herd.displayAgents(now: started))
+        #expect(live.agents.first?.name == "api")
+
+        live.apply(
+            .paneUpdated(makeDwellAgentInfo(
+                paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0,
+                title: "", terminalTitleStripped: "Bash"
+            )),
+            now: refreshedAt
+        )
+        #expect(live.agents.first?.name == "api")
+        #expect(live.agents.first?.enteredAt == started)
+
+        live.apply(
+            .paneMoved(
+                previousPaneId: "wA:p1",
+                pane: makeDwellAgentInfo(
+                    paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                    agentStatus: "blocked", stateChangeSeq: 0,
+                    title: nil, terminalTitleStripped: "Bash"
+                ),
+                createdWorkspaceLabel: "proj",
+                createdTabLabel: "scratch"
+            ),
+            now: moveAt
+        )
+        #expect(live.agents.first?.id.raw == "wB:p4")
+        #expect(live.agents.first?.name == "api")
+        #expect(live.agents.first?.enteredAt == started)
+
+        live.noteStatusRefresh(
+            snapshot(
+                [
+                    makeDwellAgentInfo(
+                        paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                        agentStatus: "blocked", stateChangeSeq: 5,
+                        title: nil, terminalTitleStripped: "Action Required"
+                    )
+                ],
+                workspaces: ["wB": "proj"],
+                tabs: ["wB:t1": "scratch"],
+                snapshotPaneIds: ["wB:p4"]
+            ),
+            now: moveAt
+        )
+        #expect(live.agents.first?.name == "Action Required")
+        #expect(live.agents.first?.enteredAt == started)
+
+        let same = HerdrSnapshot.AgentSession(
+            source: "agent", agent: "claude", kind: "session", value: "abc"
+        )
+        live.noteStatusRefresh(
+            snapshot(
+                [
+                    makeDwellAgentInfo(
+                        paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                        agentStatus: "blocked", stateChangeSeq: 5,
+                        session: same, title: nil, terminalTitleStripped: "Action Required"
+                    )
+                ],
+                workspaces: ["wB": "proj"],
+                tabs: ["wB:t1": "scratch"],
+                paneLabels: ["wB:p4": "api"],
+                snapshotPaneIds: ["wB:p4"]
+            ),
+            now: moveAt
+        )
+        #expect(live.agents.first?.name == "api")
+        #expect(live.agents.first?.enteredAt == started)
+
+        let other = HerdrSnapshot.AgentSession(
+            source: "agent", agent: "claude", kind: "session", value: "other"
+        )
+        live.apply(
+            .paneUpdated(makeDwellAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                agentStatus: "blocked", stateChangeSeq: 0,
+                session: other, title: nil, terminalTitleStripped: "New task"
+            )),
+            now: moveAt
+        )
+        #expect(live.agents.first?.name == "api")
+        #expect(live.agents.first?.enteredAt == moveAt)
     }
 }

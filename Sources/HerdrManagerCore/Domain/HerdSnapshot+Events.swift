@@ -29,7 +29,9 @@ extension HerdSnapshot {
             tabNames: tabNames,
             focusedWorkspaceId: focusedWorkspaceId,
             focusedTabId: focusedTabId,
-            focusedPaneId: focusedPaneId
+            focusedPaneId: focusedPaneId,
+            paneLabels: paneLabels,
+            snapshotPaneIds: snapshotPaneIds
         )
     }
 
@@ -51,13 +53,18 @@ extension HerdSnapshot {
     /// `aliases` is the `name` from the last `agent.list` (`herdr agent
     /// rename` / `agent start`). `pane_updated` and `pane_moved` do not
     /// carry that field. Omit the map and a terminal title is the name.
-    /// `preservingExistingName` is false when the occupant changed: the
-    /// previous person's name is not this row's.
+    /// `paneLabels` is `herdr pane rename`. An event that names one wins;
+    /// one that omits it keeps the stored label. The session snapshot is
+    /// what clears it. `preservingExistingName` is false when the occupant
+    /// changed: the previous person's rename is not this row's. The pane
+    /// label stays. It names the pane, and herdr does not clear it when
+    /// the session changes.
     public func applying(
         _ event: HerdrEvent,
         to agents: [Agent],
         tabIds: [String: String] = [:],
         aliases: [String: String] = [:],
+        paneLabels: [String: String] = [:],
         preservingExistingName: Bool = true,
         now: Date = Date()
     ) -> [Agent] {
@@ -88,12 +95,12 @@ extension HerdSnapshot {
                 if var agent = displayAgent(for: info, now: now) {
                     // `displayAgent` cannot see a rename stored for an id
                     // this table has not drawn yet. The list already did.
-                    if let alias = aliases[info.paneId],
-                       let named = AgentLabel.preferred(
+                    if let named = AgentLabel.preferred(
                            title: info.title,
                            displayAgent: info.displayAgent,
-                           name: alias,
-                           terminalTitleStripped: info.terminalTitleStripped
+                           name: aliases[info.paneId],
+                           terminalTitleStripped: info.terminalTitleStripped,
+                           paneLabel: paneLabel(for: info, stored: paneLabels)
                        ) {
                         agent.name = named
                         agent.displayName = named
@@ -125,6 +132,7 @@ extension HerdSnapshot {
                 of: info,
                 to: &agents[idx],
                 alias: aliases[info.paneId],
+                paneLabel: paneLabel(for: info, stored: paneLabels),
                 preservingExistingName: preservingExistingName
             )
 
@@ -138,6 +146,7 @@ extension HerdSnapshot {
                 createdWorkspaceLabel: createdWorkspaceLabel,
                 createdTabLabel: createdTabLabel,
                 aliases: aliases,
+                paneLabels: paneLabels,
                 preservingExistingName: preservingExistingName,
                 to: agents,
                 now: now
@@ -172,6 +181,7 @@ extension HerdSnapshot {
         createdWorkspaceLabel: String?,
         createdTabLabel: String?,
         aliases: [String: String],
+        paneLabels: [String: String],
         preservingExistingName: Bool,
         to agents: [Agent],
         now: Date
@@ -236,7 +246,8 @@ extension HerdSnapshot {
             title: info.title,
             displayAgent: info.displayAgent,
             name: alias,
-            terminalTitleStripped: info.terminalTitleStripped
+            terminalTitleStripped: info.terminalTitleStripped,
+            paneLabel: paneLabel(for: info, stored: paneLabels, previous: previousRaw)
         ) ?? (preservingExistingName ? existing?.name : nil) ?? agentKind
         let wsName = labeled(info.workspaceId, in: workspaceNames, created: createdWorkspaceLabel)
             ?? existing?.workspaceName
@@ -279,8 +290,8 @@ extension HerdSnapshot {
     /// Fields on `pane_updated` that are not the status episode.
     ///
     /// The name uses `AgentLabel`: a metadata title, then `display_agent`,
-    /// then `alias` (the rename from the last list), then the stripped
-    /// terminal title. An empty string is absent. Kind is
+    /// then `alias` (the rename from the last list), then the pane label,
+    /// then the stripped terminal title. An empty string is absent. Kind is
     /// `AgentKind.resolved`: the session's agent when that string is
     /// non-empty, then the detected `agent`.
     /// Directory prefers `foreground_cwd`. Workspace and tab update only
@@ -291,6 +302,7 @@ extension HerdSnapshot {
         of info: HerdrAgentInfo,
         to agent: inout Agent,
         alias: String?,
+        paneLabel: String?,
         preservingExistingName: Bool
     ) {
         guard let agentKind = info.agent, !agentKind.isEmpty else { return }
@@ -299,7 +311,8 @@ extension HerdSnapshot {
             title: info.title,
             displayAgent: info.displayAgent,
             name: alias,
-            terminalTitleStripped: info.terminalTitleStripped
+            terminalTitleStripped: info.terminalTitleStripped,
+            paneLabel: paneLabel
         ) {
             agent.name = name
             agent.displayName = name
@@ -327,6 +340,26 @@ extension HerdSnapshot {
     private func knownLabel(_ id: String, in names: [String: String]) -> String? {
         guard !id.isEmpty, let known = names[id], !known.isEmpty else { return nil }
         return known
+    }
+
+    /// The pane label for this event. A nonempty label on the payload wins,
+    /// then the label already stored for this pane. A session snapshot that
+    /// listed this pane and did not name one is a clear: the label stored
+    /// for the id a move is leaving must not put it back. An event that
+    /// omits the field is not a clear. The stored label is what a later
+    /// event keeps after a rename the snapshot has not seen yet.
+    private func paneLabel(
+        for info: HerdrAgentInfo,
+        stored: [String: String],
+        previous: String? = nil
+    ) -> String? {
+        if let label = AgentLabel.nonempty(info.paneLabel) { return label }
+        if let label = AgentLabel.nonempty(stored[info.paneId]) { return label }
+        if snapshotPaneIds.contains(info.paneId) { return nil }
+        if let previous, previous != info.paneId {
+            return AgentLabel.nonempty(stored[previous])
+        }
+        return nil
     }
 
     private static func nonempty(_ value: String?) -> String? {

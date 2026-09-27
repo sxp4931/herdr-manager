@@ -15,7 +15,8 @@ private func makeEventAgentInfo(
     terminalTitleStripped: String? = nil,
     cwd: String? = "/tmp",
     foregroundCwd: String? = "/tmp",
-    session: HerdrSnapshot.AgentSession? = nil
+    session: HerdrSnapshot.AgentSession? = nil,
+    paneLabel: String? = nil
 ) -> HerdrAgentInfo {
     HerdrAgentInfo(
         paneId: paneId,
@@ -36,7 +37,8 @@ private func makeEventAgentInfo(
         tokens: [:],
         stateLabels: [:],
         interactiveReady: true,
-        launchPending: false
+        launchPending: false,
+        paneLabel: paneLabel
     )
 }
 
@@ -718,5 +720,141 @@ struct HerdSnapshotEventsTests {
             stateChangeSeq: 3, session: named
         ))
         #expect(preferred?.kind == .custom("codex"))
+    }
+}
+
+@Suite("A pane rename is a name")
+struct PaneLabelNameTests {
+    private let now = Date(timeIntervalSince1970: 5_000)
+
+    @Test("The pane label beats the terminal title and loses to a rename or a metadata title")
+    func order() {
+        let info = makeEventAgentInfo(
+            paneId: "wA:p1",
+            agentStatus: "blocked",
+            title: nil,
+            terminalTitleStripped: "Bash"
+        )
+        let snap = HerdSnapshot(
+            version: "0.7.5", protocol: 17,
+            agents: [info],
+            workspaceNames: ["wA": "Cuedora"],
+            tabNames: ["wA:t1": "main"],
+            focusedWorkspaceId: nil, focusedTabId: nil, focusedPaneId: nil,
+            paneLabels: ["wA:p1": "api"],
+            snapshotPaneIds: ["wA:p1"]
+        )
+        #expect(snap.displayAgent(for: info)?.name == "api")
+
+        let renamed = makeEventAgentInfo(
+            paneId: "wA:p1", agentStatus: "blocked",
+            title: nil, name: "reviewer", terminalTitleStripped: "Bash"
+        )
+        #expect(snap.displayAgent(for: renamed)?.name == "reviewer")
+
+        let titled = makeEventAgentInfo(
+            paneId: "wA:p1", agentStatus: "blocked",
+            title: "Metadata", terminalTitleStripped: "Bash"
+        )
+        #expect(snap.displayAgent(for: titled)?.name == "Metadata")
+
+        let blank = makeEventAgentInfo(
+            paneId: "wA:p1", agentStatus: "blocked",
+            title: nil, terminalTitleStripped: "Bash", paneLabel: ""
+        )
+        #expect(blank.occupantFingerprint == info.occupantFingerprint)
+    }
+
+    @Test("A terminal-title update keeps the pane label, and a move carries it")
+    func eventKeepsTheLabel() {
+        let entered = Date(timeIntervalSince1970: 1_000)
+        let row = Agent(
+            id: AgentID("wA:p1"),
+            kind: .custom("claude"),
+            name: "api",
+            displayName: "api",
+            status: .blocked,
+            stateChangeSeq: 5,
+            enteredAt: entered,
+            workspaceName: "Cuedora",
+            tabName: "main"
+        )
+        let snap = HerdSnapshot(
+            version: "0.7.5", protocol: 17,
+            agents: [],
+            workspaceNames: ["wA": "Cuedora", "wB": "proj"],
+            tabNames: ["wA:t1": "main", "wB:t1": "scratch"],
+            focusedWorkspaceId: nil, focusedTabId: nil, focusedPaneId: nil
+        )
+        let retitled = snap.applying(
+            .paneUpdated(makeEventAgentInfo(
+                paneId: "wA:p1", agentStatus: "blocked",
+                title: "", terminalTitleStripped: "Bash"
+            )),
+            to: [row],
+            paneLabels: ["wA:p1": "api"],
+            now: now
+        )
+        #expect(retitled.first?.name == "api")
+        #expect(retitled.first?.enteredAt == entered)
+
+        let moved = snap.applying(
+            .paneMoved(
+                previousPaneId: "wA:p1",
+                pane: makeEventAgentInfo(
+                    paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                    agentStatus: "blocked",
+                    title: nil, terminalTitleStripped: "Bash"
+                ),
+                createdWorkspaceLabel: "proj",
+                createdTabLabel: "scratch"
+            ),
+            to: retitled,
+            paneLabels: ["wA:p1": "api"],
+            now: now
+        )
+        #expect(moved.first?.id.raw == "wB:p4")
+        #expect(moved.first?.name == "api")
+        #expect(moved.first?.enteredAt == entered)
+    }
+
+    @Test("A snapshot that cleared the label does not restore it from the id the pane left")
+    func clearedLabelDoesNotFollowTheMove() {
+        let row = Agent(
+            id: AgentID("wA:p1"),
+            kind: .custom("claude"),
+            name: "api",
+            displayName: "api",
+            status: .blocked,
+            stateChangeSeq: 5,
+            enteredAt: now,
+            workspaceName: "Cuedora",
+            tabName: "main"
+        )
+        let snap = HerdSnapshot(
+            version: "0.7.5", protocol: 17,
+            agents: [],
+            workspaceNames: ["wB": "proj"],
+            tabNames: ["wB:t1": "scratch"],
+            focusedWorkspaceId: nil, focusedTabId: nil, focusedPaneId: nil,
+            paneLabels: [:],
+            snapshotPaneIds: ["wB:p4"]
+        )
+        let moved = snap.applying(
+            .paneMoved(
+                previousPaneId: "wA:p1",
+                pane: makeEventAgentInfo(
+                    paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                    agentStatus: "blocked",
+                    title: nil, terminalTitleStripped: "Bash"
+                ),
+                createdWorkspaceLabel: nil,
+                createdTabLabel: nil
+            ),
+            to: [row],
+            paneLabels: ["wA:p1": "api"],
+            now: now
+        )
+        #expect(moved.first?.name == "Bash")
     }
 }

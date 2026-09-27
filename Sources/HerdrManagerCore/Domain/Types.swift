@@ -579,10 +579,12 @@ public struct HerdrSnapshot: Sendable {
         public let cwd: String?
         public let foregroundCwd: String?
         public let revision: UInt64?
+        /// `herdr pane rename`. Nil when the snapshot omitted it.
+        public let label: String?
 
         public init(paneId: String, workspaceId: String, tabId: String, agent: String?, agentStatus: String,
                     agentSession: AgentSession?, terminalTitleStripped: String?, stateChangeSeq: UInt64?,
-                    cwd: String?, foregroundCwd: String?, revision: UInt64?) {
+                    cwd: String?, foregroundCwd: String?, revision: UInt64?, label: String? = nil) {
             self.paneId = paneId
             self.workspaceId = workspaceId
             self.tabId = tabId
@@ -594,6 +596,7 @@ public struct HerdrSnapshot: Sendable {
             self.cwd = cwd
             self.foregroundCwd = foregroundCwd
             self.revision = revision
+            self.label = label
         }
     }
 
@@ -644,6 +647,10 @@ public struct HerdrAgentInfo: Sendable, Equatable {
     public let stateLabels: [String: String]
     public let interactiveReady: Bool
     public let launchPending: Bool
+    /// `PaneInfo.label`: `herdr pane rename`. `agent.list` does not carry
+    /// it. Nil means this payload omitted the field, not that the label
+    /// was cleared — a session snapshot is what clears it.
+    public let paneLabel: String?
 
     public init(
         paneId: String,
@@ -664,7 +671,8 @@ public struct HerdrAgentInfo: Sendable, Equatable {
         tokens: [String: String],
         stateLabels: [String: String],
         interactiveReady: Bool,
-        launchPending: Bool
+        launchPending: Bool,
+        paneLabel: String? = nil
     ) {
         self.paneId = paneId
         self.workspaceId = workspaceId
@@ -685,6 +693,7 @@ public struct HerdrAgentInfo: Sendable, Equatable {
         self.stateLabels = stateLabels
         self.interactiveReady = interactiveReady
         self.launchPending = launchPending
+        self.paneLabel = paneLabel
     }
 
     /// Who is in this pane, for write revalidation. Prefers herdr's
@@ -701,8 +710,10 @@ public struct HerdrAgentInfo: Sendable, Equatable {
     /// herdr sends `""` for a cleared field, and treating it as present
     /// made this same occupant look new. `display_agent` stays out of this
     /// string. It is a presentation label, and the fingerprints already
-    /// stored on pending actions do not include it. The string is the
-    /// value stored on pending actions as `_fp_occupant`. The pane id is
+    /// stored on pending actions do not include it. The pane label from
+    /// `herdr pane rename` is the same kind of fact and stays out too.
+    /// The string is the value stored on pending actions as `_fp_occupant`.
+    /// The pane id is
     /// part of the string, so a cross-workspace move does not compare equal.
     /// A value that is only whitespace is still an id.
     public var occupantFingerprint: String {
@@ -766,19 +777,24 @@ public struct HerdrAgentInfo: Sendable, Equatable {
 /// then the name from `herdr agent rename` or `agent start`, then the
 /// detected kind. The metadata `title` is a separate presentation string
 /// (the pane border). This row has one line, so that title still leads
-/// when a hook set it. The stripped terminal title is what an agent
-/// nobody has named is called. An empty string is not a name: a cleared
+/// when a hook set it. The name from `herdr agent rename` is how the
+/// agent is addressed, so it leads the pane label from `herdr pane
+/// rename`. That label leads the stripped terminal title: the title
+/// changes while the agent works, and the label is the name the person
+/// set to tell two panes apart. An empty string is not a name: a cleared
 /// field arrives as `""`, and treating it as present blanked the row.
 public enum AgentLabel: Sendable {
     public static func preferred(
         title: String?,
         displayAgent: String?,
         name: String?,
-        terminalTitleStripped: String?
+        terminalTitleStripped: String?,
+        paneLabel: String? = nil
     ) -> String? {
         nonempty(title)
             ?? nonempty(displayAgent)
             ?? nonempty(name)
+            ?? nonempty(paneLabel)
             ?? nonempty(terminalTitleStripped)
     }
 
@@ -819,13 +835,21 @@ public enum SessionIdentity {
 
 /// A fully-resolved view of the herd: agents (from `agent.list`, the
 /// authoritative source — plain shells are excluded) plus the workspace/tab
-/// labels (from `session.snapshot`) needed to describe where each one lives.
+/// labels and pane labels (from `session.snapshot`) needed to describe
+/// where each one lives and what the person named the pane.
 public struct HerdSnapshot: Sendable {
     public let version: String
     public let `protocol`: Int
     public let agents: [HerdrAgentInfo]
     public let workspaceNames: [String: String]   // workspaceId -> label
     public let tabNames: [String: String]         // tabId -> label
+    /// Nonempty `PaneInfo.label` values from the session snapshot.
+    /// `agent.list` does not carry this field.
+    public let paneLabels: [String: String]
+    /// Pane ids the session snapshot listed. A listed id with no
+    /// `paneLabels` entry has no manual label. Empty when this snapshot
+    /// was built without one, which is not a clear.
+    public let snapshotPaneIds: Set<String>
     public let focusedWorkspaceId: String?
     public let focusedTabId: String?
     public let focusedPaneId: String?
@@ -838,13 +862,17 @@ public struct HerdSnapshot: Sendable {
         tabNames: [String: String],
         focusedWorkspaceId: String?,
         focusedTabId: String?,
-        focusedPaneId: String?
+        focusedPaneId: String?,
+        paneLabels: [String: String] = [:],
+        snapshotPaneIds: Set<String> = []
     ) {
         self.version = version
         self.protocol = `protocol`
         self.agents = agents
         self.workspaceNames = workspaceNames
         self.tabNames = tabNames
+        self.paneLabels = paneLabels
+        self.snapshotPaneIds = snapshotPaneIds
         self.focusedWorkspaceId = focusedWorkspaceId
         self.focusedTabId = focusedTabId
         self.focusedPaneId = focusedPaneId
@@ -866,7 +894,8 @@ public struct HerdSnapshot: Sendable {
             title: info.title,
             displayAgent: info.displayAgent,
             name: info.name,
-            terminalTitleStripped: info.terminalTitleStripped
+            terminalTitleStripped: info.terminalTitleStripped,
+            paneLabel: paneLabels[info.paneId]
         ) ?? agentKind
         let status = AgentStatus(rawValue: info.agentStatus) ?? .unknown
         return Agent(

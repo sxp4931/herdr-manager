@@ -17,7 +17,8 @@ private func makeAgentInfo(
     terminalTitleStripped: String? = nil,
     session: HerdrSnapshot.AgentSession? = nil,
     cwd: String? = "/tmp",
-    foregroundCwd: String? = "/tmp"
+    foregroundCwd: String? = "/tmp",
+    paneLabel: String? = nil
 ) -> HerdrAgentInfo {
     HerdrAgentInfo(
         paneId: paneId,
@@ -38,7 +39,8 @@ private func makeAgentInfo(
         tokens: [:],
         stateLabels: [:],
         interactiveReady: true,
-        launchPending: false
+        launchPending: false,
+        paneLabel: paneLabel
     )
 }
 
@@ -3407,6 +3409,98 @@ struct AgentRenameTests {
         )))
         #expect(replaced != nil)
         #expect(store.agents[id]?.name == "New task")
+    }
+
+    @Test("A pane rename beats the terminal title, follows a move, and stays when the session changes")
+    @MainActor
+    func paneLabelSurvivesTitleMoveAndSessionChange() throws {
+        let store = AgentStore()
+        let stamp = store.captureHerdRequest()
+        store.applyHerdSnapshot(
+            herd(pane: "wA:p1", label: "api", title: nil, terminal: "Action Required"),
+            requestedAtEpoch: stamp.epoch, requestedAtSerial: stamp.serial
+        )
+        let id = AgentID("wA:p1")
+        #expect(store.agents[id]?.name == "api")
+        let entered = store.agents[id]?.enteredAt
+
+        #expect(store.applyEvent(.paneUpdated(makeAgentInfo(
+            paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0,
+            title: "", terminalTitleStripped: "Bash",
+            cwd: nil, foregroundCwd: nil
+        ))) == nil)
+        #expect(store.agents[id]?.name == "api")
+        #expect(store.agents[id]?.enteredAt == entered)
+
+        #expect(store.applyEvent(.paneMoved(
+            previousPaneId: "wA:p1",
+            pane: makeAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2",
+                agentStatus: "blocked", stateChangeSeq: 0,
+                title: nil, terminalTitleStripped: "Bash",
+                cwd: nil, foregroundCwd: nil
+            ),
+            createdWorkspaceLabel: nil,
+            createdTabLabel: nil
+        )) == nil)
+        #expect(store.agents[id] == nil)
+        #expect(store.agents[AgentID("wB:p4")]?.name == "api")
+
+        let same = HerdrSnapshot.AgentSession(
+            source: "agent", agent: "claude", kind: "session", value: "abc"
+        )
+        let learned = store.captureHerdRequest()
+        store.applyHerdSnapshot(
+            herd(pane: "wB:p4", workspace: "wB", tab: "wB:t2", label: "api", title: nil, terminal: "Bash", session: same),
+            requestedAtEpoch: learned.epoch, requestedAtSerial: learned.serial
+        )
+        let other = HerdrSnapshot.AgentSession(
+            source: "agent", agent: "claude", kind: "session", value: "other"
+        )
+        let replaced = store.applyEvent(.paneUpdated(makeAgentInfo(
+            paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2",
+            agentStatus: "blocked", stateChangeSeq: 0,
+            title: nil, terminalTitleStripped: "New task", session: other
+        )))
+        #expect(replaced != nil)
+        #expect(store.agents[AgentID("wB:p4")]?.name == "api")
+        #expect(replaced?.enteredAt == store.agents[AgentID("wB:p4")]?.enteredAt)
+
+        let cleared = store.captureHerdRequest()
+        store.applyHerdSnapshot(
+            herd(pane: "wB:p4", workspace: "wB", tab: "wB:t2", label: nil, title: nil, terminal: "Action Required", session: other),
+            requestedAtEpoch: cleared.epoch, requestedAtSerial: cleared.serial
+        )
+        #expect(store.agents[AgentID("wB:p4")]?.name == "Action Required")
+    }
+
+    private func herd(
+        pane: String,
+        workspace: String = "wA",
+        tab: String = "wA:t1",
+        label: String?,
+        title: String?,
+        terminal: String?,
+        session: HerdrSnapshot.AgentSession? = nil
+    ) -> HerdSnapshot {
+        var labels: [String: String] = [:]
+        if let label { labels[pane] = label }
+        return HerdSnapshot(
+            version: "0.7.5", protocol: 17,
+            agents: [
+                makeAgentInfo(
+                    paneId: pane, workspaceId: workspace, tabId: tab,
+                    agentStatus: "blocked", stateChangeSeq: 5,
+                    title: title, terminalTitleStripped: terminal, session: session,
+                    foregroundCwd: "/work"
+                )
+            ],
+            workspaceNames: ["wA": "Alpha", "wB": "Beta"],
+            tabNames: ["wA:t1": "main", "wB:t2": "logs"],
+            focusedWorkspaceId: nil, focusedTabId: nil, focusedPaneId: nil,
+            paneLabels: labels,
+            snapshotPaneIds: [pane]
+        )
     }
 }
 

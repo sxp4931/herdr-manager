@@ -126,6 +126,22 @@ struct HerdResolveTests {
         #expect(herd.resolveAgent(agentId: nil, query: "nope") == .failure(
             "No agent matches query 'nope'"
         ))
+
+        let named = HerdSnapshot(
+            version: "0.7.5",
+            protocol: 17,
+            agents: [
+                info(pane: "w1:p1", workspace: "w1", tab: "w1:t1", title: "Review"),
+                info(pane: "w2:p1", workspace: "w2", tab: "w2:t1", title: "Build")
+            ],
+            workspaceNames: ["w1": "Proj", "w2": "Other"],
+            tabNames: ["w1:t1": "main", "w2:t1": "side"],
+            focusedWorkspaceId: nil,
+            focusedTabId: nil,
+            focusedPaneId: nil,
+            paneLabels: ["w1:p1": "api"]
+        )
+        #expect(pane(named.resolveAgent(agentId: nil, query: "api")) == "w1:p1")
     }
 
     private func pane(_ resolution: AgentResolution) -> String? {
