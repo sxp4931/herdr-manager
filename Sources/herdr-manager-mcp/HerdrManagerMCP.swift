@@ -123,6 +123,16 @@ actor MCPServer {
     /// cannot move the protocol gate.
     private var nextHerdReadSerial: UInt64 = 0
 
+    /// Clocks for "blocked since" and silence. A fresh agent on every
+    /// tool call would start both at that call.
+    private var episodes = DiagnosisEpisodeLedger()
+    private let outputPoller = HeartbeatPoller()
+    /// When each working pane's detection screen was last read. Inside
+    /// `outputPollInterval` the stored hash is reused.
+    private var lastOutputPoll: [AgentID: Date] = [:]
+    /// Same cadence as Shepherd's heartbeat.
+    private let outputPollInterval: TimeInterval = 10
+
     // nonisolated(unsafe): only accessed from nonisolated writeResponse/writeRaw
     // which serialize via the lock.
     nonisolated(unsafe) private var stdoutLock = NSLock()
@@ -266,6 +276,62 @@ actor MCPServer {
 
     // MARK: - Herd → Agent Builder
 
+    /// Agents for one diagnosis, with clocks this process already recorded.
+    ///
+    /// `buildAgents` stamps `enteredAt` at the call. A blocked agent then
+    /// reads as newly blocked on every overview, and a working agent can
+    /// never go quiet. The ledger keeps the episode. The detection hash
+    /// moves with a session so a cross-workspace move does not make the
+    /// next read a first look. A working pane with no baseline is treated
+    /// as having just produced output: a failed screen read is not silence.
+    private func agentsForDiagnosis(from herd: HerdSnapshot) async -> [AgentID: Agent] {
+        let now = Date()
+        let observed = episodes.observe(herd.agents, now: now)
+        if !observed.moves.isEmpty {
+            _ = await outputPoller.retarget(replacing: observed.moves)
+        }
+        var agents = buildAgents(from: herd)
+        for (id, enteredAt) in observed.enteredAt {
+            agents[id]?.enteredAt = enteredAt
+        }
+
+        let due = agents.values.filter { agent in
+            guard agent.status == .working else { return false }
+            if let last = lastOutputPoll[agent.id], now.timeIntervalSince(last) < outputPollInterval {
+                return false
+            }
+            return true
+        }
+        if !due.isEmpty {
+            for agent in due {
+                lastOutputPoll[agent.id] = now
+            }
+            _ = await outputPoller.poll(agents: due, adapter: adapter)
+        }
+        let live = Set(agents.keys)
+        lastOutputPoll = lastOutputPoll.filter { live.contains($0.key) }
+        await outputPoller.prune(keeping: live)
+
+        // Applied after the loop. Writing `agents` while it is being
+        // iterated is a trap, and each baseline read is an await.
+        let stamped = Date()
+        var outputs: [AgentID: Date] = [:]
+        for (id, agent) in agents {
+            let baseline = await outputPoller.lastOutputDate(for: id)
+            if let output = DiagnosisEpisodeLedger.outputDate(
+                for: agent.status,
+                baseline: baseline,
+                now: stamped
+            ) {
+                outputs[id] = output
+            }
+        }
+        for (id, output) in outputs {
+            agents[id]?.lastOutputAt = output
+        }
+        return agents
+    }
+
     /// Build the MCP inventory from the same authoritative merged view
     /// Shepherd uses: `agent.list` supplies real agents and state sequences,
     /// while `session.snapshot` supplies workspace/tab labels.
@@ -393,9 +459,10 @@ actor MCPServer {
         do {
             try await ensureConnected()
             let herd = try await readHerd()
-            var agents = buildAgents(from: herd)
+            var agents = await agentsForDiagnosis(from: herd)
 
-            // Diagnose non-idle agents
+            // Diagnose non-idle agents. The episode clock and the detection
+            // baseline come from earlier calls in this process.
             for agent in agents.values where agent.status != .idle {
                 let verdict = await diagnoser.diagnose(agent: agent, adapter: adapter)
                 if var current = agents[agent.id] {
@@ -421,9 +488,10 @@ actor MCPServer {
         do {
             try await ensureConnected()
             let herd = try await readHerd()
-            var agents = buildAgents(from: herd)
+            var agents = await agentsForDiagnosis(from: herd)
 
-            // Diagnose non-idle agents
+            // Diagnose non-idle agents. The episode clock and the detection
+            // baseline come from earlier calls in this process.
             for agent in agents.values where agent.status != .idle {
                 let verdict = await diagnoser.diagnose(agent: agent, adapter: adapter)
                 if var current = agents[agent.id] {
@@ -493,7 +561,7 @@ actor MCPServer {
                 return makeToolError("Rate limit exceeded. Try again in \(retry) seconds.")
             }
 
-            var agents = buildAgents(from: herd)
+            var agents = await agentsForDiagnosis(from: herd)
 
             // Diagnose
             var verdict: Verdict = .unclassifiable(reason: "agent not found")
@@ -624,7 +692,7 @@ actor MCPServer {
                 return makeToolError("Rate limit exceeded. Try again in \(retry) seconds.")
             }
 
-            let agents = buildAgents(from: herd)
+            let agents = await agentsForDiagnosis(from: herd)
             let agentId = AgentID(info.paneId)
             guard let agent = agents[agentId] else {
                 return makeToolError("Agent not found: \(info.paneId)")
@@ -2262,7 +2330,7 @@ actor MCPServer {
     nonisolated(unsafe) static let toolDefinitions: [[String: Any]] = [
         [
             "name": "herd.overview",
-            "description": "Overview of all AI agents in the herdr multiplexer, grouped by workspace. Shows counts by status and which agents need attention.",
+            "description": "Overview of all AI agents in the herdr multiplexer, grouped by workspace. Shows counts by status and which agents need attention. Quiet is reported once this server has seen the same detection screen past the silence threshold.",
             "inputSchema": [
                 "type": "object",
                 "properties": [String: Any]()
@@ -2337,7 +2405,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "agent.diagnose",
-            "description": "Run full stuck-diagnosis on one agent. Pass agent_id or a unique human query. Returns verdict, confidence, what it is waiting on, evidence, and suggested actions.",
+            "description": "Run full stuck-diagnosis on one agent. Pass agent_id or a unique human query. Returns verdict, confidence, what it is waiting on, evidence, and suggested actions. Blocked and quiet durations start when this server first sees that episode. Quiet also requires the detection screen to stay unchanged across calls.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
