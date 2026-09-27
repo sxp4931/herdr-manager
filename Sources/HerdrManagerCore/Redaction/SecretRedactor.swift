@@ -203,6 +203,33 @@ public final class SecretRedactor: Sendable {
                 "(?<![A-Za-z0-9_])pplx-[A-Za-z0-9]{48}(?![A-Za-z0-9])",
                 "pplx-[REDACTED]"
             ),
+            // LangSmith personal access tokens and service keys. A
+            // personal token acts as the user who created it. A service
+            // key is scoped to one workspace or the whole organization.
+            // The shape is the one LangSmith's own anonymizer matches:
+            // `lsv2_pt_` or `lsv2_sk_`, then at least 32 alphanumeric
+            // characters, then zero or more underscore-delimited
+            // segments. That tail is part of the secret, so an extra
+            // segment is consumed instead of being left behind.
+            // `LANGSMITH_API_KEY` already ends in `api_key`, so an
+            // assignment is hidden. A pane log and a pasted key have no
+            // keyword. A first segment shorter than 32 stays. There is
+            // no published maximum, so a longer alphanumeric run is the
+            // key. A hyphen is not in this alphabet: a hyphenated note
+            // stays beside the redaction, and a hyphen inside the first
+            // segment keeps the whole string. A trailing underscore is
+            // not a segment, so it stays beside the redaction. A letter,
+            // digit, or underscore glued to the front is not the prefix.
+            // The prefix is the lowercase form LangSmith prints. A
+            // legacy `ls__` key is not this prefix.
+            (
+                "(?<![A-Za-z0-9_])lsv2_pt_[A-Za-z0-9]{32,}(?:_[A-Za-z0-9]+)*(?![A-Za-z0-9])",
+                "lsv2_pt_[REDACTED]"
+            ),
+            (
+                "(?<![A-Za-z0-9_])lsv2_sk_[A-Za-z0-9]{32,}(?:_[A-Za-z0-9]+)*(?![A-Za-z0-9])",
+                "lsv2_sk_[REDACTED]"
+            ),
             // Doppler auth tokens. A service token reads every secret in
             // one config. `DOPPLER_TOKEN` already ends in `token`, so an
             // assignment is hidden. `doppler configure` and a pane log

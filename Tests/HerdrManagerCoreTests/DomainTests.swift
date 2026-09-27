@@ -3095,6 +3095,104 @@ struct SecretRedactorTests {
             #expect(result.redactedText == line)
         }
     }
+
+    @Test("A LangSmith key is redacted once and keeps its prefix")
+    func redactsLangSmithKey() {
+        let redactor = SecretRedactor()
+        let body = String(repeating: "a", count: 32)
+        let tail = "bbbbbbbbbb"
+        let key = "lsv2_pt_\(body)_\(tail)"
+        let kept = "lsv2_pt_[REDACTED]"
+        let serviceBody = String(repeating: "B", count: 40)
+        let service = "lsv2_sk_\(serviceBody)"
+        let serviceKept = "lsv2_sk_[REDACTED]"
+
+        let bare = redactor.redact("langsmith printed \(key)")
+        #expect(bare.redactedText == "langsmith printed \(kept)")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains(body))
+        #expect(!bare.redactedText.contains(tail))
+        let again = redactor.redact(bare.redactedText)
+        #expect(again.redactedText == bare.redactedText)
+        #expect(again.redactionCount == 0)
+
+        let assigned = redactor.redact("LANGSMITH_API_KEY=\(key)")
+        #expect(assigned.redactedText == "LANGSMITH_API_KEY=\(kept)")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        let quoted = redactor.redact(#"{"token": "\#(service)"}"#)
+        #expect(quoted.redactedText == #"{"token": "\#(serviceKept)"}"#)
+        #expect(quoted.redactionCount == 1)
+        #expect(!quoted.redactedText.contains(serviceBody))
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        let header = redactor.redact("Authorization: Bearer \(key)")
+        #expect(header.redactedText == "Authorization: Bearer \(kept)")
+        #expect(header.redactionCount == 1)
+        let headerAgain = redactor.redact(header.redactedText)
+        #expect(headerAgain.redactionCount == 0)
+        let lower = redactor.redact("authorization: bearer \(service)")
+        #expect(lower.redactedText == "authorization: bearer \(serviceKept)")
+        #expect(lower.redactionCount == 1)
+
+        let remote = redactor.redact("https://ci:\(key)@smith.langchain.com/runs")
+        #expect(remote.redactedText == "https://ci:\(kept)@smith.langchain.com/runs")
+        #expect(remote.redactionCount == 1)
+        #expect(remote.redactedText.contains("smith.langchain.com/runs"))
+        let remoteAgain = redactor.redact(remote.redactedText)
+        #expect(remoteAgain.redactionCount == 0)
+
+        let sentence = redactor.redact("saw \(key). next")
+        #expect(sentence.redactedText == "saw \(kept). next")
+        #expect(sentence.redactionCount == 1)
+        let noted = redactor.redact(key + "-note")
+        #expect(noted.redactedText == kept + "-note")
+        #expect(noted.redactionCount == 1)
+        #expect(!noted.redactedText.contains(tail))
+        let dangling = redactor.redact("lsv2_pt_\(body)_")
+        #expect(dangling.redactedText == kept + "_")
+        #expect(dangling.redactionCount == 1)
+        let longer = redactor.redact("lsv2_pt_\(body)a")
+        #expect(longer.redactedText == kept)
+        #expect(longer.redactionCount == 1)
+        let hyphen = redactor.redact("my-\(service)")
+        #expect(hyphen.redactedText == "my-\(serviceKept)")
+        #expect(hyphen.redactionCount == 1)
+
+        let pair = redactor.redact("\(key) \(service)")
+        #expect(pair.redactedText == "\(kept) \(serviceKept)")
+        #expect(pair.redactionCount == 2)
+
+        let leftover = redactor.redact("token=\(key)@leftoversecret")
+        #expect(leftover.redactedText == "token=[REDACTED]")
+        #expect(leftover.redactionCount == 2)
+        #expect(!leftover.redactedText.contains("leftoversecret"))
+        #expect(!leftover.redactedText.contains(tail))
+
+        let keptLines = [
+            "keys start with lsv2_pt_",
+            "lsv2_pt_" + String(repeating: "a", count: 31),
+            "lsv2_pt_" + String(repeating: "a", count: 31) + "_" + String(repeating: "b", count: 40),
+            "lsv2_sk_" + String(repeating: "a", count: 31),
+            "LSV2_PT_" + body,
+            "lsv2_PT_" + body,
+            "LSV2_SK_" + serviceBody,
+            "lsv2_" + body,
+            "lsv2_xx_" + body,
+            "ls__" + String(repeating: "a", count: 40),
+            "x" + key,
+            "_" + key,
+            "lsv2_pt_" + String(repeating: "a", count: 20) + "-" + String(repeating: "b", count: 20),
+            "lsv2_pt_your_key_here",
+        ]
+        for line in keptLines {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line.prefix(80))")
+            #expect(result.redactedText == line)
+        }
+    }
 }
 
 // MARK: - DwellTracker Tests
