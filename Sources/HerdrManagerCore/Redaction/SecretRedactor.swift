@@ -65,7 +65,47 @@ public final class SecretRedactor: Sendable {
             ("gltok-[A-Za-z0-9_-]{20,}", "gltok-[REDACTED]"),
             // xAI API keys
             ("xai-[A-Za-z0-9]{20,}", "xai-[REDACTED]"),
-            // Slack bot / user / app tokens
+            // Slack app-level tokens (`xapp-1-<app>-<id>-<secret>`). The
+            // older `xox[baprs]` pattern does not name this prefix. The
+            // version is the single digit Slack issues. Each later
+            // segment has a floor, so `xapp-` in a sentence stays. A
+            // letter, digit, or underscore glued to the front is not
+            // the prefix. The label stays, and the replacement is a
+            // placeholder.
+            (
+                "(?i)(?<![A-Za-z0-9_])xapp-[0-9]-[A-Za-z0-9]{8,}-[0-9]{8,}-[A-Za-z0-9]{32,}",
+                "xapp-[REDACTED]"
+            ),
+            // Rotated config access tokens. The body is base64, so it
+            // contains `+`, `/`, and `=`. `xox[baprs]` matches the inner
+            // `xoxb-` or `xoxp-` and stops at the first of those, which
+            // leaves the tail. This pattern is above that one and takes
+            // the whole token. Twenty characters is the floor; a shorter
+            // body stays. The refresh token below is `xoxe-`, not
+            // `xoxe.xox`.
+            (
+                "(?i)(?<![A-Za-z0-9_])xoxe\\.xox[bp]-[A-Za-z0-9+/=_-]{20,}",
+                "xoxe.xox[REDACTED]"
+            ),
+            // Config refresh tokens, and the `xoxe-` value on a Slack
+            // file URL. The refresh token mints a new access token. A
+            // body shorter than 20 stays. `+`, `/`, and `=` are part of
+            // the secret, same as the access token above.
+            (
+                "(?i)(?<![A-Za-z0-9_])xoxe-[A-Za-z0-9+/=_-]{20,}",
+                "xoxe-[REDACTED]"
+            ),
+            // Web-client session tokens. `c` is not in `xox[baprs]`. The
+            // body is the same alphabet as a bot token. Twenty-four
+            // characters is the floor, so a short `xoxc-` stays. A
+            // percent-encoded `xoxd-` cookie is not this shape.
+            (
+                "(?i)(?<![A-Za-z0-9_])xoxc-[A-Za-z0-9-]{24,}",
+                "xoxc-[REDACTED]"
+            ),
+            // Slack bot, user, and legacy tokens (`xoxb`, `xoxp`, `xoxa`,
+            // `xoxr`, `xoxs`). A `+`, `/`, or `=` still ends this match.
+            // Rotation tokens are taken whole by the patterns above.
             ("xox[baprs]-[A-Za-z0-9-]{10,}", "xox[REDACTED]"),
             // Slack incoming, workflow, and trigger webhooks. The path
             // is the credential: posting to it writes into the workspace,
@@ -86,6 +126,50 @@ public final class SecretRedactor: Sendable {
             (
                 "(?i)(?<![A-Za-z0-9.])(?:https?://)?hooks\\.slack-gov\\.com/(?:services|triggers|workflows)/(?:[A-Za-z0-9_-]{8,64}/){1,4}[A-Za-z0-9_-]{16,128}",
                 "https://hooks.slack-gov.com/[REDACTED]"
+            ),
+            // Discord incoming webhooks. The path is the credential: a
+            // POST writes into the channel. The id is a snowflake (17 to
+            // 20 digits, the width of a uint64). The token is at least
+            // 20 characters; the issued token is longer, and a shorter
+            // one stays. canary, ptb, and the legacy discordapp host are
+            // the same URL, including `/api/v10`. The scheme is optional
+            // on the way in. The host written back is one placeholder, so
+            // a second pass counts nothing and `token=<url>` does not
+            // take it. A letter or dot glued to the front is not this
+            // host. A period or a query string after the token stays.
+            (
+                "(?i)(?<![A-Za-z0-9.])(?:https?://)?(?:(?:canary|ptb)\\.)?discord(?:app)?\\.com/api(?:/v[0-9]{1,2})?/webhooks/[0-9]{17,20}/[A-Za-z0-9_-]{20,}",
+                "https://discord.com/api/webhooks/[REDACTED]"
+            ),
+            // Teams connector URLs. The path is the credential. The
+            // tenant label varies, so the host written back is the fixed
+            // suffix and the path is gone. `webhook` and `webhookb2` are
+            // the two path spellings on this host. The ids are the GUID,
+            // `@`, GUID, `IncomingWebhook`, 32 hex, GUID shape Teams
+            // issues. A docs path without those ids stays. A host that
+            // only continues past `.com` is not this host.
+            (
+                "(?i)(?<![A-Za-z0-9.])(?:https?://)?[a-z0-9][a-z0-9.-]{0,80}\\.webhook\\.office\\.com/webhook(?:b2)?/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}@[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/IncomingWebhook/[0-9a-f]{32}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                "https://webhook.office.com/[REDACTED]"
+            ),
+            (
+                "(?i)(?<![A-Za-z0-9.])(?:https?://)?outlook\\.office\\.com/webhook/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}@[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/IncomingWebhook/[0-9a-f]{32}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                "https://outlook.office.com/[REDACTED]"
+            ),
+            (
+                "(?i)(?<![A-Za-z0-9.])(?:https?://)?outlook\\.office365\\.com/webhook/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}@[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/IncomingWebhook/[0-9a-f]{32}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                "https://outlook.office365.com/[REDACTED]"
+            ),
+            // Teams Workflows, and any Logic App HTTP trigger: the URL
+            // is the credential, and the secret is the `sig` query.
+            // `sig` is not an assignment keyword. The workflow id and
+            // the trigger path are what keep this from matching an
+            // unrelated `sig=`. The sig is at least 20 characters and
+            // stops at `&` or whitespace, so a later query parameter
+            // stays. A shorter sig stays.
+            (
+                "(?i)(?<![A-Za-z0-9.])(?:https?://)?[a-z0-9][a-z0-9.-]{0,80}\\.logic\\.azure\\.com(?::[0-9]{2,5})?/workflows/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/triggers/[A-Za-z0-9_%.-]{1,80}/paths/invoke\\?[^\\t\\r\\n ]*\\bsig=[^\\t\\r\\n &]{20,}",
+                "https://logic.azure.com/[REDACTED]"
             ),
             // AWS access key IDs
             ("AKIA[0-9A-Z]{16}", "AKIA[REDACTED]"),

@@ -981,6 +981,327 @@ struct SecretRedactorTests {
         #expect(keptEvil.redactionCount == 0)
     }
 
+    @Test("Slack app, rotation, and client tokens are redacted once")
+    func redactsSlackAppRotationAndClientTokens() {
+        let redactor = SecretRedactor()
+        let app = "xapp" + "-1-A0123456789-1234567890123-" + String(repeating: "ab", count: 32)
+        let appSecret = String(repeating: "ab", count: 32)
+
+        let bare = redactor.redact("socket \(app)")
+        #expect(bare.redactedText == "socket xapp-[REDACTED]")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains(appSecret))
+        let bareAgain = redactor.redact(bare.redactedText)
+        #expect(bareAgain.redactedText == bare.redactedText)
+        #expect(bareAgain.redactionCount == 0)
+
+        // The variable ends in `token`, which is an assignment keyword.
+        // The label stays, and the placeholder is not a second secret.
+        let assigned = redactor.redact("token=\(app)")
+        #expect(assigned.redactedText == "token=xapp-[REDACTED]")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        let env = redactor.redact("SLACK_APP_TOKEN=\(app)")
+        #expect(env.redactedText == "SLACK_APP_TOKEN=xapp-[REDACTED]")
+        #expect(env.redactionCount == 1)
+        let quoted = redactor.redact(#"{"token": "\#(app)"}"#)
+        #expect(quoted.redactedText == #"{"token": "xapp-[REDACTED]"}"#)
+        #expect(quoted.redactionCount == 1)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        let upper = redactor.redact(app.uppercased())
+        #expect(upper.redactedText == "xapp-[REDACTED]")
+        #expect(upper.redactionCount == 1)
+        let glued = redactor.redact("n" + app)
+        #expect(glued.redactedText == "n" + app)
+        #expect(glued.redactionCount == 0)
+        let underscored = redactor.redact("_" + app)
+        #expect(underscored.redactedText == "_" + app)
+        #expect(underscored.redactionCount == 0)
+
+        let shortApp = "xapp" + "-1-A012345678-12345678-" + String(repeating: "a", count: 31)
+        let keptShort = redactor.redact(shortApp)
+        #expect(keptShort.redactedText == shortApp)
+        #expect(keptShort.redactionCount == 0)
+        let floorApp = "xapp" + "-1-A012345678-12345678-" + String(repeating: "b", count: 32)
+        #expect(redactor.redact(floorApp).redactedText == "xapp-[REDACTED]")
+
+        let mention = redactor.redact("tokens start with xapp- and xoxc- on Slack")
+        #expect(mention.redactedText == "tokens start with xapp- and xoxc- on Slack")
+        #expect(mention.redactionCount == 0)
+
+        // `+` after 20 alphabet characters is where `xox[baprs]` stops.
+        // The tail would stay. The rotation pattern takes the whole token.
+        let lateBody = "xoxe.xox" + "p-1-" + String(repeating: "A", count: 20) + "+c/dEf=Tail"
+        let late = lateBody + "."
+        let lateResult = redactor.redact(late)
+        #expect(lateResult.redactedText == "xoxe.xox[REDACTED].")
+        #expect(lateResult.redactionCount == 1)
+        #expect(!lateResult.redactedText.contains("Tail"))
+        #expect(!lateResult.redactedText.contains("+"))
+        let lateAgain = redactor.redact(lateResult.redactedText)
+        #expect(lateAgain.redactionCount == 0)
+        // The period is not a placeholder boundary, so the assignment
+        // case is the token without it. The label stays, and it counts once.
+        let lateAssigned = redactor.redact("token=\(lateBody)")
+        #expect(lateAssigned.redactedText == "token=xoxe.xox[REDACTED]")
+        #expect(lateAssigned.redactionCount == 1)
+
+        // `+` inside the first 10 characters: the older pattern matches
+        // nothing, so the whole secret would remain.
+        let early = "xoxe.xox" + "p-1-Mi0yAb+" + "c/dEf=" + String(repeating: "Qw", count: 30)
+        let earlyResult = redactor.redact(early)
+        #expect(earlyResult.redactedText == "xoxe.xox[REDACTED]")
+        #expect(earlyResult.redactionCount == 1)
+        #expect(!earlyResult.redactedText.contains("Mi0yAb"))
+        #expect(!earlyResult.redactedText.contains("Qw"))
+
+        let alnum = "xoxe.xox" + "b-1-" + String(repeating: "A", count: 40)
+        let alnumResult = redactor.redact(alnum)
+        #expect(alnumResult.redactedText == "xoxe.xox[REDACTED]")
+        #expect(alnumResult.redactionCount == 1)
+        let alnumAgain = redactor.redact(alnumResult.redactedText)
+        #expect(alnumAgain.redactionCount == 0)
+        let accessUpper = ("xoxe.xox" + "p-1-" + String(repeating: "ab", count: 20)).uppercased()
+        #expect(redactor.redact(accessUpper).redactedText == "xoxe.xox[REDACTED]")
+
+        let refresh = "xoxe" + "-1-" + "My0xAb+" + "c/dEf=" + String(repeating: "rm", count: 20)
+        let refreshResult = redactor.redact(refresh)
+        #expect(refreshResult.redactedText == "xoxe-[REDACTED]")
+        #expect(refreshResult.redactionCount == 1)
+        #expect(!refreshResult.redactedText.contains("c/dEf"))
+        #expect(!refreshResult.redactedText.contains("rmrm"))
+        let refreshAgain = redactor.redact(refreshResult.redactedText)
+        #expect(refreshAgain.redactionCount == 0)
+        let refreshAssigned = redactor.redact("token=\(refresh)")
+        #expect(refreshAssigned.redactedText == "token=xoxe-[REDACTED]")
+        #expect(refreshAssigned.redactionCount == 1)
+
+        let fileTok = "xoxe" + "-" + "1111111111111-2222222222222-3333333333333-" + String(repeating: "ab", count: 16)
+        let file = redactor.redact("https://files.slack.com/files-pri/T04/image.png?t=\(fileTok)")
+        #expect(file.redactedText == "https://files.slack.com/files-pri/T04/image.png?t=xoxe-[REDACTED]")
+        #expect(file.redactionCount == 1)
+        #expect(!file.redactedText.contains("1111111111111"))
+
+        let pair = redactor.redact("\(late) \(refresh)")
+        #expect(pair.redactedText == "xoxe.xox[REDACTED]. xoxe-[REDACTED]")
+        #expect(pair.redactionCount == 2)
+
+        let client = "xox" + "c-123456789012-123456789012-" + String(repeating: "ab", count: 16)
+        let clientResult = redactor.redact("saw \(client). next")
+        #expect(clientResult.redactedText == "saw xoxc-[REDACTED]. next")
+        #expect(clientResult.redactionCount == 1)
+        #expect(!clientResult.redactedText.contains("123456789012"))
+        let clientAgain = redactor.redact(clientResult.redactedText)
+        #expect(clientAgain.redactionCount == 0)
+
+        let shortRefresh = "xoxe" + "-1-" + String(repeating: "a", count: 10)
+        #expect(redactor.redact(shortRefresh).redactedText == shortRefresh)
+        let shortAccess = "xoxe.xox" + "p-1-abc+defghij"
+        #expect(redactor.redact(shortAccess).redactedText == shortAccess)
+        let shortClient = "xox" + "c-" + String(repeating: "a", count: 23)
+        #expect(redactor.redact(shortClient).redactedText == shortClient)
+        let clientFloor = "xox" + "c-" + String(repeating: "a", count: 24)
+        #expect(redactor.redact(clientFloor).redactedText == "xoxc-[REDACTED]")
+
+        // A classic bot token still uses the older label.
+        let bot = "xox" + "b-" + "123456789012-" + "abcdefghijklmnopqrstuvwx"
+        let botResult = redactor.redact(bot)
+        #expect(botResult.redactedText == "xox[REDACTED]")
+        #expect(botResult.redactionCount == 1)
+
+        let cookie = "xox" + "d-" + String(repeating: "a", count: 40)
+        #expect(redactor.redact(cookie).redactedText == cookie)
+        let workflow = "xwfp-" + String(repeating: "a", count: 40)
+        #expect(redactor.redact(workflow).redactedText == workflow)
+        let legacy = "xox" + "o-" + String(repeating: "a", count: 40)
+        #expect(redactor.redact(legacy).redactedText == legacy)
+    }
+
+    @Test("Discord and Teams webhook URLs are redacted once and keep a host")
+    func redactsDiscordAndTeamsWebhookURLs() {
+        let redactor = SecretRedactor()
+        let id = String(repeating: "1", count: 17)
+        let id18 = String(repeating: "1", count: 18)
+        let id20 = String(repeating: "2", count: 20)
+        let id16 = String(repeating: "1", count: 16)
+        let id21 = String(repeating: "3", count: 21)
+        let token = String(repeating: "c", count: 68)
+        let token20 = String(repeating: "a", count: 20)
+        let token19 = String(repeating: "b", count: 19)
+        let discordKept = "https://discord.com/api/webhooks/[REDACTED]"
+        let hook = "https://discord.com/api/webhooks/\(id)/\(token)"
+
+        let bare = redactor.redact("posted \(hook)")
+        #expect(bare.redactedText == "posted \(discordKept)")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains(token))
+        let bareAgain = redactor.redact(bare.redactedText)
+        #expect(bareAgain.redactedText == bare.redactedText)
+        #expect(bareAgain.redactionCount == 0)
+
+        let env = redactor.redact("DISCORD_WEBHOOK_URL=\(hook)")
+        #expect(env.redactedText == "DISCORD_WEBHOOK_URL=\(discordKept)")
+        #expect(env.redactionCount == 1)
+        let envAgain = redactor.redact(env.redactedText)
+        #expect(envAgain.redactionCount == 0)
+        let assigned = redactor.redact("token=\(hook)")
+        #expect(assigned.redactedText == "token=\(discordKept)")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        let quoted = redactor.redact(#"{"url": "\#(hook)"}"#)
+        #expect(quoted.redactedText == #"{"url": "\#(discordKept)"}"#)
+        #expect(quoted.redactionCount == 1)
+
+        let samples = [
+            "https://canary.discord.com/api/webhooks/\(id)/\(token20)",
+            "https://ptb.discordapp.com/api/webhooks/\(id20)/\(token20)",
+            "https://discordapp.com/api/webhooks/\(id18)/\(token20)_-x",
+            "https://discord.com/api/v10/webhooks/\(id)/\(token)",
+            "http://discord.com/api/webhooks/\(id)/\(token)",
+            "HTTPS://DISCORD.COM/API/WEBHOOKS/\(id)/\(token.uppercased())",
+            "discord.com/api/webhooks/\(id)/\(token)",
+        ]
+        for sample in samples {
+            let result = redactor.redact(sample)
+            #expect(result.redactedText == discordKept)
+            #expect(result.redactionCount == 1)
+        }
+        #expect(!redactor.redact(samples[2]).redactedText.contains("_-x"))
+
+        let pair = redactor.redact("\(hook) \(hook)")
+        #expect(pair.redactedText == "\(discordKept) \(discordKept)")
+        #expect(pair.redactionCount == 2)
+        let sentence = redactor.redact("posted \(hook). next")
+        #expect(sentence.redactedText == "posted \(discordKept). next")
+        #expect(sentence.redactionCount == 1)
+        let query = redactor.redact(hook + "?wait=true")
+        #expect(query.redactedText == discordKept + "?wait=true")
+        #expect(query.redactionCount == 1)
+        #expect(!query.redactedText.contains(token))
+        let slash = redactor.redact(hook + "/")
+        #expect(slash.redactedText == discordKept + "/")
+
+        let idTooShort = "https://discord.com/api/webhooks/\(id16)/\(token)"
+        #expect(redactor.redact(idTooShort).redactedText == idTooShort)
+        let idTooLong = "https://discord.com/api/webhooks/\(id21)/\(token)"
+        #expect(redactor.redact(idTooLong).redactedText == idTooLong)
+        let tokenTooShort = "https://discord.com/api/webhooks/\(id)/\(token19)"
+        #expect(redactor.redact(tokenTooShort).redactedText == tokenTooShort)
+        let docs = redactor.redact("see https://discord.com/api/webhooks for setup")
+        #expect(docs.redactedText == "see https://discord.com/api/webhooks for setup")
+        #expect(docs.redactionCount == 0)
+        let glued = "mydiscord.com/api/webhooks/\(id)/\(token)"
+        #expect(redactor.redact(glued).redactedText == glued)
+        let evil = "https://discord.com.evil.com/api/webhooks/\(id)/\(token)"
+        #expect(redactor.redact(evil).redactedText == evil)
+
+        let group = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        let tenant = "11111111-2222-4333-8444-555555555555"
+        let alternate = String(repeating: "0123456789abcdef", count: 2)
+        let owner = "ffffffff-eeee-4ddd-8ccc-bbbbbbbbbbbb"
+        let path = "\(group)@\(tenant)/IncomingWebhook/\(alternate)/\(owner)"
+        let teamsKept = "https://webhook.office.com/[REDACTED]"
+        let teams = "https://contoso.webhook.office.com/webhookb2/\(path)"
+
+        let teamsResult = redactor.redact(teams)
+        #expect(teamsResult.redactedText == teamsKept)
+        #expect(teamsResult.redactionCount == 1)
+        #expect(!teamsResult.redactedText.contains(alternate))
+        #expect(!teamsResult.redactedText.contains("contoso"))
+        let teamsAgain = redactor.redact(teamsResult.redactedText)
+        #expect(teamsAgain.redactionCount == 0)
+
+        let hyphen = redactor.redact("https://contoso-corp.webhook.office.com/webhookb2/\(path)")
+        #expect(hyphen.redactedText == teamsKept)
+        #expect(hyphen.redactionCount == 1)
+        let withoutB2 = redactor.redact("https://contoso.webhook.office.com/webhook/\(path)")
+        #expect(withoutB2.redactedText == teamsKept)
+        let teamsEnv = redactor.redact("TEAMS_WEBHOOK_URL=\(teams)")
+        #expect(teamsEnv.redactedText == "TEAMS_WEBHOOK_URL=\(teamsKept)")
+        #expect(teamsEnv.redactionCount == 1)
+        let teamsAssigned = redactor.redact("token=\(teams)")
+        #expect(teamsAssigned.redactedText == "token=\(teamsKept)")
+        #expect(teamsAssigned.redactionCount == 1)
+        let teamsAssignedAgain = redactor.redact(teamsAssigned.redactedText)
+        #expect(teamsAssignedAgain.redactionCount == 0)
+
+        let teamsSamples = [
+            "http://contoso.webhook.office.com/webhookb2/\(path)",
+            "HTTPS://CONTOSO.WEBHOOK.OFFICE.COM/WEBHOOKB2/\(path.uppercased())",
+            "contoso.webhook.office.com/webhookb2/\(path)",
+        ]
+        for sample in teamsSamples {
+            let result = redactor.redact(sample)
+            #expect(result.redactedText == teamsKept)
+            #expect(result.redactionCount == 1)
+        }
+        let teamsSentence = redactor.redact("posted \(teams). next")
+        #expect(teamsSentence.redactedText == "posted \(teamsKept). next")
+        let teamsQuery = redactor.redact(teams + "?x=1")
+        #expect(teamsQuery.redactedText == teamsKept + "?x=1")
+        #expect(teamsQuery.redactionCount == 1)
+        #expect(!teamsQuery.redactedText.contains(alternate))
+
+        let teamsDocs = "see https://contoso.webhook.office.com/webhookb2 for setup"
+        #expect(redactor.redact(teamsDocs).redactedText == teamsDocs)
+        let teamsEvil = "https://contoso.webhook.office.com.evil.com/webhookb2/\(path)"
+        #expect(redactor.redact(teamsEvil).redactedText == teamsEvil)
+        let noTenant = "https://webhook.office.com/webhookb2/\(path)"
+        #expect(redactor.redact(noTenant).redactedText == noTenant)
+        let shortAlt = "https://contoso.webhook.office.com/webhookb2/\(group)@\(tenant)/IncomingWebhook/\(String(repeating: "ab", count: 15))/\(owner)"
+        #expect(redactor.redact(shortAlt).redactedText == shortAlt)
+
+        let legacyOffice = redactor.redact("https://outlook.office.com/webhook/\(path)")
+        #expect(legacyOffice.redactedText == "https://outlook.office.com/[REDACTED]")
+        #expect(legacyOffice.redactionCount == 1)
+        #expect(!legacyOffice.redactedText.contains(alternate))
+        let legacyAgain = redactor.redact(legacyOffice.redactedText)
+        #expect(legacyAgain.redactionCount == 0)
+        let legacy365 = redactor.redact("https://outlook.office365.com/webhook/\(path)")
+        #expect(legacy365.redactedText == "https://outlook.office365.com/[REDACTED]")
+        #expect(legacy365.redactionCount == 1)
+        let legacy365Again = redactor.redact(legacy365.redactedText)
+        #expect(legacy365Again.redactionCount == 0)
+
+        let sig = String(repeating: "ab", count: 22)
+        let logic = "https://prod-12.westus.logic.azure.com:443/workflows/\(group)/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=\(sig)"
+        let logicKept = "https://logic.azure.com/[REDACTED]"
+        let logicResult = redactor.redact(logic)
+        #expect(logicResult.redactedText == logicKept)
+        #expect(logicResult.redactionCount == 1)
+        #expect(!logicResult.redactedText.contains(sig))
+        let logicAgain = redactor.redact(logicResult.redactedText)
+        #expect(logicAgain.redactionCount == 0)
+        let logicAssigned = redactor.redact("token=\(logic)")
+        #expect(logicAssigned.redactedText == "token=\(logicKept)")
+        #expect(logicAssigned.redactionCount == 1)
+        let logicTail = redactor.redact(logic + "&foo=1")
+        #expect(logicTail.redactedText == logicKept + "&foo=1")
+        #expect(logicTail.redactionCount == 1)
+        #expect(!logicTail.redactedText.contains(sig))
+        let noPort = logic.replacingOccurrences(of: ":443", with: "")
+        #expect(redactor.redact(noPort).redactedText == logicKept)
+
+        let mixedSig = String(repeating: "a+/", count: 10) + "bbbb"
+        let named = "https://prod-12.westus.logic.azure.com/workflows/\(group)/triggers/When_a_HTTP_request_is_received/paths/invoke?sig=\(mixedSig)"
+        let namedResult = redactor.redact(named)
+        #expect(namedResult.redactedText == logicKept)
+        #expect(namedResult.redactionCount == 1)
+        #expect(!namedResult.redactedText.contains("a+/"))
+        #expect(!namedResult.redactedText.contains("bbbb"))
+
+        let shortSig = logic.replacingOccurrences(of: sig, with: String(repeating: "a", count: 19))
+        #expect(redactor.redact(shortSig).redactedText == shortSig)
+        let logicDocs = "see https://prod-12.westus.logic.azure.com/workflows for setup"
+        #expect(redactor.redact(logicDocs).redactedText == logicDocs)
+        let logicEvil = logic.replacingOccurrences(of: "logic.azure.com", with: "logic.azure.com.evil.com")
+        #expect(redactor.redact(logicEvil).redactedText == logicEvil)
+    }
+
     @Test("Redacts an HTTP Basic credential and leaves the header")
     func redactsAuthorizationBasic() {
         let redactor = SecretRedactor()
