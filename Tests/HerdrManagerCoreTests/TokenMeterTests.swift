@@ -1380,6 +1380,52 @@ struct TokenMeterCompactionTests {
         #expect(actual.agentSummary(for: AgentID("w1:p2"), window: .allTime).usage.inputTokens == 600)
     }
 
+    @Test("Compaction leaves a named event id in place so a later copy replaces it")
+    func compactionKeepsReplaceableEvent() {
+        let cutoff = date("2026-01-01T00:00:00Z")
+        let events = [
+            event("old-a", session: "a", model: "claude-sonnet-4.5", at: "2025-12-02T10:00:00Z",
+                  usage: TokenUsage(inputTokens: 100, outputTokens: 10)),
+            event("old-b", session: "a", model: "claude-sonnet-4.5", at: "2025-12-03T10:00:00Z",
+                  usage: TokenUsage(inputTokens: 30, outputTokens: 3)),
+            event("live", session: "a", model: "claude-sonnet-4.5", at: "2025-12-04T10:00:00Z",
+                  usage: TokenUsage(inputTokens: 40, outputTokens: 4)),
+        ]
+
+        // The whole group takes one new id. The live message's id is gone,
+        // which is what makes the next copy of that message count again.
+        let folded = TokenUsageCompaction.compact(events, before: cutoff)
+        #expect(folded.count == 1)
+        #expect(!folded.map(\.id).contains("live"))
+        #expect(folded.first?.usage.inputTokens == 170)
+
+        let kept = TokenUsageCompaction.compact(events, before: cutoff, keeping: ["live"])
+        #expect(kept.count == 2)
+        #expect(kept.contains { $0.id == "live" && $0.usage.inputTokens == 40 })
+        #expect(kept.reduce(Int64(0)) { $0 + $1.usage.inputTokens } == 170)
+
+        let now = date("2026-01-15T13:00:00Z")
+        let calendar = utcCalendar()
+        var original = TokenMeterAggregator(agents: [], priceBook: priceBook, now: now, calendar: calendar)
+        original.add(events)
+        var preserved = TokenMeterAggregator(agents: [], priceBook: priceBook, now: now, calendar: calendar)
+        preserved.add(kept)
+        expectEquivalent(
+            original.snapshot().overallSummary(for: .allTime),
+            preserved.snapshot().overallSummary(for: .allTime)
+        )
+
+        let replaced = TokenUsageEventLog.merging(kept, with: [
+            event("live", session: "a", model: "claude-sonnet-4.5", at: "2025-12-04T10:05:00Z",
+                  usage: TokenUsage(inputTokens: 90, outputTokens: 9)),
+        ])
+        let again = TokenUsageCompaction.compact(replaced, before: cutoff, keeping: ["live"])
+        #expect(again.filter { $0.id == "live" }.count == 1)
+        #expect(again.contains { $0.id == "live" && $0.usage.inputTokens == 90 })
+        #expect(again.reduce(Int64(0)) { $0 + $1.usage.inputTokens } == 220)
+        #expect(again.reduce(Int64(0)) { $0 + $1.usage.outputTokens } == 22)
+    }
+
     @Test("Compaction keeps events whose cost is clamped, so their price is unchanged")
     func compactionKeepsClampedEvents() {
         let now = date("2026-01-15T13:00:00Z")

@@ -199,6 +199,78 @@ struct TokenMeterAppendOnlyTests {
             == fresh.agentSummary(for: agent.id, window: .allTime))
     }
 
+    @Test("A folded Claude message is replaced by the next copy of that message")
+    func claudeRepeatedMessageAfterFoldCountsOnce() async throws {
+        let home = try makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let file = claudeTranscript(in: home)
+        // Three usage lines in one session, all before the January cutoff.
+        // The first read folds the older two and keeps the last message id.
+        // The file ends on a newline, so nothing is an unterminated tail.
+        try write(lines([
+            claudeUsage(id: "message-old-a", uuid: "line-1", at: "2025-12-02T10:00:00Z", input: 100, output: 10),
+            claudeUsage(id: "message-old-b", uuid: "line-2", at: "2025-12-03T10:00:00Z", input: 30, output: 3),
+            claudeUsage(id: "message-live", uuid: "line-3", at: "2025-12-04T10:00:00Z", input: 40, output: 4),
+        ]), to: file)
+
+        let meter = LocalTokenMeter(homeDirectory: home)
+        let first = await snapshot(meter)
+        #expect(first.overallSummary(for: .allTime).usage.inputTokens == 170)
+        #expect(first.overallSummary(for: .allTime).usage.outputTokens == 17)
+
+        let added = lines([
+            claudeUsage(id: "message-live", uuid: "line-4", at: "2025-12-04T10:05:00Z", input: 90, output: 9),
+        ])
+        try append(added, to: file)
+        let grown = await snapshot(meter)
+        let appendRead = await meter.lastSnapshotLogBytesRead
+        #expect(appendRead == UInt64(added.utf8.count))
+        #expect(grown.overallSummary(for: .allTime).usage.inputTokens == 220)
+        #expect(grown.overallSummary(for: .allTime).usage.outputTokens == 22)
+        let fresh = await snapshot(LocalTokenMeter(homeDirectory: home))
+        #expect(grown.overallSummary(for: .allTime) == fresh.overallSummary(for: .allTime))
+    }
+
+    @Test("A Claude message streaming across a month boundary still counts once")
+    func claudeRepeatedMessageAcrossCompactionCutoff() async throws {
+        let home = try makeTemporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let file = claudeTranscript(in: home)
+        // Inside January's windows, so the first read does not fold them.
+        // February's cutoff does. The message is still streaming: the next
+        // line has the same id and a higher cumulative usage.
+        try write(lines([
+            claudeUsage(id: "message-old-a", uuid: "line-1", at: "2026-01-10T10:00:00Z", input: 100, output: 10),
+            claudeUsage(id: "message-old-b", uuid: "line-2", at: "2026-01-11T10:00:00Z", input: 30, output: 3),
+            claudeUsage(id: "message-live", uuid: "line-3", at: "2026-01-12T10:00:00Z", input: 40, output: 4),
+        ]), to: file)
+
+        let meter = LocalTokenMeter(homeDirectory: home)
+        let january = await snapshot(meter)
+        #expect(january.overallSummary(for: .allTime).usage.inputTokens == 170)
+
+        let february = await snapshot(meter, now: "2026-02-15T13:00:00Z")
+        #expect(february.overallSummary(for: .allTime).usage.inputTokens == 170)
+        #expect(february.overallSummary(for: .allTime).usage.outputTokens == 17)
+        let refoldRead = await meter.lastSnapshotLogBytesRead
+        #expect(refoldRead == 0)
+
+        let added = lines([
+            claudeUsage(id: "message-live", uuid: "line-4", at: "2026-01-12T10:05:00Z", input: 90, output: 9),
+        ])
+        try append(added, to: file)
+        let grown = await snapshot(meter, now: "2026-02-15T13:00:00Z")
+        let appendRead = await meter.lastSnapshotLogBytesRead
+        #expect(appendRead == UInt64(added.utf8.count))
+        #expect(grown.overallSummary(for: .allTime).usage.inputTokens == 220)
+        #expect(grown.overallSummary(for: .allTime).usage.outputTokens == 22)
+        let fresh = await snapshot(
+            LocalTokenMeter(homeDirectory: home),
+            now: "2026-02-15T13:00:00Z"
+        )
+        #expect(grown.overallSummary(for: .allTime) == fresh.overallSummary(for: .allTime))
+    }
+
     @Test("An agent starting or stopping in a Claude project does not re-read its transcripts")
     func claudeTranscriptSurvivesHerdChange() async throws {
         let home = try makeTemporaryHome()
@@ -372,13 +444,27 @@ struct TokenMeterAppendOnlyTests {
         lines.map { $0 + "\n" }.joined()
     }
 
-    private func snapshot(_ meter: LocalTokenMeter, agents: [Agent] = []) async -> TokenMeterSnapshot {
+    private func snapshot(
+        _ meter: LocalTokenMeter,
+        agents: [Agent] = [],
+        now: String = "2026-01-15T13:00:00Z"
+    ) async -> TokenMeterSnapshot {
         await meter.snapshot(
             agents: agents,
             priceBook: TokenMeterPriceBook.defaults,
-            now: date("2026-01-15T13:00:00Z"),
+            now: date(now),
             calendar: utcCalendar()
         )
+    }
+
+    private func claudeTranscript(in home: URL) -> URL {
+        home
+            .appendingPathComponent(".claude/projects/-repo", isDirectory: true)
+            .appendingPathComponent("session.jsonl")
+    }
+
+    private func claudeUsage(id: String, uuid: String, at timestamp: String, input: Int, output: Int) -> String {
+        #"{"type":"assistant","timestamp":"\#(timestamp)","uuid":"\#(uuid)","message":{"id":"\#(id)","model":"claude-sonnet-4.5","usage":{"input_tokens":\#(input),"output_tokens":\#(output)}}}"#
     }
 
     private func makeTemporaryHome() throws -> URL {
