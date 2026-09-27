@@ -67,6 +67,26 @@ public final class SecretRedactor: Sendable {
             ("xai-[A-Za-z0-9]{20,}", "xai-[REDACTED]"),
             // Slack bot / user / app tokens
             ("xox[baprs]-[A-Za-z0-9-]{10,}", "xox[REDACTED]"),
+            // Slack incoming, workflow, and trigger webhooks. The path
+            // is the credential: posting to it writes into the workspace,
+            // and there is no separate token. `xoxb-` does not match this
+            // URL, and `SLACK_WEBHOOK_URL` is not an assignment keyword,
+            // so the secret reached MCP tails and `herdmgr --json`. The
+            // host stays. The replacement is a placeholder, so a second
+            // pass counts nothing and `token=<url>` does not take the
+            // host. The scheme is optional on the way in and written
+            // back as https. The last segment is at least 16 characters;
+            // a shorter one stays. A segment shorter than 8 stays. A
+            // letter glued to the front is not this host. GovSlack is
+            // the same path on `hooks.slack-gov.com`.
+            (
+                "(?i)(?<![A-Za-z0-9.])(?:https?://)?hooks\\.slack\\.com/(?:services|triggers|workflows)/(?:[A-Za-z0-9_-]{8,64}/){1,4}[A-Za-z0-9_-]{16,128}",
+                "https://hooks.slack.com/[REDACTED]"
+            ),
+            (
+                "(?i)(?<![A-Za-z0-9.])(?:https?://)?hooks\\.slack-gov\\.com/(?:services|triggers|workflows)/(?:[A-Za-z0-9_-]{8,64}/){1,4}[A-Za-z0-9_-]{16,128}",
+                "https://hooks.slack-gov.com/[REDACTED]"
+            ),
             // AWS access key IDs
             ("AKIA[0-9A-Z]{16}", "AKIA[REDACTED]"),
             // Bearer scheme. HTTP treats the scheme as case-insensitive,

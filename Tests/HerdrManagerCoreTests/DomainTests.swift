@@ -868,6 +868,119 @@ struct SecretRedactorTests {
         #expect(sentence.redactionCount == 1)
     }
 
+    @Test("A Slack webhook URL is redacted once and keeps its host")
+    func redactsSlackWebhookURLs() {
+        let redactor = SecretRedactor()
+        let secret = "7IsoQTrixdUtE971O1xQTm4T"
+        let incoming = "https://hooks.slack.com/services/T0123456789/B1001010101/\(secret)"
+        let kept = "https://hooks.slack.com/[REDACTED]"
+
+        let bare = redactor.redact("posted \(incoming)")
+        #expect(bare.redactedText == "posted \(kept)")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains(secret))
+        #expect(!bare.redactedText.contains("T0123456789"))
+        let bareAgain = redactor.redact(bare.redactedText)
+        #expect(bareAgain.redactedText == bare.redactedText)
+        #expect(bareAgain.redactionCount == 0)
+
+        // The variable is not an assignment keyword. The host still stays,
+        // and a second pass does not count the placeholder.
+        let env = redactor.redact("SLACK_WEBHOOK_URL=\(incoming)")
+        #expect(env.redactedText == "SLACK_WEBHOOK_URL=\(kept)")
+        #expect(env.redactionCount == 1)
+        let envAgain = redactor.redact(env.redactedText)
+        #expect(envAgain.redactionCount == 0)
+
+        // `token=` is an assignment. The placeholder is the whole value,
+        // so the host is not consumed and the secret is counted once.
+        let assigned = redactor.redact("token=\(incoming)")
+        #expect(assigned.redactedText == "token=\(kept)")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        let quoted = redactor.redact(#"{"url": "\#(incoming)"}"#)
+        #expect(quoted.redactedText == #"{"url": "\#(kept)"}"#)
+        #expect(quoted.redactionCount == 1)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        let triggerSecret = "c6e6c0d868b3054ca0f4611a5dbadaf"
+        let trigger = "https://hooks.slack.com/triggers/T0123456789/3141592653589/\(triggerSecret)"
+        let triggered = redactor.redact(trigger)
+        #expect(triggered.redactedText == kept)
+        #expect(triggered.redactionCount == 1)
+        #expect(!triggered.redactedText.contains(triggerSecret))
+
+        let workflowA = "abcdefghijklmnopqrstuvwxyz012345"
+        let workflowB = "zyxwvutsrqponmlkjihgfedcba654321"
+        let workflow = "https://hooks.slack.com/workflows/T0123456789/F0123456789/\(workflowA)/\(workflowB)"
+        let flowed = redactor.redact(workflow)
+        #expect(flowed.redactedText == kept)
+        #expect(flowed.redactionCount == 1)
+        #expect(!flowed.redactedText.contains(workflowA))
+        #expect(!flowed.redactedText.contains(workflowB))
+
+        let govSecret = "GovSlackSecretValue99"
+        let gov = "https://hooks.slack-gov.com/services/T0123456789/B1001010101/\(govSecret)"
+        let govResult = redactor.redact(gov)
+        #expect(govResult.redactedText == "https://hooks.slack-gov.com/[REDACTED]")
+        #expect(govResult.redactionCount == 1)
+        #expect(!govResult.redactedText.contains(govSecret))
+        let govAgain = redactor.redact(govResult.redactedText)
+        #expect(govAgain.redactionCount == 0)
+
+        let http = redactor.redact(
+            "http://hooks.slack.com/services/T0123456789/B1001010101/\(secret)"
+        )
+        #expect(http.redactedText == kept)
+        #expect(http.redactionCount == 1)
+        let upper = redactor.redact(
+            "HTTPS://HOOKS.SLACK.COM/SERVICES/T0123456789/B1001010101/\(secret)"
+        )
+        #expect(upper.redactedText == kept)
+        #expect(upper.redactionCount == 1)
+        let bareHost = redactor.redact(
+            "hooks.slack.com/services/T0123456789/B1001010101/\(secret)"
+        )
+        #expect(bareHost.redactedText == kept)
+        #expect(bareHost.redactionCount == 1)
+
+        let pair = redactor.redact("\(incoming) \(trigger)")
+        #expect(pair.redactedText == "\(kept) \(kept)")
+        #expect(pair.redactionCount == 2)
+        let pairAgain = redactor.redact(pair.redactedText)
+        #expect(pairAgain.redactionCount == 0)
+
+        let sentence = redactor.redact("posted \(incoming). next")
+        #expect(sentence.redactedText == "posted \(kept). next")
+        #expect(sentence.redactionCount == 1)
+        let query = redactor.redact(incoming + "?x=1")
+        #expect(query.redactedText == kept + "?x=1")
+        #expect(query.redactionCount == 1)
+        #expect(!query.redactedText.contains(secret))
+
+        let docs = redactor.redact("see https://hooks.slack.com/services for setup")
+        #expect(docs.redactedText == "see https://hooks.slack.com/services for setup")
+        #expect(docs.redactionCount == 0)
+        let short = "https://hooks.slack.com/services/T0123456789/B0123456789/abcdefghijklmno"
+        let keptShort = redactor.redact(short)
+        #expect(keptShort.redactedText == short)
+        #expect(keptShort.redactionCount == 0)
+        let team = "https://hooks.slack.com/services/T123456/B0123456789/" + String(repeating: "a", count: 24)
+        let keptTeam = redactor.redact(team)
+        #expect(keptTeam.redactedText == team)
+        #expect(keptTeam.redactionCount == 0)
+        let glued = "myhooks.slack.com/services/T0123456789/B1001010101/\(secret)"
+        let keptGlued = redactor.redact(glued)
+        #expect(keptGlued.redactedText == glued)
+        #expect(keptGlued.redactionCount == 0)
+        let evil = "https://hooks.slack.com.evil.com/services/T0123456789/B1001010101/\(secret)"
+        let keptEvil = redactor.redact(evil)
+        #expect(keptEvil.redactedText == evil)
+        #expect(keptEvil.redactionCount == 0)
+    }
+
     @Test("Redacts an HTTP Basic credential and leaves the header")
     func redactsAuthorizationBasic() {
         let redactor = SecretRedactor()
