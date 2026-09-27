@@ -261,26 +261,23 @@ public actor Diagnoser {
 
     /// Get the CPU state for an agent by running `ps -o %cpu= -p <pid>`.
     ///
-    /// Measures the FOREGROUND agent process (the topmost runtime like
-    /// `node`/`bun` hosting the agent), NOT the pane's shell. The shell
-    /// (zsh/bash) is idle by design while the agent runs — measuring it
-    /// mislabels a busy agent as stalled and an idle shell as healthy.
-    ///
-    /// When `foregroundProcesses` is empty (unreadable / no foreground
-    /// process reported), we return `.unknown` rather than falling back
-    /// to `shellPid`, because the shell's CPU is not a signal of agent
-    /// activity.
+    /// Measures the foreground agent, not the pane's shell. The shell is
+    /// idle while `node` or `bun` runs the agent, and herdr's process list
+    /// is not ordered so the agent is last. Measuring the shell mislabels
+    /// a busy agent as stalled. `cpuSamplePid` picks the pid. An empty
+    /// list, a failed read, or a group that is only a bare shell is
+    /// `.unknown`: the shell's CPU is not a signal of agent activity, and
+    /// `shellPid` is that same idle process.
     private func cpuState(for agent: Agent, paneId: String, adapter: HerdrAdapter) async -> CPUState {
         let pid: Int32?
         do {
             let procInfo = try await adapter.processInfo(paneId: paneId)
-            // Topmost foreground process = the agent runtime (node/bun/etc.).
-            pid = procInfo.foregroundProcesses.last?.pid
+            pid = Self.cpuSamplePid(procInfo.foregroundProcesses)
         } catch {
             return .unknown
         }
 
-        guard let pid, pid > 0 else { return .unknown }
+        guard let pid else { return .unknown }
 
         // Run ps to get CPU usage
         return await cpuPercent(pid: pid)
@@ -324,6 +321,12 @@ public actor Diagnoser {
     /// not the program that is launching the agent. See `ShellForeground`.
     private static func isBareShell(_ process: ForegroundProcess) -> Bool {
         ShellForeground.isBare(process)
+    }
+
+    /// Pid whose CPU a silence reading should trust. Nil when the group
+    /// is empty or only a bare shell. See `ShellForeground.cpuSamplePid`.
+    static func cpuSamplePid(_ processes: [ForegroundProcess]) -> Int32? {
+        ShellForeground.cpuSamplePid(processes)
     }
 
     /// Silent threshold for an agent kind.
@@ -988,5 +991,166 @@ private enum ShellForeground {
     private static func pathBase(_ name: String) -> String {
         let afterSlash = name.split(separator: Character("/")).last.map(String.init) ?? name
         return afterSlash.split(separator: Character("\\")).last.map(String.init) ?? afterSlash
+    }
+
+    /// Which foreground pid a silence reading should measure.
+    ///
+    /// `pane.process_info` lists the foreground group in the order
+    /// `proc_listpids` or the procfs walk returned. That is not "the
+    /// agent is last". The old sample was `.last`, so a shell that
+    /// happened to be last was the pid `ps` read, and the shell is idle
+    /// while the agent runs. A bare shell is not a sample. A `node` or
+    /// `bun` whose script is an agent outranks the shell that launched
+    /// it. A process whose own name is the agent outranks a runtime that
+    /// is not running that script, such as an MCP server in the same
+    /// group. Any other non-shell outranks the shell. The same rank
+    /// prefers a runtime over a shell interpreter, then the lower pid,
+    /// so a helper spawned later does not hide the process that started
+    /// the group.
+    static func cpuSamplePid(_ processes: [ForegroundProcess]) -> Int32? {
+        var best: (key: SampleKey, pid: Int32)?
+        for process in processes {
+            guard process.pid > 0, let key = sampleKey(process) else { continue }
+            if let current = best, !key.beats(current.key) { continue }
+            best = (key, process.pid)
+        }
+        return best?.pid
+    }
+
+    private struct SampleKey {
+        let rank: Int
+        let runtime: Bool
+        let pid: Int32
+
+        func beats(_ other: SampleKey) -> Bool {
+            if rank != other.rank { return rank > other.rank }
+            if runtime != other.runtime { return runtime }
+            return pid < other.pid
+        }
+    }
+
+    private static func sampleKey(_ process: ForegroundProcess) -> SampleKey? {
+        let runtime = isGenericRuntime(process)
+        let rank: Int
+        if runtime && runtimeScriptIsAgent(process) {
+            rank = 4
+        } else if isKnownAgentProcess(process) {
+            rank = 3
+        } else if runtime {
+            rank = 2
+        } else if !isBare(process) {
+            rank = 1
+        } else {
+            return nil
+        }
+        return SampleKey(rank: rank, runtime: runtime, pid: process.pid)
+    }
+
+    /// `node` / `bun` / `deno` / `python`, including `python3.11` and
+    /// `.exe`. A shell is not one of these: `sh ./codex` is the
+    /// interpreter, ranked by `isKnownAgentProcess`.
+    private static func isGenericRuntime(_ process: ForegroundProcess) -> Bool {
+        if isNamedShell(process.name) || isNamedShell(process.argv0) || isCmd(process) {
+            return false
+        }
+        let names = [process.name, process.argv0, process.argv?.first].compactMap { $0 }
+        return names.contains { genericRuntimeName($0) }
+    }
+
+    private static func genericRuntimeName(_ name: String) -> Bool {
+        let base = shellBase(name)
+        switch base {
+        case "node", "nodejs", "bun", "deno":
+            return true
+        default:
+            break
+        }
+        guard base.hasPrefix("python") else { return false }
+        let rest = base.dropFirst("python".count)
+        if rest.isEmpty { return true }
+        var sawDigit = false
+        for character in rest {
+            if character == "." {
+                if !sawDigit { return false }
+                sawDigit = false
+                continue
+            }
+            guard isASCIIDigit(character) else { return false }
+            sawDigit = true
+        }
+        return sawDigit
+    }
+
+    /// The process name, argv0, or a shell wrapper already identifies an
+    /// agent. A runtime's script is ranked separately, so `node server.js`
+    /// does not become Claude because some other argument says so.
+    private static func isKnownAgentProcess(_ process: ForegroundProcess) -> Bool {
+        if isKnownAgentProgram(process.name, cwd: process.cwd) { return true }
+        if let argv0 = process.argv0, isKnownAgentProgram(argv0, cwd: process.cwd) { return true }
+        return launchesKnownAgent(process)
+    }
+
+    /// The script argument of a node-like runtime, when that script is an
+    /// agent. Eval and module flags are not a path. A flag that takes a
+    /// value is not the script either.
+    private static func runtimeScriptIsAgent(_ process: ForegroundProcess) -> Bool {
+        guard let argv = launchArguments(process), let script = runtimeScript(argv) else {
+            return false
+        }
+        return isKnownAgentProgram(script, cwd: process.cwd)
+    }
+
+    private static let runtimeEvalFlags: Set<String> = [
+        "-e", "--eval", "-p", "--print", "-c", "-m",
+    ]
+
+    private static let runtimeValueFlags: Set<String> = [
+        "-r", "--require", "--loader", "--import", "--experimental-loader",
+        "--inspect-port", "-W", "-X", "-S", "-L", "-o",
+    ]
+
+    private static func runtimeScript(_ argv: [String]) -> String? {
+        var index = 1
+        while index < argv.count {
+            let arg = argv[index]
+            if arg == "--" {
+                guard index + 1 < argv.count else { return nil }
+                return argv[index + 1]
+            }
+            if runtimeEvalFlags.contains(arg) || arg.hasPrefix("-m=") {
+                return nil
+            }
+            if runtimeValueFlags.contains(arg) {
+                index += 2
+                continue
+            }
+            if runtimeFlagAttachesValue(arg) {
+                index += 1
+                continue
+            }
+            if arg.hasPrefix("-") {
+                index += 1
+                continue
+            }
+            return arg
+        }
+        return nil
+    }
+
+    /// `--require=mod` and `-rpreload` keep the value in the same word.
+    private static func runtimeFlagAttachesValue(_ arg: String) -> Bool {
+        for flag in runtimeValueFlags where flag.hasPrefix("--") {
+            if arg.hasPrefix(flag + "=") { return true }
+        }
+        guard arg.hasPrefix("-"), !arg.hasPrefix("--"), arg.count > 2 else { return false }
+        return runtimeValueFlags.contains(String(arg.prefix(2)))
+    }
+
+    private static func isASCIIDigit(_ character: Character) -> Bool {
+        guard character.unicodeScalars.count == 1,
+              let value = character.unicodeScalars.first?.value else {
+            return false
+        }
+        return value >= 48 && value <= 57
     }
 }

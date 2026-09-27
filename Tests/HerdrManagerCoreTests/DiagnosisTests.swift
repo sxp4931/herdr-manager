@@ -1291,6 +1291,90 @@ struct DiagnoserCpuStateTests {
     }
 }
 
+@Suite("Diagnoser.cpuSamplePid")
+struct DiagnoserCpuSamplePidTests {
+    private func process(
+        _ pid: Int32,
+        _ name: String,
+        argv: [String]? = nil,
+        argv0: String? = nil
+    ) -> ForegroundProcess {
+        ForegroundProcess(
+            pid: pid, name: name, argv0: argv0, cmdline: nil, cwd: nil, argv: argv
+        )
+    }
+
+    @Test("A shell listed last is not the process whose CPU is read")
+    func shellLastIsNotTheSample() {
+        let node = process(20, "node", argv: ["node", "codex"])
+        let shell = process(10, "zsh", argv: ["-zsh"])
+        #expect(Diagnoser.cpuSamplePid([node, shell]) == 20)
+        #expect(Diagnoser.cpuSamplePid([shell, node]) == 20)
+    }
+
+    @Test("A known agent outranks a node process that is not that agent")
+    func agentOutranksHelperRuntime() {
+        let helper = process(30, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        #expect(Diagnoser.cpuSamplePid([helper, claude]) == 12)
+        let eval = process(30, "node", argv: ["node", "-e", "codex"])
+        #expect(Diagnoser.cpuSamplePid([eval, claude]) == 12)
+    }
+
+    @Test("Node running the agent outranks the shell that launched it and a later git")
+    func runtimeScriptOutranksShellAndHelper() {
+        let shell = process(2, "sh", argv: ["sh", "codex"])
+        let git = process(9, "git", argv: ["git", "status"])
+        let node = process(4, "node", argv: ["node", "-r", "preload.js", "codex"])
+        #expect(Diagnoser.cpuSamplePid([shell, git, node]) == 4)
+        let attached = process(4, "node.exe", argv: ["node.exe", "--require=preload.js", "codex"])
+        #expect(Diagnoser.cpuSamplePid([shell, git, attached]) == 4)
+    }
+
+    @Test("The shell that is the agent interpreter is the sample when nothing else is")
+    func interpreterShellIsTheSample() {
+        let shell = process(2, "sh", argv: ["sh", "codex"])
+        #expect(Diagnoser.cpuSamplePid([shell]) == 2)
+    }
+
+    @Test("A bare shell is not a CPU sample")
+    func bareShellIsNotSampled() {
+        let shells = [
+            process(10, "zsh", argv: ["-zsh"]),
+            process(11, "bash", argv: ["bash"]),
+        ]
+        #expect(Diagnoser.cpuSamplePid(shells) == nil)
+        #expect(Diagnoser.cpuSamplePid([]) == nil)
+        #expect(Diagnoser.cpuSamplePid([process(0, "node", argv: ["node", "codex"])]) == nil)
+        let git = process(5, "git", argv: ["git", "status"])
+        #expect(Diagnoser.cpuSamplePid([
+            process(0, "node", argv: ["node", "codex"]),
+            git,
+        ]) == 5)
+    }
+
+    @Test("A generic runtime outranks an unrelated helper, and the older pid wins a tie")
+    func runtimeOutranksHelperAndLowerPidWins() {
+        let git = process(40, "git", argv: ["git", "status"])
+        let python = process(15, "python3.11", argv: ["python3.11", "tool.py"])
+        #expect(Diagnoser.cpuSamplePid([git, python]) == 15)
+        let newer = process(22, "node", argv: ["node", "a.js"])
+        let older = process(18, "node", argv: ["node", "b.js"])
+        #expect(Diagnoser.cpuSamplePid([newer, older]) == 18)
+        // `python3.` is not a python runtime. A real node still outranks it.
+        let dotted = process(5, "python3.", argv: ["python3.", "tool.py"])
+        let node = process(50, "node", argv: ["node", "server.js"])
+        #expect(Diagnoser.cpuSamplePid([dotted, node]) == 50)
+    }
+
+    @Test("MainThread with a node argv0 is the runtime")
+    func mainThreadNode() {
+        let shell = process(7, "zsh")
+        let node = process(8, "MainThread", argv: ["node", "codex"], argv0: "node")
+        #expect(Diagnoser.cpuSamplePid([shell, node]) == 8)
+    }
+}
+
 @Suite("Diagnoser finished vs process-gone")
 struct DiagnoserFinishedClassificationTests {
     private let bareShell = ProcessInfoResult(
