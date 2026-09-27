@@ -821,12 +821,41 @@ public final class AgentStore {
             // Drop the verdict if the pane changed while diagnose was in
             // flight. Stamping silent onto a pane that finished or blocked
             // is how a stale "quiet" reason survived on done/blocked rows.
+            // The silence itself was measured on the copy taken before this
+            // pass's other reads. Heartbeat can move lastOutputAt during
+            // those reads; re-measure the row as it is now so that output
+            // does not get a quiet alert.
             if var current = agents[agent.id],
                current.status == agent.status,
                current.stateChangeSeq == agent.stateChangeSeq {
-                current.verdict = verdict
+                current.verdict = Self.silenceOnCurrentClock(
+                    verdict,
+                    agent: current,
+                    silentThreshold: override
+                )
                 agents[agent.id] = current
             }
+        }
+    }
+
+    /// Record output the heartbeat just observed.
+    ///
+    /// A newer time moves `lastOutputAt`. When that also moves the silence
+    /// clock, the quiet on the row has ended and the badge comes down now,
+    /// instead of waiting for the next diagnosis pass. The pass is what
+    /// decides the next quiet. A time that is not newer does not move the
+    /// clock backward. A time that is still before the episode does not end
+    /// a silence measured from `enteredAt`.
+    func applyObservedOutput(_ updates: [AgentID: Date]) {
+        for (agentId, date) in updates {
+            guard var agent = agents[agentId] else { continue }
+            if let existing = agent.lastOutputAt, date <= existing { continue }
+            agent.lastOutputAt = date
+            if case .silent(let since, _) = agent.verdict,
+               Diagnoser.silentClockStart(for: agent) != since {
+                agent.verdict = .healthy
+            }
+            agents[agentId] = agent
         }
     }
 
@@ -842,20 +871,33 @@ public final class AgentStore {
                 await poller.prune(keeping: Set(self.agents.keys))
                 let updates = await poller.poll(agents: workingAgents, adapter: adapter)
 
-                // Apply lastOutputAt updates on MainActor
+                // Apply lastOutputAt updates on MainActor. New output ends
+                // a silence the row is already showing.
                 await MainActor.run {
-                    for (agentId, date) in updates {
-                        if var agent = self.agents[agentId] {
-                            agent.lastOutputAt = date
-                            self.agents[agentId] = agent
-                        }
-                    }
+                    self.applyObservedOutput(updates)
                 }
             }
         }
     }
 
     // MARK: - Helpers
+
+    /// A `.silent` verdict was computed from the agent copy this pass
+    /// started with. `agent` is the row now. Output since that copy leaves
+    /// a working pane healthy; a row that is still quiet keeps this pass's
+    /// CPU reading and the current clock. Any other verdict does not use
+    /// the output clock.
+    private static func silenceOnCurrentClock(
+        _ verdict: Verdict,
+        agent: Agent,
+        silentThreshold: TimeInterval?
+    ) -> Verdict {
+        guard case .silent(_, let cpu) = verdict else { return verdict }
+        let start = Diagnoser.silentClockStart(for: agent)
+        let threshold = silentThreshold ?? Diagnoser.silentThreshold(for: agent.kind)
+        guard Date().timeIntervalSince(start) > threshold else { return .healthy }
+        return .silent(since: start, cpu: cpu)
+    }
 
     private static func verdict(for status: AgentStatus) -> Verdict {
         switch status {

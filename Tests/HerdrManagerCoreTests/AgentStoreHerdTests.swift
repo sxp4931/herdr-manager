@@ -784,6 +784,329 @@ struct DiagnoseAllRaceTests {
     }
 }
 
+// MARK: - silence vs output observed during the pass
+
+private let nodeRuntime = ProcessInfoResult(
+    shellPid: 1,
+    foregroundProcesses: [
+        ForegroundProcess(pid: 456, name: "node", argv0: nil, cmdline: nil, cwd: nil)
+    ]
+)
+
+private let diagnosisBareShell = ProcessInfoResult(
+    shellPid: 1,
+    foregroundProcesses: [
+        ForegroundProcess(pid: 1, name: "zsh", argv0: nil, cmdline: nil, cwd: nil)
+    ]
+)
+
+/// `processInfo` for `triggerPaneId` writes `outputAt` onto `target`.
+/// Diagnosis reads the agent copy from the start of the pass, so this is
+/// the heartbeat landing while that pass is still in flight.
+private final class OutputClockAdapter: HerdrAdapter, @unchecked Sendable {
+    let store: AgentStore
+    let foreground: ProcessInfoResult
+    let triggerPaneId: String?
+    let target: AgentID?
+    let outputAt: Date?
+    var connectionState: HerdrConnectionState = .connected
+
+    init(
+        store: AgentStore,
+        foreground: ProcessInfoResult,
+        triggerPaneId: String? = nil,
+        target: AgentID? = nil,
+        outputAt: Date? = nil
+    ) {
+        self.store = store
+        self.foreground = foreground
+        self.triggerPaneId = triggerPaneId
+        self.target = target
+        self.outputAt = outputAt
+    }
+
+    func snapshot() async throws -> HerdrSnapshot {
+        throw NSError(domain: "Mock", code: 1)
+    }
+
+    func read(paneId: String, source: PaneReadSource, lines: Int?) async throws -> PaneReadResult {
+        throw NSError(domain: "Mock", code: 1)
+    }
+
+    func explain(paneId: String) async throws -> AgentExplainResult {
+        throw NSError(domain: "Mock", code: 1)
+    }
+
+    func processInfo(paneId: String) async throws -> ProcessInfoResult {
+        if paneId == triggerPaneId, let target, let outputAt {
+            await MainActor.run {
+                guard var agent = store.agents[target] else { return }
+                agent.lastOutputAt = outputAt
+                store.agents[target] = agent
+            }
+        }
+        return foreground
+    }
+
+    func focus(paneId: String) async throws {}
+    func events() -> AsyncStream<HerdrEvent> { AsyncStream { $0.finish() } }
+    func sendKeys(paneId: String, keys: [String]) async throws {}
+    func prompt(paneId: String, text: String) async throws {}
+    func closePane(paneId: String) async throws {}
+    func createWorkspace(cwd: String, label: String?) async throws -> WorkspaceCreation {
+        throw NSError(domain: "Mock", code: 1)
+    }
+    func startAgent(paneId: String, kind: String, name: String) async throws {}
+    func waitStatus(paneId: String, until: [String], timeoutMs: Int) async throws -> Bool { true }
+    func reportMetadata(paneId: String, source: String, tokens: [String: String], ttlMs: Int) async throws {}
+}
+
+private func quietWorkingAgent(
+    id: AgentID,
+    lastOutputAt: Date,
+    verdict: Verdict = .healthy
+) -> Agent {
+    Agent(
+        id: id,
+        kind: .claude,
+        status: .working,
+        stateChangeSeq: 4,
+        enteredAt: lastOutputAt.addingTimeInterval(-10 * 60),
+        lastOutputAt: lastOutputAt,
+        verdict: verdict
+    )
+}
+
+@Suite("AgentStore silence and a moved output clock")
+struct SilenceOutputClockTests {
+    @Test("Output during this pane's read does not stamp the silence that read measured")
+    @MainActor
+    func outputDuringReadClearsSilence() async {
+        let store = AgentStore()
+        let id = AgentID("w1:p1")
+        let staleOutput = Date().addingTimeInterval(-20 * 60)
+        let freshOutput = Date()
+        store.agents = [
+            id: quietWorkingAgent(
+                id: id,
+                lastOutputAt: staleOutput,
+                verdict: .silent(since: staleOutput, cpu: nil)
+            )
+        ]
+        let adapter = OutputClockAdapter(
+            store: store,
+            foreground: nodeRuntime,
+            triggerPaneId: id.raw,
+            target: id,
+            outputAt: freshOutput
+        )
+        await store.diagnoseAll(adapter: adapter, diagnoser: Diagnoser())
+        let agent = store.agents[id]
+        #expect(agent?.lastOutputAt == freshOutput)
+        #expect(agent?.verdict.isHealthy == true)
+        #expect(agent?.verdict.isSilent == false)
+    }
+
+    @Test("Output during an earlier pane's read is not a silence on the later pane")
+    @MainActor
+    func outputDuringEarlierReadClearsLaterPane() async {
+        let store = AgentStore()
+        let earlier = AgentID("w1:p1")
+        let later = AgentID("w1:p2")
+        let staleOutput = Date().addingTimeInterval(-20 * 60)
+        let freshOutput = Date()
+        store.agents = [
+            earlier: quietWorkingAgent(id: earlier, lastOutputAt: staleOutput),
+            later: quietWorkingAgent(
+                id: later,
+                lastOutputAt: staleOutput,
+                verdict: .silent(since: staleOutput, cpu: .deadlocked)
+            )
+        ]
+        let adapter = OutputClockAdapter(
+            store: store,
+            foreground: nodeRuntime,
+            triggerPaneId: earlier.raw,
+            target: later,
+            outputAt: freshOutput
+        )
+        await store.diagnoseAll(
+            adapter: adapter,
+            diagnoser: Diagnoser(),
+            first: [earlier]
+        )
+        let kept = store.agents[earlier]
+        guard case .silent(let since, _) = kept?.verdict else {
+            Issue.record("Expected the untouched pane to stay silent, got \(String(describing: kept?.verdict))")
+            return
+        }
+        #expect(since == staleOutput)
+        let moved = store.agents[later]
+        #expect(moved?.lastOutputAt == freshOutput)
+        #expect(moved?.verdict.isHealthy == true)
+        #expect(moved?.verdict.isSilent == false)
+    }
+
+    @Test("A clock that moved and is still past the threshold names the new output")
+    @MainActor
+    func stillQuietClockUsesTheNewOutput() async {
+        let store = AgentStore()
+        let id = AgentID("w1:p1")
+        let staleOutput = Date().addingTimeInterval(-20 * 60)
+        let stillQuiet = Date().addingTimeInterval(-10 * 60)
+        store.agents = [
+            id: quietWorkingAgent(id: id, lastOutputAt: staleOutput)
+        ]
+        let adapter = OutputClockAdapter(
+            store: store,
+            foreground: nodeRuntime,
+            triggerPaneId: id.raw,
+            target: id,
+            outputAt: stillQuiet
+        )
+        await store.diagnoseAll(adapter: adapter, diagnoser: Diagnoser())
+        let agent = store.agents[id]
+        guard case .silent(let since, _) = agent?.verdict else {
+            Issue.record("Expected silent from the new clock, got \(String(describing: agent?.verdict))")
+            return
+        }
+        #expect(since == stillQuiet)
+        #expect(agent?.lastOutputAt == stillQuiet)
+    }
+
+    @Test("A quiet pane whose clock did not move is silent from that output")
+    @MainActor
+    func unchangedClockStaysSilent() async {
+        let store = AgentStore()
+        let id = AgentID("w1:p1")
+        let output = Date().addingTimeInterval(-20 * 60)
+        store.agents = [
+            id: quietWorkingAgent(id: id, lastOutputAt: output)
+        ]
+        let adapter = OutputClockAdapter(store: store, foreground: nodeRuntime)
+        await store.diagnoseAll(adapter: adapter, diagnoser: Diagnoser())
+        let agent = store.agents[id]
+        guard case .silent(let since, _) = agent?.verdict else {
+            Issue.record("Expected silent, got \(String(describing: agent?.verdict))")
+            return
+        }
+        #expect(since == output)
+    }
+
+    @Test("Process-gone still lands when output moved during the read")
+    @MainActor
+    func processGoneSurvivesAMovedClock() async {
+        let store = AgentStore()
+        let id = AgentID("w1:p1")
+        let staleOutput = Date().addingTimeInterval(-20 * 60)
+        let freshOutput = Date()
+        store.agents = [
+            id: quietWorkingAgent(id: id, lastOutputAt: staleOutput)
+        ]
+        let adapter = OutputClockAdapter(
+            store: store,
+            foreground: diagnosisBareShell,
+            triggerPaneId: id.raw,
+            target: id,
+            outputAt: freshOutput
+        )
+        await store.diagnoseAll(adapter: adapter, diagnoser: Diagnoser())
+        let agent = store.agents[id]
+        #expect(agent?.verdict.isProcessGone == true)
+        #expect(agent?.verdict.isSilent == false)
+        #expect(agent?.lastOutputAt == freshOutput)
+    }
+}
+
+@Suite("AgentStore.applyObservedOutput")
+struct ApplyObservedOutputTests {
+    @Test("Newer output ends the silence the row is showing")
+    @MainActor
+    func newerOutputClearsSilence() {
+        let store = AgentStore()
+        let id = AgentID("w1:p1")
+        let old = Date().addingTimeInterval(-20 * 60)
+        let now = Date()
+        store.agents = [
+            id: quietWorkingAgent(
+                id: id,
+                lastOutputAt: old,
+                verdict: .silent(since: old, cpu: nil)
+            )
+        ]
+        store.applyObservedOutput([id: now])
+        let agent = store.agents[id]
+        #expect(agent?.lastOutputAt == now)
+        #expect(agent?.verdict.isHealthy == true)
+    }
+
+    @Test("An older time does not move the clock or clear the silence")
+    @MainActor
+    func olderOutputIsIgnored() {
+        let store = AgentStore()
+        let id = AgentID("w1:p1")
+        let current = Date().addingTimeInterval(-10 * 60)
+        store.agents = [
+            id: quietWorkingAgent(
+                id: id,
+                lastOutputAt: current,
+                verdict: .silent(since: current, cpu: nil)
+            )
+        ]
+        store.applyObservedOutput([id: current.addingTimeInterval(-60)])
+        let agent = store.agents[id]
+        #expect(agent?.lastOutputAt == current)
+        #expect(agent?.verdict.isSilent == true)
+    }
+
+    @Test("Output from before the episode does not end a silence measured from its start")
+    @MainActor
+    func outputBeforeTheEpisodeKeepsSilence() {
+        let store = AgentStore()
+        let id = AgentID("w1:p1")
+        let entered = Date().addingTimeInterval(-10 * 60)
+        var agent = quietWorkingAgent(
+            id: id,
+            lastOutputAt: entered.addingTimeInterval(-30 * 60),
+            verdict: .silent(since: entered, cpu: nil)
+        )
+        agent.enteredAt = entered
+        store.agents = [id: agent]
+        let stillBefore = entered.addingTimeInterval(-60)
+        store.applyObservedOutput([id: stillBefore])
+        let updated = store.agents[id]
+        #expect(updated?.lastOutputAt == stillBefore)
+        guard case .silent(let since, _) = updated?.verdict else {
+            Issue.record("Expected the episode silence to stay, got \(String(describing: updated?.verdict))")
+            return
+        }
+        #expect(since == entered)
+    }
+
+    @Test("Output does not clear a process-gone verdict")
+    @MainActor
+    func outputLeavesProcessGone() {
+        let store = AgentStore()
+        let id = AgentID("w1:p1")
+        var agent = quietWorkingAgent(id: id, lastOutputAt: Date().addingTimeInterval(-20 * 60))
+        agent.verdict = .processGone(lastLine: "zsh (pid 1)")
+        store.agents = [id: agent]
+        let now = Date()
+        store.applyObservedOutput([id: now])
+        let updated = store.agents[id]
+        #expect(updated?.lastOutputAt == now)
+        #expect(updated?.verdict.isProcessGone == true)
+    }
+
+    @Test("An unknown pane is ignored")
+    @MainActor
+    func unknownPaneIsIgnored() {
+        let store = AgentStore()
+        store.applyObservedOutput([AgentID("w1:missing"): Date()])
+        #expect(store.agents.isEmpty)
+    }
+}
+
 @Suite("AgentStore.applyRestoredDwell")
 struct ApplyRestoredDwellTests {
     @Test("Applies an earlier enteredAt and never moves dwell forward")
