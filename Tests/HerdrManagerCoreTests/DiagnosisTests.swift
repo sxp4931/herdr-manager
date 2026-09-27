@@ -2683,6 +2683,229 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([shell]) == 2)
         #expect(Diagnoser.cpuSamplePid([shell, interactive]) == 30)
     }
+
+    @Test("node's --debug-port is the inspect port, and bun's word is the script")
+    func nodeDebugPortIsTheInspectPort() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+
+        // Node 22.23 consumes the next word unless it starts with `-`.
+        let port = process(
+            20, "node", argv: ["node", "--debug-port", "9229", "/usr/local/bin/codex"]
+        )
+        let nodejsPort = process(
+            20, "nodejs", argv: ["nodejs", "--debug-port", "localhost:9229", "/tmp/codex"]
+        )
+        let bracket = process(
+            20, "node.exe", argv: ["node.exe", "--debug-port", "[::1]:9229", "/tmp/codex"]
+        )
+        let equals = process(
+            20, "node", argv: ["node", "--debug-port=9229", "/tmp/codex"]
+        )
+        let equalsDash = process(
+            20, "node", argv: ["node", "--debug-port=-", "/usr/local/bin/codex"]
+        )
+        let scriptFirst = process(
+            20, "node", argv: ["node", "/usr/local/bin/codex", "--debug-port", "9229"]
+        )
+        let afterWatch = process(
+            20,
+            "node",
+            argv: ["node", "--debug-port", "9229", "--watch", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, port]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodejsPort]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bracket]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, equals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, equalsDash]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, scriptFirst]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, afterWatch]) == 20)
+        #expect(Diagnoser.cpuSamplePid([mcp, port]) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, port], foregroundProcessGroupId: 20) == 20)
+
+        // The port word is not the script, including when it is an agent path.
+        let namedPort = process(
+            4, "node", argv: ["node", "--debug-port", "codex", "server.js"]
+        )
+        let pathPort = process(
+            4, "node", argv: ["node", "--debug-port", "/usr/local/bin/codex", "server.js"]
+        )
+        let onlyPort = process(
+            4, "node", argv: ["node", "--debug-port", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([namedPort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([pathPort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([onlyPort, claude]) == 12)
+
+        // A missing port makes node exit. The path after it is not the script.
+        let watch = process(
+            4, "node", argv: ["node", "--debug-port", "--watch", "/usr/local/bin/codex"]
+        )
+        let doubleDash = process(
+            4, "node", argv: ["node", "--debug-port", "--", "/usr/local/bin/codex"]
+        )
+        let dash = process(
+            4, "node", argv: ["node", "--debug-port", "-", "/usr/local/bin/codex"]
+        )
+        let negative = process(
+            4, "node", argv: ["node", "--debug-port", "-1", "/tmp/codex"]
+        )
+        let emptyEquals = process(
+            4, "node", argv: ["node", "--debug-port=", "/tmp/codex"]
+        )
+        let missing = process(4, "node", argv: ["node", "--debug-port"])
+        #expect(Diagnoser.cpuSamplePid([watch, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([doubleDash, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([dash, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([negative, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([emptyEquals, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([missing, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([mcp, watch], foregroundProcessGroupId: 4) == 10)
+
+        let letta = process(
+            30,
+            "node",
+            argv: [
+                "node", "--debug-port", "9229",
+                "/home/user/node_modules/.bin/letta", "--conversation", "id",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, letta]) == 30)
+        let lettaEquals = process(
+            30,
+            "node",
+            argv: ["node", "--debug-port=9229", "/home/user/node_modules/.bin/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, lettaEquals]) == 30)
+        let oneShot = process(
+            8,
+            "node",
+            argv: [
+                "node", "--debug-port", "9229",
+                "/home/user/node_modules/.bin/letta", "--prompt", "hello",
+            ]
+        )
+        let interactive = process(30, "letta", argv: ["letta"])
+        #expect(Diagnoser.cpuSamplePid([oneShot, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([oneShot]) == 8)
+        #expect(
+            Diagnoser.cpuSamplePid([oneShot, interactive], foregroundProcessGroupId: 8) == 30
+        )
+        let portIsLetta = process(
+            8,
+            "node",
+            argv: [
+                "node", "--debug-port",
+                "/home/user/node_modules/.bin/letta", "server.js",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([portIsLetta, interactive]) == 30)
+
+        // Bun 1.4.2 does not consume the flag. The next word is the script.
+        let bunPath = process(
+            20, "bun", argv: ["bun", "--debug-port", "/usr/local/bin/codex"]
+        )
+        let bunRun = process(
+            20, "bun", argv: ["bun", "run", "--debug-port", "/tmp/codex"]
+        )
+        let bunEquals = process(
+            20, "bun.exe", argv: ["bun.exe", "--debug-port=9229", "/tmp/codex"]
+        )
+        let bunDash = process(
+            20, "bun", argv: ["bun", "--debug-port=-", "/tmp/codex"]
+        )
+        let bunWatch = process(
+            20, "bun", argv: ["bun", "--debug-port", "--watch", "/tmp/codex"]
+        )
+        let bunEnd = process(
+            20, "bun", argv: ["bun", "--debug-port", "--", "/usr/local/bin/codex"]
+        )
+        let bunRunWatch = process(
+            20, "bun", argv: ["bun", "run", "--debug-port", "--watch", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, bunPath]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bunRun]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bunEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bunDash]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bunWatch]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bunEnd]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bunRunWatch]) == 20)
+        #expect(Diagnoser.cpuSamplePid([mcp, bunPath]) == 10)
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, bunPath], foregroundProcessGroupId: 20) == 20
+        )
+
+        let bunPort = process(
+            4, "bun", argv: ["bun", "--debug-port", "9229", "/usr/local/bin/codex"]
+        )
+        let bunRunPort = process(
+            4, "bun", argv: ["bun", "run", "--debug-port", "9229", "/tmp/codex"]
+        )
+        let bunHost = process(
+            4, "bun", argv: ["bun", "--debug-port", "127.0.0.1:9229", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([bunPort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([bunRunPort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([bunHost, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([mcp, bunPort]) == 10)
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, bunPort], foregroundProcessGroupId: 4) == 10
+        )
+
+        let bunLetta = process(
+            30,
+            "bun",
+            argv: ["bun", "--debug-port", "/home/user/node_modules/.bin/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, bunLetta]) == 30)
+        let bunPortLetta = process(
+            8,
+            "bun",
+            argv: [
+                "bun", "--debug-port", "9229",
+                "/home/user/node_modules/.bin/letta",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([bunPortLetta, interactive]) == 30)
+        let bunOneShot = process(
+            8,
+            "bun",
+            argv: [
+                "bun", "--debug-port",
+                "/home/user/node_modules/.bin/letta", "--prompt", "hello",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([bunOneShot, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([bunOneShot]) == 8)
+
+        // Python 3.13 rejects the flag and exits. A script before it still runs.
+        let pythonPort = process(
+            4, "python3", argv: ["python3", "--debug-port", "/usr/local/bin/codex"]
+        )
+        let pythonNext = process(
+            4, "python3", argv: ["python3", "--debug-port", "9229", "/tmp/codex"]
+        )
+        let pythonEquals = process(
+            4, "python3.11", argv: ["python3.11", "--debug-port=9229", "/tmp/codex"]
+        )
+        let pythonDash = process(
+            4, "Python.exe", argv: ["Python.exe", "--debug-port=-", "/tmp/codex"]
+        )
+        let pythonFirst = process(
+            20, "python3", argv: ["python3", "/tmp/codex", "--debug-port", "9229"]
+        )
+        let pythonLetta = process(
+            40, "python3", argv: ["python3", "--debug-port", "/tmp/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([pythonPort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([pythonNext, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([pythonEquals, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([pythonDash, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, pythonFirst]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, pythonLetta]) == 10)
+        #expect(Diagnoser.cpuSamplePid([pythonLetta, interactive]) == 30)
+    }
 }
 
 @Suite("Diagnoser finished vs process-gone")

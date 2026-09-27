@@ -1197,9 +1197,24 @@ private enum ShellForeground {
                 // does not treat the following path as the script.
                 // `--experimental-loader` and space-separated
                 // `--inspect-port` are the same shape on Bun 1.4.2.
+                // Node's `--debug-port` consumes a port word. A dash
+                // word, or no word, makes that node exit.
                 if runtimeName == "bun",
                    bunConfigFlagWidth(arg) != nil || bunFlagNamesTheScript(arg) {
                     index += 1
+                    continue
+                }
+                if isNodeRuntime(runtimeName),
+                   let port = nodeDebugPort(
+                    arg,
+                    following: index + 1 < argv.count ? argv[index + 1] : nil
+                   ) {
+                    switch port {
+                    case .skip(let width):
+                        index += width
+                    case .exits:
+                        return nil
+                    }
                     continue
                 }
                 if let width = valueFlagWidth(
@@ -1441,6 +1456,16 @@ private enum ShellForeground {
     /// script not found `9229`. `--flag=value` keeps the value in the
     /// flag word. Node still consumes both, so the script is the word
     /// after the loader or the port. Python rejects both and exits.
+    /// Node's `--debug-port` is that same port. A word that does not
+    /// start with `-` is the port, and the script is the word after it,
+    /// including when the port word is a path. A missing word, a word
+    /// that starts with `-`, and an empty `--debug-port=` make node
+    /// exit, so nothing after them is a program. `--debug-port=9229`
+    /// and `--debug-port=-` keep the port in the flag word. Bun's
+    /// space-separated `--debug-port` is the script, the same as
+    /// `--inspect-port`: `bun --debug-port 9229 /tmp/codex` tries to
+    /// run `9229`. Python rejects `--debug-port`, including the `=`
+    /// form, and exits.
     /// `--inspect`, `--inspect-wait`, and `--inspect-brk` take the next
     /// word only when it is a port or host:port, and only on bun.
     /// `bun --inspect ./codex` keeps the path. Node's and Deno's
@@ -1524,9 +1549,22 @@ private enum ShellForeground {
             }
             // Python rejects these two node flags and exits. Bun's space
             // form was handled above. Node still consumes them from the
-            // shared set, and so does Deno.
+            // shared set, and so does Deno. `--debug-port` is the same
+            // rejection; node consumes it in `nodeDebugPort`.
             if isPythonRuntime(runtime), pythonRejectsNodeFlag(arg) {
                 return nil
+            }
+            // Node's alias of `--inspect-port`. The port is the next word
+            // unless that word is missing or starts with `-`, in which
+            // case node exits. `--debug-port=9229` is not this check.
+            if isNodeRuntime(runtime), let port = nodeDebugPort(arg, following: following) {
+                switch port {
+                case .skip(let width):
+                    index += width
+                case .exits:
+                    return nil
+                }
+                continue
             }
             // Python's `-S` is a boolean. It shares the shared value set
             // with Deno's permission flag, and that set would swallow the
@@ -1765,9 +1803,43 @@ private enum ShellForeground {
     }
 
     private static func nodeFlagWidth(_ arg: String, runtime: String) -> Int? {
-        guard runtime == "node" || runtime == "nodejs" else { return nil }
+        guard isNodeRuntime(runtime) else { return nil }
         guard nodeRequiredValueFlags.contains(arg) else { return nil }
         return 2
+    }
+
+    /// `node`, `nodejs`, and `node.exe`. Not bun, and not a name that
+    /// only starts with those letters.
+    private static func isNodeRuntime(_ runtime: String) -> Bool {
+        runtime == "node" || runtime == "nodejs"
+    }
+
+    /// How Node's `--debug-port` occupies argv. Nil when `arg` is not
+    /// that flag, so `--debug-port=9229` stays one word and the next
+    /// word is the script.
+    private enum NodeDebugPort {
+        /// Words to advance, including the flag.
+        case skip(Int)
+        /// Node rejects the invocation and does not run a script.
+        case exits
+    }
+
+    /// Node 22.23's alias of `--inspect-port`.
+    ///
+    /// `node --debug-port 9229 /tmp/codex` runs `/tmp/codex`.
+    /// `node --debug-port /usr/local/bin/codex server.js` runs `server.js`:
+    /// the path is the port. A missing word, `--`, `-`, `-1`, and an empty
+    /// `--debug-port=` exit before any script. `--debug-port=9229` and
+    /// `--debug-port=-` keep the port in the flag word. Bun does not use
+    /// this check: its next word is the script. Python rejects the flag
+    /// in `pythonRejectsNodeFlag`.
+    private static func nodeDebugPort(_ arg: String, following: String?) -> NodeDebugPort? {
+        if arg == "--debug-port=" { return .exits }
+        guard arg == "--debug-port" else { return nil }
+        if let following, !following.hasPrefix("-") {
+            return .skip(2)
+        }
+        return .exits
     }
 
     /// Bun 1.4.2 does not take a separate word for these node flags.
@@ -1842,16 +1914,21 @@ private enum ShellForeground {
         return nil
     }
 
-    /// Python 3.13 has neither flag. `python3 --experimental-loader x
-    /// /tmp/codex` and `python3 --inspect-port 9229 /tmp/codex` exit
-    /// before any script runs, including the `=` form. A script written
-    /// before the flag is already returned. Node consumes both, and
-    /// Bun's space form is the script.
+    /// Python 3.13 has none of these flags. `python3 --experimental-loader x
+    /// /tmp/codex`, `python3 --inspect-port 9229 /tmp/codex`, and
+    /// `python3 --debug-port 9229 /tmp/codex` exit before any script runs,
+    /// including the `=` form. A script written before the flag is already
+    /// returned. Node consumes the first two from the shared set and
+    /// `--debug-port` in `nodeDebugPort`. Bun's space form of each is the
+    /// script.
     private static func pythonRejectsNodeFlag(_ arg: String) -> Bool {
         if arg == "--experimental-loader" || arg.hasPrefix("--experimental-loader=") {
             return true
         }
         if arg == "--inspect-port" || arg.hasPrefix("--inspect-port=") {
+            return true
+        }
+        if arg == "--debug-port" || arg.hasPrefix("--debug-port=") {
             return true
         }
         return false
