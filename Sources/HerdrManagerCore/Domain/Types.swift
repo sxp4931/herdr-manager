@@ -992,11 +992,14 @@ public enum HerdrEvent: Sendable {
     case tabRenamed(tabId: String, label: String)
     /// Any other workspace_*/tab_*/worktree_*/layout_updated event. These
     /// can add or drop a container — the caller should resync via
-    /// `herdSnapshot()`. A rename is not in this case.
+    /// `herdSnapshot()`. A rename is not in this case, and neither is a
+    /// focus: `workspace_focused` and `tab_focused` do not change the set.
     case workspacesChanged
     case connected
     case disconnected
-    /// An unrecognized or no-op event that should be silently dropped.
+    /// An unrecognized event, or a container focus (`workspace_focused`,
+    /// `tab_focused`). Neither changes a row. A layout refetch is
+    /// `workspacesChanged`.
     case ignored
 }
 

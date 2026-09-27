@@ -124,8 +124,9 @@ public struct HerdLiveTable: Sendable {
     /// subscription requires a pane id; omitting it is rejected, and
     /// `pane.updated` is not emitted for a status change. The menu bar
     /// polls every 3s. A live table that only refetches on a layout event
-    /// keeps the previous status until the user creates, closes, or
-    /// focuses a container.
+    /// keeps the previous status until a container is created or closed.
+    /// Focusing one is not that event: it does not add or drop a row, and
+    /// a refetch on the click armed the move-dwell baseline.
     ///
     /// Only ids this table already shows are updated. A list that adds a
     /// pane, or that drops one, does not change membership: a move's new
@@ -750,5 +751,38 @@ public struct HerdLiveTable: Sendable {
             identity[agent.id.raw] = (agent.status, agent.stateChangeSeq)
         }
         return identity
+    }
+}
+
+extension HerdLiveTable {
+    /// What herdmgr does after one subscription event.
+    ///
+    /// A focus, a newly created shell, and an event this table does not
+    /// model leave the rows alone. Reading every process and clearing the
+    /// screen for those stalled the live table on a click. A rename only
+    /// changes a label. A pane update still reads processes when the
+    /// visible row did not change: the process can have exited while
+    /// herdr's status string stayed `working`, and the 15s tick is the
+    /// only other time that crash is read. Reconnect is the same read.
+    /// Disconnect is not: the socket is down, and a failed read must not
+    /// be what the next paint waits on.
+    public enum FollowUp: Equatable, Sendable {
+        case skip
+        case paint
+        case scanAndPaint
+
+        public static func after(_ event: HerdrEvent, rowsChanged: Bool) -> FollowUp {
+            switch event {
+            case .paneFocused, .paneCreated, .ignored, .disconnected,
+                 .workspaceRenamed, .tabRenamed:
+                // A row that did change is still shown. These events are
+                // not a reason to read every process list.
+                return rowsChanged ? .paint : .skip
+            case .connected, .workspacesChanged, .paneUpdated:
+                return .scanAndPaint
+            case .agentStatusChanged, .paneClosed, .paneExited, .paneMoved:
+                return rowsChanged ? .scanAndPaint : .skip
+            }
+        }
     }
 }

@@ -751,10 +751,17 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// until the next poll and alerts again for the same block. herdmgr's
     /// status poll does not adopt a new id, so the row stays on the old one
     /// until this event.
+    ///
+    /// `pane.focused`, `workspace.focused`, and `tab.focused` are not in
+    /// this list. They do not add, drop, or re-key a row. herdmgr treated
+    /// `workspace.focused` as a layout change, so every focus refetched
+    /// the herd and armed the move-dwell baseline from that click. The
+    /// parser still drops a container focus if one arrives. `pane.focused`
+    /// stays a focus event and changes no row.
     internal static let globalSubscriptionTypes: [String] = [
         "pane.updated", "pane.created", "pane.closed", "pane.moved",
-        "pane.exited", "pane.focused", "pane.agent_detected",
-        "workspace.created", "workspace.closed", "workspace.renamed", "workspace.focused",
+        "pane.exited", "pane.agent_detected",
+        "workspace.created", "workspace.closed", "workspace.renamed",
         "tab.created", "tab.closed", "tab.renamed"
     ]
 
@@ -968,10 +975,15 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             let tabLabel = data["label"] as? String ?? ""
             guard !renamedTabId.isEmpty, !tabLabel.isEmpty else { return .ignored }
             return .tabRenamed(tabId: renamedTabId, label: tabLabel)
+        case "workspace_focused", "tab_focused":
+            // Focus does not add or drop a container. Classifying it as
+            // `workspacesChanged` made herdmgr refetch the herd on every
+            // click and remember that refetch as the move-dwell baseline.
+            return .ignored
         case "workspace_created", "workspace_updated", "workspace_metadata_updated",
-             "workspace_closed", "workspace_moved", "workspace_focused",
+             "workspace_closed", "workspace_moved",
              "worktree_created", "worktree_opened", "worktree_removed",
-             "tab_created", "tab_closed", "tab_moved", "tab_focused",
+             "tab_created", "tab_closed", "tab_moved",
              "layout_updated":
             return .workspacesChanged
         default:

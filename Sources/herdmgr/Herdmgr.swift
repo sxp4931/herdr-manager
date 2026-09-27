@@ -212,17 +212,28 @@ struct HerdmgrCommand: AsyncParsableCommand {
             case .tick:
                 scanProcesses = true
             case .event(let event):
+                let before = live.agents
                 if case .workspacesChanged = event {
-                    // Focus, create, and close. A rename already carries its
-                    // label. A move arrives as one of these before pane.moved,
-                    // already under the new pane id. Remembering the
-                    // pre-refetch rows lets that move put the dwell back.
+                    // Create, close, and move. Not a focus: that event does
+                    // not change the set of panes, and a refetch here armed
+                    // the dwell baseline from a click. A move's new id is
+                    // already in the list. Remembering the pre-refetch rows
+                    // lets pane.moved put the dwell back. A rename is its
+                    // own event and already carries its label.
                     let refreshed = try? await adapter.herdSnapshot()
                     live.noteLayoutRefresh(refreshed)
                 } else {
                     live.apply(event)
                 }
-                scanProcesses = true
+                switch HerdLiveTable.FollowUp.after(event, rowsChanged: live.agents != before) {
+                case .skip:
+                    scanProcesses = false
+                    continue
+                case .paint:
+                    scanProcesses = false
+                case .scanAndPaint:
+                    scanProcesses = true
+                }
             }
             if scanProcesses {
                 let observations = await processGoneObservations(

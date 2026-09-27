@@ -533,17 +533,34 @@ struct ParseEventTests {
         }
     }
 
-    @Test("workspace_focused (real wire format) yields .workspacesChanged")
-    func workspaceFocusedRealWireFormat() {
+    @Test("workspace_focused is not a layout change")
+    func workspaceFocusedIsNotALayoutChange() {
         let dict: [String: Any] = [
             "event": "workspace_focused",
             "data": ["type": "workspace_focused", "workspace_id": "wE"] as [String: Any]
         ]
         let event = LiveHerdrAdapter.parseEvent(dict)
-        if case .workspacesChanged = event {
-            // pass
-        } else {
-            Issue.record("Expected .workspacesChanged, got \(event)")
+        guard case .ignored = event else {
+            Issue.record("Expected .ignored for workspace_focused, got \(event)")
+            return
+        }
+
+        let created = LiveHerdrAdapter.parseEvent([
+            "event": "workspace_created",
+            "data": ["workspace_id": "wE", "label": "proj"] as [String: Any]
+        ])
+        guard case .workspacesChanged = created else {
+            Issue.record("Expected .workspacesChanged for workspace_created, got \(created)")
+            return
+        }
+
+        let tab = LiveHerdrAdapter.parseEvent([
+            "event": "tab.focused",
+            "data": ["tab_id": "wE:t1", "workspace_id": "wE"] as [String: Any]
+        ])
+        guard case .ignored = tab else {
+            Issue.record("Expected .ignored for tab.focused, got \(tab)")
+            return
         }
     }
 
@@ -599,7 +616,7 @@ struct ParseEventTests {
         }
     }
 
-    @Test("Dotted pane.focused / pane.exited / workspace.focused match subscribe types")
+    @Test("Dotted pane.focused and pane.exited parse, and workspace.focused does not refetch")
     func dottedLifecycleEvents() {
         let focused = LiveHerdrAdapter.parseEvent([
             "event": "pane.focused",
@@ -626,10 +643,9 @@ struct ParseEventTests {
             "event": "workspace.focused",
             "data": ["workspace_id": "w1"] as [String: Any]
         ])
-        if case .workspacesChanged = ws {
-            // pass
-        } else {
-            Issue.record("Expected .workspacesChanged, got \(ws)")
+        guard case .ignored = ws else {
+            Issue.record("Expected .ignored for workspace.focused, got \(ws)")
+            return
         }
     }
 
@@ -855,6 +871,19 @@ struct SubscriptionParamsTests {
         // leaves the re-key path dead: the move is not a close plus a create.
         #expect(LiveHerdrAdapter.globalSubscriptionTypes.contains("pane.moved"))
         #expect(LiveHerdrAdapter.globalSubscriptionTypes.filter { $0 == "pane.moved" }.count == 1)
+    }
+
+    @Test("Focus subscriptions are not requested")
+    func omitsFocusSubscriptions() {
+        // A focus does not change the herd. Subscribing to workspace.focused
+        // made herdmgr refetch on every click.
+        let types = LiveHerdrAdapter.globalSubscriptionTypes
+        #expect(!types.contains("pane.focused"))
+        #expect(!types.contains("workspace.focused"))
+        #expect(!types.contains("tab.focused"))
+        #expect(types.contains("workspace.created"))
+        #expect(types.contains("tab.created"))
+        #expect(types.contains("pane.agent_detected"))
     }
 }
 

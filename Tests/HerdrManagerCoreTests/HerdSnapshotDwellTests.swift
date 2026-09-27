@@ -257,6 +257,7 @@ struct HerdLiveTableDwellTests {
         var live = initialTable()
         refreshAfterMove(on: &live, at: refreshedAt)
         live.apply(.paneFocused(paneId: "wB:p4", workspaceId: "wB"), now: refreshedAt)
+        live.apply(.ignored, now: refreshedAt)
         live.apply(moveEvent(), now: moveAt)
 
         #expect(live.agents.first?.enteredAt == started)
@@ -1242,5 +1243,60 @@ struct HerdLiveTableDwellTests {
         )
         #expect(live.agents.first?.name == "api")
         #expect(live.agents.first?.enteredAt == moveAt)
+    }
+}
+
+@Suite("HerdLiveTable follow-up")
+struct HerdLiveTableFollowUpTests {
+    @Test("A focus or an unrecognized event does not scan or repaint")
+    func focusDoesNotFollowUp() {
+        #expect(HerdLiveTable.FollowUp.after(.paneFocused(paneId: "wA:p1", workspaceId: "wA"), rowsChanged: false) == .skip)
+        #expect(HerdLiveTable.FollowUp.after(.ignored, rowsChanged: false) == .skip)
+        #expect(HerdLiveTable.FollowUp.after(.paneCreated(paneId: "wA:p9", workspaceId: "wA", tabId: "wA:t1"), rowsChanged: false) == .skip)
+        #expect(HerdLiveTable.FollowUp.after(.disconnected, rowsChanged: false) == .skip)
+        // A row that did change is still drawn, and it is not a process
+        // read. Focus does not change one today.
+        #expect(HerdLiveTable.FollowUp.after(.ignored, rowsChanged: true) == .paint)
+        #expect(HerdLiveTable.FollowUp.after(.disconnected, rowsChanged: true) == .paint)
+    }
+
+    @Test("A rename repaints only when a label changed")
+    func renamePaintsWithoutAScan() {
+        #expect(HerdLiveTable.FollowUp.after(.workspaceRenamed(workspaceId: "wA", label: "Proj"), rowsChanged: true) == .paint)
+        #expect(HerdLiveTable.FollowUp.after(.tabRenamed(tabId: "wA:t1", label: "suite"), rowsChanged: true) == .paint)
+        #expect(HerdLiveTable.FollowUp.after(.workspaceRenamed(workspaceId: "wA", label: "Proj"), rowsChanged: false) == .skip)
+        #expect(HerdLiveTable.FollowUp.after(.tabRenamed(tabId: "wA:t1", label: "suite"), rowsChanged: false) == .skip)
+    }
+
+    @Test("A pane update reads processes even when the row text did not change")
+    func paneUpdateScans() {
+        let info = makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "working", stateChangeSeq: 0)
+        #expect(HerdLiveTable.FollowUp.after(.paneUpdated(info), rowsChanged: false) == .scanAndPaint)
+        #expect(HerdLiveTable.FollowUp.after(.paneUpdated(info), rowsChanged: true) == .scanAndPaint)
+        #expect(HerdLiveTable.FollowUp.after(.workspacesChanged, rowsChanged: false) == .scanAndPaint)
+        #expect(HerdLiveTable.FollowUp.after(.connected, rowsChanged: false) == .scanAndPaint)
+    }
+
+    @Test("A status event for a pane the table does not show does not scan")
+    func unchangedStatusDoesNotScan() {
+        #expect(HerdLiveTable.FollowUp.after(
+            .agentStatusChanged(paneId: "wA:p9", agentStatus: "blocked", stateChangeSeq: 4),
+            rowsChanged: false
+        ) == .skip)
+        #expect(HerdLiveTable.FollowUp.after(
+            .agentStatusChanged(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 4),
+            rowsChanged: true
+        ) == .scanAndPaint)
+        #expect(HerdLiveTable.FollowUp.after(.paneClosed(paneId: "wA:p1"), rowsChanged: false) == .skip)
+        #expect(HerdLiveTable.FollowUp.after(.paneExited(paneId: "wA:p1"), rowsChanged: true) == .scanAndPaint)
+        #expect(HerdLiveTable.FollowUp.after(
+            .paneMoved(
+                previousPaneId: "wA:p1",
+                pane: makeDwellAgentInfo(paneId: "wB:p4", workspaceId: "wB"),
+                createdWorkspaceLabel: nil,
+                createdTabLabel: nil
+            ),
+            rowsChanged: false
+        ) == .skip)
     }
 }
