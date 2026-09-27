@@ -124,6 +124,11 @@ public enum SpawnPathPolicy: Sendable {
 /// UI comes up. `agent.say` asks a person before typing into work that
 /// is already underway; this brief is that first task. Blocked, unknown,
 /// and a pane the list does not contain do not receive Enter.
+///
+/// A throw after `agent.start` has returned is not a failed spawn. The
+/// wait and the herd list withholding Enter, a closed write gate, and a
+/// prompt that does not finish are results on the pane that was started.
+/// Failing the tool there hid that pane, and the caller started another.
 public enum SpawnBrief: Sendable {
 
     /// Same cap as `agent.say`. A longer brief is a caller error and is
@@ -146,6 +151,19 @@ public enum SpawnBrief: Sendable {
         case none
         case send
         case withhold(status: String)
+        /// The startup wait or the herd list threw. Enter was not sent.
+        /// The agent is already running; failing the spawn would hide it.
+        case unread
+        /// The write gate refused before `prompt`. Enter was not sent.
+        case writesClosed
+        /// The text write never connected. Enter was not sent. An Enter
+        /// failure after the text write is not this case: `prompt` wraps
+        /// that as `invalidResponse`, which is `.unconfirmed`.
+        case notConnected
+        /// `prompt` threw after the list said send. That call writes the
+        /// text and then Enter, and an Enter failure is reported only
+        /// after the text is in the pane. The brief is not reported as sent.
+        case unconfirmed
     }
 
     /// Nil and `""` are no brief. Any other string, including whitespace,
@@ -186,14 +204,53 @@ public enum SpawnBrief: Sendable {
         }
     }
 
+    /// Fixed phrases. A socket error is not copied: its path and herdr's
+    /// message would break the JSON and can carry the text that was sent.
+    public static func deliveryReason(_ outcome: Outcome) -> String? {
+        switch outcome {
+        case .none, .send:
+            return nil
+        case .withhold(let status):
+            return skippedReason(status: status)
+        case .unread:
+            return "the agent's status could not be read; a brief submits Enter and was not sent"
+        case .writesClosed:
+            return "writes are not enabled; a brief submits Enter and was not sent"
+        case .notConnected:
+            return "the prompt could not connect; a brief submits Enter and was not sent"
+        case .unconfirmed:
+            return "the brief was not confirmed; it is not reported as sent"
+        }
+    }
+
+    /// Classify a throw from `prompt` itself. The write gate and a connect
+    /// that fails before the text write did not insert anything. Every
+    /// other failure, including herdr's error and a timed-out read, is
+    /// unconfirmed: Enter's failure is wrapped as `invalidResponse` after
+    /// the text write has already returned.
+    public static func outcome(forPromptFailure error: Error) -> Outcome {
+        guard let client = error as? NDJSONClientError else {
+            return .unconfirmed
+        }
+        switch client {
+        case .writesDisabled:
+            return .writesClosed
+        case .connectFailed, .socketCreationFailed:
+            return .notConnected
+        case .invalidResponse, .timeout, .sendFailed, .readFailed, .connectionClosed:
+            return .unconfirmed
+        }
+    }
+
     public static func resultFields(for outcome: Outcome) -> String {
         switch outcome {
         case .none:
             return ""
         case .send:
             return ",\"briefSent\":true"
-        case .withhold(let status):
-            return ",\"briefSent\":false,\"briefNotSent\":\"\(skippedReason(status: status))\""
+        case .withhold, .unread, .writesClosed, .notConnected, .unconfirmed:
+            guard let reason = deliveryReason(outcome) else { return "" }
+            return ",\"briefSent\":false,\"briefNotSent\":\"\(reason)\""
         }
     }
 
@@ -213,6 +270,14 @@ public enum SpawnBrief: Sendable {
             return "started, brief sent"
         case .withhold(let status):
             return "started, brief withheld (\(journalStatusToken(status)))"
+        case .unread:
+            return "started, brief withheld (unread)"
+        case .writesClosed:
+            return "started, brief withheld (writes)"
+        case .notConnected:
+            return "started, brief withheld (connect)"
+        case .unconfirmed:
+            return "started, brief unconfirmed"
         }
     }
 }

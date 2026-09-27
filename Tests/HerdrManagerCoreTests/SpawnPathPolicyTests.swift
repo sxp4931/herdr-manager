@@ -224,4 +224,69 @@ struct SpawnBriefTests {
         #expect(!SpawnBrief.exceedsLimit(String(repeating: "a", count: 2000)))
         #expect(SpawnBrief.exceedsLimit(String(repeating: "a", count: 2001)))
     }
+
+    @Test("A throw after the agent has started does not claim the brief was sent")
+    func failureAfterStartStaysJSON() {
+        let unread = SpawnBrief.resultFields(for: .unread)
+        #expect(
+            unread
+                == ",\"briefSent\":false,\"briefNotSent\":\"the agent's status could not be read; a brief submits Enter and was not sent\""
+        )
+        #expect(
+            SpawnBrief.resultFields(for: .writesClosed)
+                == ",\"briefSent\":false,\"briefNotSent\":\"writes are not enabled; a brief submits Enter and was not sent\""
+        )
+        #expect(
+            SpawnBrief.resultFields(for: .notConnected)
+                == ",\"briefSent\":false,\"briefNotSent\":\"the prompt could not connect; a brief submits Enter and was not sent\""
+        )
+        let unconfirmed = SpawnBrief.resultFields(for: .unconfirmed)
+        #expect(
+            unconfirmed
+                == ",\"briefSent\":false,\"briefNotSent\":\"the brief was not confirmed; it is not reported as sent\""
+        )
+        #expect(!unconfirmed.contains("was not sent"))
+
+        for fields in [unread, SpawnBrief.resultFields(for: .writesClosed), SpawnBrief.resultFields(for: .notConnected), unconfirmed] {
+            #expect(fields.filter { $0 == "\"" }.count == 6)
+            #expect(!fields.contains("\\"))
+        }
+
+        #expect(SpawnBrief.journalPostState(for: .unread) == "started, brief withheld (unread)")
+        #expect(SpawnBrief.journalPostState(for: .writesClosed) == "started, brief withheld (writes)")
+        #expect(SpawnBrief.journalPostState(for: .notConnected) == "started, brief withheld (connect)")
+        #expect(SpawnBrief.journalPostState(for: .unconfirmed) == "started, brief unconfirmed")
+        #expect(!SpawnBrief.journalPostState(for: .unconfirmed).contains("\""))
+    }
+
+    @Test("A prompt failure is unconfirmed unless nothing was written")
+    func promptFailureClassification() {
+        #expect(
+            SpawnBrief.outcome(forPromptFailure: NDJSONClientError.writesDisabled("older than 17"))
+                == .writesClosed
+        )
+        #expect(
+            SpawnBrief.outcome(forPromptFailure: NDJSONClientError.connectFailed("/tmp/herdr.sock", 61))
+                == .notConnected
+        )
+        #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.socketCreationFailed(1)) == .notConnected)
+
+        let inserted = NDJSONClientError.invalidResponse(
+            "text was inserted, but Enter failed: socket I/O timed out"
+        )
+        #expect(SpawnBrief.outcome(forPromptFailure: inserted) == .unconfirmed)
+        #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.invalidResponse("nope")) == .unconfirmed)
+        #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.timeout) == .unconfirmed)
+        #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.sendFailed(32)) == .unconfirmed)
+        #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.readFailed(1)) == .unconfirmed)
+        #expect(SpawnBrief.outcome(forPromptFailure: NDJSONClientError.connectionClosed) == .unconfirmed)
+
+        struct Other: Error {}
+        #expect(SpawnBrief.outcome(forPromptFailure: Other()) == .unconfirmed)
+
+        let reported = SpawnBrief.resultFields(for: SpawnBrief.outcome(forPromptFailure: inserted))
+        #expect(!reported.contains("timed out"))
+        #expect(!reported.contains("inserted"))
+        #expect(!reported.contains("/tmp/herdr.sock"))
+    }
 }

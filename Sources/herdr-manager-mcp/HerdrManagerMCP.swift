@@ -1649,25 +1649,15 @@ actor MCPServer {
             // ready, so a startup permission prompt received that Enter.
             // Waking on blocked only ends the wait. The list after it is
             // the status Enter would hit: idle, working, and done are sent
-            // the brief, and a block is not. A timeout is not a failed
-            // start. The agent is already running; the list still decides.
-            // The cap is under the request socket's silence budget. A
-            // 30s wait meets that budget and throws, which skips the list
-            // after the agent has already started.
+            // the brief, and a block is not. A timeout of that wait is not
+            // a failed start. A throw from the wait, the list, or the
+            // prompt is not one either: the agent is already running, and
+            // failing the tool would hide the pane. Enter is not sent
+            // unless that list says to, and a prompt that does not finish
+            // cleanly is not reported as sent.
             var briefOutcome = SpawnBrief.Outcome.none
             if let brief, SpawnBrief.isRequested(brief) {
-                _ = try await adapter.waitStatus(
-                    paneId: paneId,
-                    until: SpawnBrief.wakeStatuses,
-                    timeoutMs: SayWait.maxTimeoutMs
-                )
-                let fresh = try await readHerd()
-                let status = fresh.agents.first(where: { $0.paneId == paneId })?.agentStatus
-                briefOutcome = SpawnBrief.outcome(brief: brief, status: status)
-                if case .send = briefOutcome {
-                    try await requireFreshWrites()
-                    try await adapter.prompt(paneId: paneId, text: brief)
-                }
+                briefOutcome = await deliverBrief(paneId: paneId, brief: brief)
             }
 
             // The global slot was taken before the mutation. This only
@@ -1700,6 +1690,40 @@ actor MCPServer {
             try? await sharedActionStore.markFailed(actionId, detail: detail)
             return makeToolError("session.spawn execution failed: \(detail)")
         }
+    }
+
+    /// Brief delivery after `agent.start` has returned. Nothing here fails
+    /// the spawn. The pane id is the result either way.
+    private func deliverBrief(paneId: String, brief: String) async -> SpawnBrief.Outcome {
+        do {
+            _ = try await adapter.waitStatus(
+                paneId: paneId,
+                until: SpawnBrief.wakeStatuses,
+                timeoutMs: SayWait.maxTimeoutMs
+            )
+        } catch {
+            return .unread
+        }
+        let status: String?
+        do {
+            let fresh = try await readHerd()
+            status = fresh.agents.first(where: { $0.paneId == paneId })?.agentStatus
+        } catch {
+            return .unread
+        }
+        let decision = SpawnBrief.outcome(brief: brief, status: status)
+        guard case .send = decision else { return decision }
+        do {
+            try await requireFreshWrites()
+        } catch {
+            return .writesClosed
+        }
+        do {
+            try await adapter.prompt(paneId: paneId, text: brief)
+        } catch {
+            return SpawnBrief.outcome(forPromptFailure: error)
+        }
+        return .send
     }
 
     // MARK: - action.status
@@ -2491,7 +2515,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "session.spawn",
-            "description": "Start an agent in a new workspace, a new tab in an existing workspace, or a split beside an existing agent. MCP callers are auto-allowed without menu-bar confirmation; other destructive writes remain confirmation-gated. Use placement=new_workspace with repo_path, new_tab with workspace_id, or split with target_agent_id.",
+            "description": "Start an agent in a new workspace, a new tab in an existing workspace, or a split beside an existing agent. MCP callers are auto-allowed without menu-bar confirmation; other destructive writes remain confirmation-gated. Use placement=new_workspace with repo_path, new_tab with workspace_id, or split with target_agent_id. Once the agent has started, a brief that cannot be checked or confirmed still returns that pane.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -2523,7 +2547,7 @@ actor MCPServer {
                     ],
                     "brief": [
                         "type": "string",
-                        "description": "Optional initial prompt (max 2000 characters). Sent only when the new agent is idle, working, or done. A blocked agent does not receive it, because the prompt submits Enter. The spawn still starts."
+                        "description": "Optional initial prompt (max 2000 characters). Sent only when the new agent is idle, working, or done. A blocked agent does not receive it, because the prompt submits Enter. If the status cannot be read, or the prompt does not finish cleanly, the brief is not reported as sent and the spawn still returns the pane."
                     ],
                     "space_label": [
                         "type": "string",
