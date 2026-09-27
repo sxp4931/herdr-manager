@@ -118,6 +118,8 @@ public final class SecretRedactor: Sendable {
             "|(?:[A-Za-z0-9+/]{4}){2,}[A-Za-z0-9+/]{2}" +
             "|(?:[A-Za-z0-9+/]{4}){2,}[A-Za-z0-9+/]{3}" +
             ")(?![A-Za-z0-9+/=])"
+        let keyword =
+            "api[_-]?key|secret(?:[_-]access)?[_-]key|private[_-]key|password[_-]key|secret|token|password"
         let defs = labeled + [
             (basicPrefix + basicSignal + basicToken, "$1[REDACTED]"),
             // Generic assignments. A JSON key has a quote between the name
@@ -137,11 +139,29 @@ public final class SecretRedactor: Sendable {
             // eating the quote would count `[REDACTED]` a second time and
             // swallow the brace. An unquoted value stays one token and
             // still stops at whitespace or `&`.
-            ("(?i)(api[_-]?key|secret(?:[_-]access)?[_-]key|private[_-]key|password[_-]key|secret|token|password)['\"]?\\s*[=:]\\s*(?:\"(?!\(placeholder))[^\"\\n]{8,}|'(?!\(placeholder))[^'\\n]{8,}|(?!\(placeholder))[^\\s'\"&]{8,})", "$1=[REDACTED]"),
+            //
+            // A URL username is not that key. `https://x-access-token:…@github.com`
+            // and `https://gitlab-ci-token:…@gitlab.com` used to match
+            // `token:` and the value ran through `@`, so the host left
+            // with the secret. The guard is only `://`, at most 39
+            // username characters, a keyword, `:`, then 8 non-space
+            // characters and `@`. 39 covers GitHub's username limit when
+            // the keyword is `token`. `@` is still not the end of an
+            // ordinary value: `token=xai-…@leftover` is still consumed
+            // through the `@`, because treating `@` as a boundary would
+            // publish the tail.
+            // An `=` is still an assignment. A password the URL pattern
+            // leaves (shorter than 8, or cut by a raw `@`) still assigns,
+            // so those characters are not published. A lookbehind this
+            // engine rejects falls back to the unguarded pattern. Dropping
+            // the pattern would stop redacting every assignment.
+            (Self.assignmentPattern(keyword: keyword, placeholder: placeholder), "$1=[REDACTED]"),
             // A password in a URL is not an assignment. `DATABASE_URL`,
             // a Redis URL, and a git remote look like
-            // `scheme://user:secret@host`, and the keyword list never
-            // sees that secret. The user and the host stay. The password
+            // `scheme://user:secret@host`. A username that ends in a
+            // keyword is declined by the guard above when this password
+            // is at least 8 characters and has no raw `@`, which is what
+            // this pattern redacts. The user and the host stay. The password
             // is everything after the first colon of the userinfo, so a
             // colon inside it is still covered, and an empty user
             // (`redis://:secret@host`) is too. A password shorter than 8
@@ -160,6 +180,19 @@ public final class SecretRedactor: Sendable {
         }
         return result
     }()
+
+    /// The assignment pattern, with the URL-username guard when this
+    /// engine accepts that lookbehind.
+    private static func assignmentPattern(keyword: String, placeholder: String) -> String {
+        let body =
+            "(\(keyword))['\"]?\\s*[=:]\\s*(?:\"(?!\(placeholder))[^\"\\n]{8,}|'(?!\(placeholder))[^'\\n]{8,}|(?!\(placeholder))[^\\s'\"&]{8,})"
+        let guarded =
+            "(?i)(?!(?<=://[^:@\\s/]{0,39})(?:\(keyword)):[^\\s@]{8,}@)\(body)"
+        if (try? NSRegularExpression(pattern: guarded, options: [])) != nil {
+            return guarded
+        }
+        return "(?i)\(body)"
+    }
 
     public init() {}
 

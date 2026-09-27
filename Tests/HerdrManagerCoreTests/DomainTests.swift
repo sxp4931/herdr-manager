@@ -689,6 +689,108 @@ struct SecretRedactorTests {
         #expect(assignedAgain.redactionCount == 0)
     }
 
+    @Test("A URL username that is an assignment keyword keeps the host")
+    func redactsPasswordWhenUsernameIsAKeyword() {
+        let redactor = SecretRedactor()
+        let ghp = "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789"
+        let github = redactor.redact("https://x-access-token:\(ghp)@github.com/org/repo.git")
+        #expect(github.redactedText == "https://x-access-token:ghp_[REDACTED]@github.com/org/repo.git")
+        #expect(github.redactionCount == 1)
+        #expect(!github.redactedText.contains("abcdefghijklmnopqrstuvwxyz0123456789"))
+        let githubAgain = redactor.redact(github.redactedText)
+        #expect(githubAgain.redactedText == github.redactedText)
+        #expect(githubAgain.redactionCount == 0)
+
+        let gitlab = redactor.redact(
+            "https://gitlab-ci-token:supersecret@gitlab.com/group/repo.git"
+        )
+        #expect(gitlab.redactedText == "https://gitlab-ci-token:[REDACTED]@gitlab.com/group/repo.git")
+        #expect(gitlab.redactionCount == 1)
+        #expect(!gitlab.redactedText.contains("supersecret"))
+        let gitlabAgain = redactor.redact(gitlab.redactedText)
+        #expect(gitlabAgain.redactionCount == 0)
+
+        let json = redactor.redact(
+            #"{"remote": "https://x-access-token:supersecret@github.com/org/repo.git"}"#
+        )
+        #expect(
+            json.redactedText
+                == #"{"remote": "https://x-access-token:[REDACTED]@github.com/org/repo.git"}"#
+        )
+        #expect(json.redactionCount == 1)
+
+        #expect(
+            redactor.redact("HTTPS://X-Access-Token:Supersecret@GitHub.com/org/repo.git").redactedText
+                == "HTTPS://X-Access-Token:[REDACTED]@GitHub.com/org/repo.git"
+        )
+        #expect(
+            redactor.redact("https://api_key:supersecret@example.com/v1").redactedText
+                == "https://api_key:[REDACTED]@example.com/v1"
+        )
+        #expect(
+            redactor.redact("https://client-secret:supersecret@login.example/oauth").redactedText
+                == "https://client-secret:[REDACTED]@login.example/oauth"
+        )
+        #expect(
+            redactor.redact("mongodb+srv://password:supersecret@cluster.example.net/db").redactedText
+                == "mongodb+srv://password:[REDACTED]@cluster.example.net/db"
+        )
+        #expect(
+            redactor.redact(
+                "https://x-access-token:supersecret@github.com/org/repo.git token=anothersecret"
+            ).redactedText
+                == "https://x-access-token:[REDACTED]@github.com/org/repo.git token=[REDACTED]"
+        )
+
+        // 30 characters before `token` is inside the 39-character guard.
+        let nearUser = String(repeating: "a", count: 30) + "token"
+        let near = redactor.redact("https://\(nearUser):supersecret@host/repo")
+        #expect(near.redactedText == "https://\(nearUser):[REDACTED]@host/repo")
+        #expect(near.redactionCount == 1)
+
+        // A colon after a path is not a username. The slash keeps the
+        // guard from seeing `://` immediately before the keyword, so the
+        // assignment still takes the value.
+        let path = redactor.redact("https://example.com/callback?token:supersecret@notahost")
+        #expect(path.redactedText == "https://example.com/callback?token=[REDACTED]")
+        #expect(path.redactionCount == 1)
+        #expect(!path.redactedText.contains("supersecret"))
+        #expect(!path.redactedText.contains("notahost"))
+
+        // `=` is not userinfo. The secret goes, and so does the host.
+        let equals = redactor.redact("https://x-access-token=supersecret@host")
+        #expect(equals.redactedText == "https://x-access-token=[REDACTED]")
+        #expect(!equals.redactedText.contains("supersecret"))
+        #expect(!equals.redactedText.contains("host"))
+
+        // Shorter than 8, or a raw `@` in the password: the URL pattern
+        // would leave a piece of it, so the assignment still takes the tail.
+        let short = redactor.redact("https://token:hunter2@localhost/db")
+        #expect(short.redactedText == "https://token=[REDACTED]")
+        #expect(!short.redactedText.contains("hunter2"))
+        let rawAt = redactor.redact("https://token:p@ssw0rd!!@host")
+        #expect(rawAt.redactedText == "https://token=[REDACTED]")
+        #expect(!rawAt.redactedText.contains("ssw0rd"))
+
+        // A recognized token that continues after `@` is not a URL username.
+        // The tail is still a secret.
+        let key = "xai-abcdefghijklmnopqrstuvwxyz0123456789"
+        let leftover = redactor.redact("token=\(key)@leftoversecret")
+        #expect(leftover.redactedText == "token=[REDACTED]")
+        #expect(leftover.redactionCount == 2)
+        #expect(!leftover.redactedText.contains("leftoversecret"))
+        #expect(!leftover.redactedText.contains("abcdefghijklmnopqrstuvwxyz0123456789"))
+
+        // The keyword starts 40 characters after `://`, past the guard.
+        // The secret is still not published.
+        let farUser = String(repeating: "b", count: 40) + "token"
+        let far = redactor.redact("https://\(farUser):supersecret@host/repo")
+        #expect(far.redactedText == "https://\(farUser)=[REDACTED]")
+        #expect(far.redactionCount == 1)
+        #expect(!far.redactedText.contains("supersecret"))
+        #expect(!far.redactedText.contains("host/repo"))
+    }
+
     @Test("Redacts an HTTP Basic credential and leaves the header")
     func redactsAuthorizationBasic() {
         let redactor = SecretRedactor()
