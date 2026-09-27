@@ -318,3 +318,133 @@ public enum SpawnBrief: Sendable {
         }
     }
 }
+
+// MARK: - SpawnLaunch
+
+/// A `session.spawn` whose pane already exists, and whose `agent.start`
+/// did not return.
+///
+/// `workspace.create`, `tab.create`, and `pane.split` have already
+/// assigned a pane id. Failing the tool there hides that id. The caller
+/// treats a failed spawn as "no agent" and starts another. `agent.start`
+/// waits 30 seconds, which is also how long the request socket stays
+/// silent, so a launch that uses the whole window comes back as a timeout
+/// after herdr may already have started the agent.
+///
+/// The result names the pane and sets `started` false. A requested brief
+/// is not sent: `prompt` submits Enter, and a start that timed out may be
+/// sitting on a permission prompt.
+public enum SpawnLaunch: Sendable {
+
+    public enum Miss: Equatable, Sendable {
+        /// The new pane never presented a shell. `agent.start` was not called.
+        case shell
+        /// The write gate refused before `agent.start`. Nothing was launched.
+        case writesClosed
+        /// `agent.start` could not connect, so its request was not written.
+        case notConnected
+        /// herdr answered `agent.start` with an error. The response was
+        /// small enough to read, so this is a rejection, not a dropped
+        /// success. The agent was not started.
+        case rejected
+        /// The start was attempted and the outcome is not known. A timeout
+        /// and an oversized success line are this case: the agent may be
+        /// running. A herdr error is `.rejected` instead.
+        case unconfirmed
+    }
+
+    /// Fixed sentence for a brief that was requested and then withheld
+    /// because the start did not return. The live error is not copied.
+    public static let briefNotSentReason =
+        "the brief was not sent because the agent start was not confirmed"
+
+    /// Classify a throw from `agent.start` itself.
+    ///
+    /// A closed gate and a connect that fails before the request is
+    /// written did not launch the agent. A timeout, a dropped connection,
+    /// and an oversized success line did not come back as a clean start,
+    /// and the agent may be running. Any other `invalidResponse` is herdr's
+    /// error, which means the start was rejected.
+    public static func miss(forStart error: Error) -> Miss {
+        guard let client = error as? NDJSONClientError else {
+            return .unconfirmed
+        }
+        switch client {
+        case .writesDisabled:
+            return .writesClosed
+        case .connectFailed, .socketCreationFailed:
+            return .notConnected
+        case .invalidResponse(let detail):
+            if NDJSONClientError.isOversizedLineDetail(detail) {
+                return .unconfirmed
+            }
+            return .rejected
+        case .timeout, .sendFailed, .readFailed, .connectionClosed, .promptEnterFailed:
+            return .unconfirmed
+        }
+    }
+
+    /// Fixed phrases. A socket path and herdr's message are not copied:
+    /// either one can contain a quote, and the result is built by hand.
+    public static func reason(_ miss: Miss) -> String {
+        switch miss {
+        case .shell:
+            return "the new pane did not become a shell; the agent was not started"
+        case .writesClosed:
+            return "writes are not enabled; the agent was not started"
+        case .notConnected:
+            return "the agent start could not connect; the agent was not started"
+        case .rejected:
+            return "herdr rejected the agent start; the agent was not started"
+        case .unconfirmed:
+            return "the agent start was not confirmed"
+        }
+    }
+
+    public static func journalPostState(for miss: Miss) -> String {
+        switch miss {
+        case .shell:
+            return "pane created, agent not started (shell)"
+        case .writesClosed:
+            return "pane created, agent not started (writes)"
+        case .notConnected:
+            return "pane created, agent not started (connect)"
+        case .rejected:
+            return "pane created, agent not started (rejected)"
+        case .unconfirmed:
+            return "pane created, start unconfirmed"
+        }
+    }
+
+    /// The tool result when the pane exists and `agent.start` did not return.
+    ///
+    /// The ids are escaped the same way as a started spawn. `started` is
+    /// false. A nil `tab` omits the field. An empty tab is still a value.
+    /// `briefRequested` appends the fixed brief refusal; the brief's text
+    /// is not included.
+    public static func createdResult(
+        agentId: String,
+        space: String,
+        placement: String,
+        tab: String?,
+        actionId: String,
+        miss: Miss,
+        briefRequested: Bool
+    ) -> String {
+        var result = "{\"agentId\":\(quoted(agentId)),\"space\":\(quoted(space)),\"placement\":\(quoted(placement))"
+        if let tab {
+            result += ",\"tab\":\(quoted(tab))"
+        }
+        result += ",\"started\":false,\"actionId\":\(quoted(actionId))"
+        result += ",\"startNotConfirmed\":\"\(reason(miss))\""
+        if briefRequested {
+            result += ",\"briefSent\":false,\"briefNotSent\":\"\(briefNotSentReason)\""
+        }
+        result += "}"
+        return result
+    }
+
+    private static func quoted(_ value: String) -> String {
+        "\"\(ConfirmedPaneFollow.jsonEscaped(value))\""
+    }
+}

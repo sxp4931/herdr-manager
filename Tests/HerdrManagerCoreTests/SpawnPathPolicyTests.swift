@@ -353,3 +353,138 @@ struct SpawnBriefTests {
         )
     }
 }
+
+@Suite("SpawnLaunch")
+struct SpawnLaunchTests {
+
+    @Test("A start failure is not the same as a dropped response")
+    func classifiesStart() {
+        #expect(
+            SpawnLaunch.miss(forStart: NDJSONClientError.writesDisabled("older than 17"))
+                == .writesClosed
+        )
+        #expect(
+            SpawnLaunch.miss(forStart: NDJSONClientError.connectFailed("/tmp/herdr.sock", 61))
+                == .notConnected
+        )
+        #expect(SpawnLaunch.miss(forStart: NDJSONClientError.socketCreationFailed(1)) == .notConnected)
+
+        #expect(SpawnLaunch.miss(forStart: NDJSONClientError.invalidResponse("pane not found")) == .rejected)
+        #expect(SpawnLaunch.miss(forStart: NDJSONClientError.invalidResponse("herdr error -32601")) == .rejected)
+        #expect(
+            SpawnLaunch.miss(forStart: NDJSONClientError.invalidResponse("not NDJSON line exceeded 1 bytes"))
+                == .rejected
+        )
+
+        let oversized = "\(NDJSONClientError.oversizedLineDetailPrefix)\(NDJSONFraming.maxLineBytes) bytes"
+        #expect(NDJSONClientError.isOversizedLineDetail(oversized))
+        #expect(!NDJSONClientError.isOversizedLineDetail("pane not found"))
+        #expect(SpawnLaunch.miss(forStart: NDJSONClientError.invalidResponse(oversized)) == .unconfirmed)
+
+        #expect(SpawnLaunch.miss(forStart: NDJSONClientError.timeout) == .unconfirmed)
+        #expect(SpawnLaunch.miss(forStart: NDJSONClientError.sendFailed(32)) == .unconfirmed)
+        #expect(SpawnLaunch.miss(forStart: NDJSONClientError.readFailed(1)) == .unconfirmed)
+        #expect(SpawnLaunch.miss(forStart: NDJSONClientError.connectionClosed) == .unconfirmed)
+        #expect(SpawnLaunch.miss(forStart: NDJSONClientError.promptEnterFailed) == .unconfirmed)
+
+        struct Other: Error {}
+        #expect(SpawnLaunch.miss(forStart: Other()) == .unconfirmed)
+
+        let reported = SpawnLaunch.reason(SpawnLaunch.miss(forStart: NDJSONClientError.connectFailed("/tmp/herdr.sock", 61)))
+        #expect(!reported.contains("/tmp/herdr.sock"))
+        #expect(!reported.contains("61"))
+        let rejected = SpawnLaunch.reason(.rejected)
+        #expect(!rejected.contains("pane not found"))
+        #expect(!SpawnLaunch.reason(.unconfirmed).contains("timed out"))
+    }
+
+    @Test("A pane created before a failed start stays one JSON object")
+    func createdResultStaysJSON() throws {
+        let misses: [SpawnLaunch.Miss] = [
+            .shell, .writesClosed, .notConnected, .rejected, .unconfirmed
+        ]
+        for miss in misses {
+            let reason = SpawnLaunch.reason(miss)
+            let journal = SpawnLaunch.journalPostState(for: miss)
+            #expect(!reason.contains("\""))
+            #expect(!reason.contains("\\"))
+            #expect(!journal.contains("\""))
+            #expect(!journal.contains("\\"))
+            if miss == .unconfirmed {
+                #expect(!reason.contains("not started"))
+                #expect(!journal.contains("not started"))
+            } else {
+                #expect(reason.contains("not started"))
+                #expect(journal.contains("not started"))
+            }
+        }
+        #expect(!SpawnLaunch.briefNotSentReason.contains("\""))
+        #expect(!SpawnLaunch.briefNotSentReason.contains("\\"))
+
+        let plain = SpawnLaunch.createdResult(
+            agentId: "w1:p1",
+            space: "w1",
+            placement: "new_workspace",
+            tab: "t2",
+            actionId: "A1",
+            miss: .shell,
+            briefRequested: false
+        )
+        #expect(
+            plain
+                == "{\"agentId\":\"w1:p1\",\"space\":\"w1\",\"placement\":\"new_workspace\",\"tab\":\"t2\",\"started\":false,\"actionId\":\"A1\",\"startNotConfirmed\":\"the new pane did not become a shell; the agent was not started\"}"
+        )
+        #expect(!plain.contains("brief"))
+
+        let split = SpawnLaunch.createdResult(
+            agentId: "w1:p1",
+            space: "w1",
+            placement: "split",
+            tab: nil,
+            actionId: "A1",
+            miss: .unconfirmed,
+            briefRequested: true
+        )
+        #expect(!split.contains("\"tab\""))
+        let splitObject = try #require(JSONSerialization.jsonObject(with: Data(split.utf8)) as? [String: Any])
+        #expect(splitObject["started"] as? Bool == false)
+        #expect(splitObject["briefSent"] as? Bool == false)
+        #expect(splitObject["startNotConfirmed"] as? String == SpawnLaunch.reason(.unconfirmed))
+        #expect(splitObject["briefNotSent"] as? String == SpawnLaunch.briefNotSentReason)
+        #expect(splitObject["agentId"] as? String == "w1:p1")
+
+        let emptyTab = SpawnLaunch.createdResult(
+            agentId: "w1:p1",
+            space: "w1",
+            placement: "new_tab",
+            tab: "",
+            actionId: "A1",
+            miss: .writesClosed,
+            briefRequested: false
+        )
+        #expect(emptyTab.contains(",\"tab\":\"\""))
+        #expect(!emptyTab.contains("briefSent"))
+
+        let hostile = SpawnLaunch.createdResult(
+            agentId: "w\"1",
+            space: "a\\b",
+            placement: "split\";\"started\":true",
+            tab: "t\n2\t\u{0001}",
+            actionId: "A\"1",
+            miss: .rejected,
+            briefRequested: true
+        )
+        let object = try #require(JSONSerialization.jsonObject(with: Data(hostile.utf8)) as? [String: Any])
+        #expect(object["agentId"] as? String == "w\"1")
+        #expect(object["space"] as? String == "a\\b")
+        #expect(object["placement"] as? String == "split\";\"started\":true")
+        #expect(object["tab"] as? String == "t\n2\t\u{0001}")
+        #expect(object["started"] as? Bool == false)
+        #expect(object["actionId"] as? String == "A\"1")
+        #expect(object["startNotConfirmed"] as? String == SpawnLaunch.reason(.rejected))
+        #expect(object["briefSent"] as? Bool == false)
+        #expect(object["briefNotSent"] as? String == SpawnLaunch.briefNotSentReason)
+        #expect(!hostile.contains("pane not found"))
+        #expect(!hostile.contains("/tmp"))
+    }
+}

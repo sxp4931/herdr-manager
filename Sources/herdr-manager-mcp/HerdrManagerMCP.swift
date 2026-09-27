@@ -1638,7 +1638,7 @@ actor MCPServer {
             try await ensureConnected()
             let paneId: String
             let finalWorkspaceId: String
-            var tabId: String?
+            var tabId: String? = nil
 
             switch placement {
             case "new_workspace":
@@ -1691,22 +1691,67 @@ actor MCPServer {
                 throw AgentResolutionError(description: "invalid placement")
             }
 
-            let shellReady = try await adapter.waitForShell(paneId: paneId)
-            guard shellReady else {
-                throw AgentResolutionError(description: "agent target pane \(paneId) did not become an available shell")
+            // The pane id is already assigned. A failure from here on is
+            // not a tool error: the workspace, tab, or split exists, and a
+            // caller that treats a failed spawn as "no agent" starts a
+            // second one. `agent.start` still waits 30 seconds. That meets
+            // the request socket, so a launch that uses the whole window
+            // comes back as a timeout after herdr may have started the
+            // agent. Shortening the wait would also reject a launch herdr
+            // was about to accept. The brief is not sent on this path.
+            // Enter would accept a startup prompt the caller has not seen.
+            // Nil means agent.start returned. Every other path sets a miss
+            // before the brief, so a failed launch cannot fall through to Enter.
+            var launchMiss: SpawnLaunch.Miss? = nil
+            do {
+                let shellReady = try await adapter.waitForShell(paneId: paneId)
+                if !shellReady {
+                    launchMiss = .shell
+                } else {
+                    do {
+                        // A not-ready pane fails the shell read. A connect
+                        // failure in that retry clears the gate, and a later
+                        // read can still see the shell. Re-read before
+                        // launching, or the start is refused on a gate herdr
+                        // has already come back from. A restart onto an older
+                        // protocol stays closed. That refusal is before
+                        // `agent.start`, so the agent was not launched.
+                        try await requireFreshWrites()
+                        try await adapter.startAgent(
+                            paneId: paneId,
+                            kind: agentKind,
+                            name: agentName,
+                            timeoutMs: 30_000
+                        )
+                    } catch {
+                        if error is CancellationError { throw error }
+                        // requireFreshWrites throws its own error, and it
+                        // does so before agent.start. Classifying that as a
+                        // start failure would say the launch was attempted.
+                        if error is MCPRevalidationError {
+                            launchMiss = .writesClosed
+                        } else {
+                            launchMiss = SpawnLaunch.miss(forStart: error)
+                        }
+                    }
+                }
+            } catch {
+                if error is CancellationError { throw error }
+                launchMiss = .shell
             }
-            // A not-ready pane fails the shell read. A connect failure in
-            // that retry clears the gate, and a later read can still see
-            // the shell. Re-read before launching, or the start is refused
-            // on a gate herdr has already come back from. A restart onto
-            // an older protocol stays closed.
-            try await requireFreshWrites()
-            try await adapter.startAgent(
-                paneId: paneId,
-                kind: agentKind,
-                name: agentName,
-                timeoutMs: 30_000
-            )
+            if let launchMiss {
+                return await finishCreatedPane(
+                    actionId: actionId,
+                    placement: placement,
+                    kind: agentKind,
+                    name: agentName,
+                    paneId: paneId,
+                    space: finalWorkspaceId,
+                    tab: tabId,
+                    miss: launchMiss,
+                    briefRequested: SpawnBrief.isRequested(brief)
+                )
+            }
 
             // `prompt` submits Enter. The wait used to treat `blocked` as
             // ready, so a startup permission prompt received that Enter.
@@ -1755,6 +1800,50 @@ actor MCPServer {
             try? await sharedActionStore.markFailed(actionId, detail: detail)
             return makeToolError("session.spawn execution failed: \(detail)")
         }
+    }
+
+    /// The pane exists and `agent.start` did not return. The action is
+    /// finished because the workspace, tab, or split is already there.
+    /// The journal does not copy the socket error. No brief is sent, and
+    /// the new pane is not put on the write cooldown: the withheld brief
+    /// is what the caller may still need to deliver.
+    private func finishCreatedPane(
+        actionId: String,
+        placement: String,
+        kind: String,
+        name: String,
+        paneId: String,
+        space: String,
+        tab: String?,
+        miss: SpawnLaunch.Miss,
+        briefRequested: Bool
+    ) async -> [String: Any] {
+        try? await sharedActionStore.markExecuted(actionId)
+        await journal.record(JournalEntry(
+            actionId: actionId,
+            tool: "session.spawn",
+            params: [
+                "placement": placement,
+                "kind": kind,
+                "name": name,
+                "workspace_id": space,
+                "pane_id": paneId
+            ],
+            caller: "mcp",
+            preState: "placement=\(placement)",
+            postState: SpawnLaunch.journalPostState(for: miss),
+            outcome: "pane_created",
+            keepForever: true
+        ))
+        return makeToolResult(SpawnLaunch.createdResult(
+            agentId: paneId,
+            space: space,
+            placement: placement,
+            tab: tab,
+            actionId: actionId,
+            miss: miss,
+            briefRequested: briefRequested
+        ))
     }
 
     /// Brief delivery after `agent.start` has returned. Nothing here fails
@@ -2580,7 +2669,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "session.spawn",
-            "description": "Start an agent in a new workspace, a new tab in an existing workspace, or a split beside an existing agent. MCP callers are auto-allowed without menu-bar confirmation; other destructive writes remain confirmation-gated. Use placement=new_workspace with repo_path, new_tab with workspace_id, or split with target_agent_id. Once the agent has started, a brief that cannot be checked or confirmed still returns that pane.",
+            "description": "Start an agent in a new workspace, a new tab in an existing workspace, or a split beside an existing agent. MCP callers are auto-allowed without menu-bar confirmation; other destructive writes remain confirmation-gated. Use placement=new_workspace with repo_path, new_tab with workspace_id, or split with target_agent_id. Once the agent has started, a brief that cannot be checked or confirmed still returns that pane. If the pane was created but the agent start was not confirmed, started is false, startNotConfirmed says why, and that same pane id is returned. Do not start a second agent until that pane has been checked. A requested brief is not sent on that result.",
             "inputSchema": [
                 "type": "object",
                 "properties": [

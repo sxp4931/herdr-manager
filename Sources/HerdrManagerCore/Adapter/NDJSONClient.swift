@@ -52,6 +52,15 @@ public enum NDJSONClientError: Error, Sendable, CustomStringConvertible, Localiz
     /// NSError's generic "The operation couldn't be completed" and drops
     /// the socket path, errno, and herdr's own message.
     public var errorDescription: String? { description }
+
+    /// Prefix of an `invalidResponse` detail that means the response line
+    /// was drained and dropped. The request may already have been applied.
+    /// A herdr error message does not start with this.
+    public static let oversizedLineDetailPrefix = "NDJSON line exceeded "
+
+    public static func isOversizedLineDetail(_ detail: String) -> Bool {
+        detail.hasPrefix(oversizedLineDetailPrefix)
+    }
 }
 
 /// Bounded NDJSON framing. A missing newline or a multi-megabyte pane.read
@@ -446,7 +455,7 @@ public final class NDJSONClient: @unchecked Sendable {
             case .skippedOversized:
                 if skipOversized { continue }
                 throw NDJSONClientError.invalidResponse(
-                    "NDJSON line exceeded \(NDJSONFraming.maxLineBytes) bytes"
+                    "\(NDJSONClientError.oversizedLineDetailPrefix)\(NDJSONFraming.maxLineBytes) bytes"
                 )
             case .stillSkipping, .needMore:
                 break
