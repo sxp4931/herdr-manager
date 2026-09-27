@@ -16,7 +16,7 @@ public final class SecretRedactor: Sendable {
 
     // Patterns to detect and redact
     private static let patterns: [(regex: NSRegularExpression, replacement: String)] = {
-        let labeled: [(pattern: String, replacement: String)] = [
+        let beforeBearer: [(pattern: String, replacement: String)] = [
             // Anthropic keys (hyphens; generic sk- does not match these)
             ("sk-ant-[A-Za-z0-9_-]{20,}", "sk-ant-[REDACTED]"),
             // OpenAI project keys
@@ -57,6 +57,18 @@ public final class SecretRedactor: Sendable {
             (
                 "(?<![A-Za-z0-9_])whsec_[A-Za-z0-9+/=]{20,}(?![A-Za-z0-9+/=_-])",
                 "whsec_[REDACTED]"
+            ),
+            // OpenAI admin keys. `sk-proj-` and `sk-svcacct-` do not name
+            // this prefix, and the generic `sk-` pattern stops at the
+            // hyphen, so the body reached MCP tails and `herdmgr --json`.
+            // An admin key manages the org. The body is the same
+            // base64url alphabet as a project key. Twenty characters is
+            // that floor; a shorter body stays. A letter, digit, or
+            // underscore glued to the front is not the prefix. The case
+            // is the one OpenAI issues.
+            (
+                "(?<![A-Za-z0-9_])sk-admin-[A-Za-z0-9_-]{20,}",
+                "sk-admin-[REDACTED]"
             ),
             // OpenAI / generic sk- keys
             ("sk-[A-Za-z0-9]{20,}", "sk-[REDACTED]"),
@@ -292,13 +304,11 @@ public final class SecretRedactor: Sendable {
                 "(?<![A-Za-z0-9_])GOCSPX-[0-9A-Za-z_-]{28}(?![A-Za-z0-9_-])",
                 "GOCSPX-[REDACTED]"
             ),
-            // Bearer scheme. HTTP treats the scheme as case-insensitive,
-            // and pane logs paste `authorization: bearer …`. A letter,
-            // digit, or underscore glued to the front is not the scheme
-            // (`notbearer` stays). The token alphabet is unchanged, and
-            // it includes `.`, so a JWT after this word is one redaction.
-            // The payload is not left for the pattern below.
-            ("(?<![A-Za-z0-9_])[Bb][Ee][Aa][Rr][Ee][Rr]\\s+[A-Za-z0-9\\-._~+/]+=*", "Bearer [REDACTED]"),
+        ]
+        // Compact JWS or JWE, then a PEM block. Both stay after bearer:
+        // a JWT written after the scheme has to be one redaction, and
+        // the bearer pattern is what consumes the dots.
+        let afterBearer: [(pattern: String, replacement: String)] = [
             // Compact JWS or JWE with no scheme. The header is base64url
             // of JSON, so the token starts with `eyJ`. Each segment is at
             // least 10 characters and there are at least three, so a short
@@ -319,16 +329,41 @@ public final class SecretRedactor: Sendable {
         // an assignment name. Without listing the PEM token here, that
         // name would treat `[REDACTED` as a new value and leave
         // `PRIVATE KEY]`.
-        let labels = labeled
-            .map(\.replacement)
+        //
+        // `Bearer [REDACTED]` is the opaque-token replacement. It is not
+        // in `beforeBearer` because the scheme pattern is built from this
+        // same list: a key that was already replaced must not be counted
+        // again when the header says Bearer.
+        let labelSources = beforeBearer.map(\.replacement)
+            + ["Bearer [REDACTED]"]
+            + afterBearer.map(\.replacement)
+        let labels = labelSources
             .filter { $0.hasSuffix("[REDACTED]") }
             .map { NSRegularExpression.escapedPattern(for: String($0.dropLast("[REDACTED]".count))) }
-        let placeholder = "(?:(?:\(labels.joined(separator: "|")))?\\[REDACTED\\]|\\[REDACTED PRIVATE KEY\\])(?![^\\s'\"&])"
+        let redactedToken =
+            "(?:(?:\(labels.joined(separator: "|")))?\\[REDACTED\\]|\\[REDACTED PRIVATE KEY\\])"
+        let placeholder = redactedToken + "(?![^\\s'\"&])"
         // The assignment placeholder treats `@` as part of a value, not as
         // the end of one. A URL password that is already `[REDACTED]` sits
         // immediately before `@host`. This lookahead is that whole token
         // plus the `@`, so the URL pattern does not count it again.
-        let urlPlaceholder = "(?:(?:\(labels.joined(separator: "|")))?\\[REDACTED\\]|\\[REDACTED PRIVATE KEY\\])@"
+        let urlPlaceholder = redactedToken + "@"
+        // Bearer scheme. HTTP treats the scheme as case-insensitive, and
+        // pane logs paste `authorization: bearer …`. A letter, digit, or
+        // underscore glued to the front is not the scheme (`notbearer`
+        // stays). The token alphabet includes `.`, so a JWT after this
+        // word is one redaction and the payload is not left for the
+        // pattern below. A token a pattern above already replaced is
+        // `prefix[REDACTED]`. Matching the prefix again turned
+        // `Bearer xai-[REDACTED]` into `Bearer [REDACTED][REDACTED]` and
+        // counted one secret twice. The lookahead is the placeholder
+        // without the assignment boundary, so a period after the token
+        // still keeps the label.
+        let bearer: (pattern: String, replacement: String) = (
+            pattern: "(?<![A-Za-z0-9_])[Bb][Ee][Aa][Rr][Ee][Rr]\\s+(?!\(redactedToken))[A-Za-z0-9\\-._~+/]+=*",
+            replacement: "Bearer [REDACTED]"
+        )
+        let labeled = beforeBearer + [bearer] + afterBearer
         // HTTP Basic. Bearer names its own scheme, and an assignment
         // keyword never sees `Authorization: Basic dXNlcjpw…`, so the
         // base64 user:password reached the model. `Proxy-Authorization`

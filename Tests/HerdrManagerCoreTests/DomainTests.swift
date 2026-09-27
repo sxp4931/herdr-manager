@@ -2143,6 +2143,128 @@ struct SecretRedactorTests {
             #expect(result.redactedText == line)
         }
     }
+
+    @Test("An OpenAI admin key is redacted once, and Bearer keeps that label")
+    func redactsOpenAIAdminKeyAndBearerLabel() {
+        let redactor = SecretRedactor()
+        let body = String(repeating: "a", count: 20) + "-_" + String(repeating: "B", count: 40)
+        let admin = "sk-admin-" + body
+        let kept = "sk-admin-[REDACTED]"
+
+        let bare = redactor.redact("created \(admin) for the org")
+        #expect(bare.redactedText == "created \(kept) for the org")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains(body))
+        let bareAgain = redactor.redact(bare.redactedText)
+        #expect(bareAgain.redactionCount == 0)
+
+        // `OPENAI_ADMIN_KEY` is not an assignment name. The prefix pattern
+        // is what takes the value, and the label stays.
+        let env = redactor.redact("OPENAI_ADMIN_KEY=\(admin)")
+        #expect(env.redactedText == "OPENAI_ADMIN_KEY=\(kept)")
+        #expect(env.redactionCount == 1)
+        let envAgain = redactor.redact(env.redactedText)
+        #expect(envAgain.redactionCount == 0)
+        let json = redactor.redact(#"{"OPENAI_ADMIN_KEY": "\#(admin)"}"#)
+        #expect(json.redactedText == #"{"OPENAI_ADMIN_KEY": "\#(kept)"}"#)
+        #expect(json.redactionCount == 1)
+        let jsonAgain = redactor.redact(json.redactedText)
+        #expect(jsonAgain.redactionCount == 0)
+
+        let assigned = redactor.redact("token=\(admin)")
+        #expect(assigned.redactedText == "token=\(kept)")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+
+        // A header is how the key is pasted. The scheme stays, the label
+        // stays, and the body is not a second secret.
+        let header = redactor.redact("Authorization: Bearer \(admin)")
+        #expect(header.redactedText == "Authorization: Bearer \(kept)")
+        #expect(header.redactionCount == 1)
+        let headerAgain = redactor.redact(header.redactedText)
+        #expect(headerAgain.redactionCount == 0)
+        let lower = redactor.redact("authorization: bearer \(admin)")
+        #expect(lower.redactedText == "authorization: bearer \(kept)")
+        #expect(lower.redactionCount == 1)
+
+        let url = redactor.redact("https://user:\(admin)@api.openai.com/v1")
+        #expect(url.redactedText == "https://user:\(kept)@api.openai.com/v1")
+        #expect(url.redactionCount == 1)
+        let urlAgain = redactor.redact(url.redactedText)
+        #expect(urlAgain.redactionCount == 0)
+
+        let sentence = redactor.redact("saw \(admin). next")
+        #expect(sentence.redactedText == "saw \(kept). next")
+        #expect(sentence.redactionCount == 1)
+
+        let hyphen = redactor.redact("my-\(admin)")
+        #expect(hyphen.redactedText == "my-\(kept)")
+        #expect(hyphen.redactionCount == 1)
+
+        let exact = "sk-admin-" + String(repeating: "c", count: 20)
+        let exactResult = redactor.redact(exact + ". next")
+        #expect(exactResult.redactedText == "\(kept). next")
+        #expect(exactResult.redactionCount == 1)
+
+        // The same header used to drop the label of every prefix above
+        // and count it twice. An opaque token on the same line is still
+        // the scheme's own redaction. A JWT after the scheme is still
+        // one redaction, not a second `eyJ` token.
+        let xai = "xai-" + String(repeating: "a", count: 26)
+        let ghp = "ghp_" + String(repeating: "a", count: 36)
+        let proj = "sk-proj-" + String(repeating: "b", count: 24)
+        let xaiHeader = redactor.redact("Authorization: Bearer \(xai)")
+        #expect(xaiHeader.redactedText == "Authorization: Bearer xai-[REDACTED]")
+        #expect(xaiHeader.redactionCount == 1)
+        let xaiAgain = redactor.redact(xaiHeader.redactedText)
+        #expect(xaiAgain.redactionCount == 0)
+        let ghpHeader = redactor.redact("authorization: bearer \(ghp).")
+        #expect(ghpHeader.redactedText == "authorization: bearer ghp_[REDACTED].")
+        #expect(ghpHeader.redactionCount == 1)
+        let projHeader = redactor.redact("Bearer \(proj) tail")
+        #expect(projHeader.redactedText == "Bearer sk-proj-[REDACTED] tail")
+        #expect(projHeader.redactionCount == 1)
+
+        let opaque = "opaquetoken" + "1234567890"
+        let mixed = redactor.redact("Bearer \(xai) Bearer \(opaque)")
+        #expect(mixed.redactedText == "Bearer xai-[REDACTED] Bearer [REDACTED]")
+        #expect(mixed.redactionCount == 2)
+        let mixedAgain = redactor.redact(mixed.redactedText)
+        #expect(mixedAgain.redactionCount == 0)
+
+        let jwt = "eyJ" + String(repeating: "a", count: 10) + "."
+            + String(repeating: "b", count: 10) + "."
+            + String(repeating: "c", count: 10)
+        let wrapped = redactor.redact("authorization: bearer \(jwt)")
+        #expect(wrapped.redactedText == "authorization: Bearer [REDACTED]")
+        #expect(wrapped.redactionCount == 1)
+        #expect(!wrapped.redactedText.contains("aaaaaaaaaa"))
+        let wrappedAgain = redactor.redact(wrapped.redactedText)
+        #expect(wrappedAgain.redactionCount == 0)
+
+        // `@` is still not the end of an ordinary value, so the tail
+        // does not survive beside the placeholder.
+        let leftover = redactor.redact("token=\(admin)@leftoversecret")
+        #expect(leftover.redactedText == "token=[REDACTED]")
+        #expect(leftover.redactionCount == 2)
+        #expect(!leftover.redactedText.contains("leftoversecret"))
+        #expect(!leftover.redactedText.contains(body))
+
+        let stayed = [
+            "keys start with sk-admin-",
+            "sk-admin-" + String(repeating: "a", count: 19),
+            "SK-ADMIN-" + body,
+            "x" + admin,
+            "_" + admin,
+            "notbearer " + opaque,
+        ]
+        for line in stayed {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line.prefix(80))")
+            #expect(result.redactedText == line)
+        }
+    }
 }
 
 // MARK: - DwellTracker Tests
