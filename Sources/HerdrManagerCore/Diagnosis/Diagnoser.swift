@@ -1383,8 +1383,9 @@ private enum ShellForeground {
     }
 
     /// The script argument of a node-like runtime, when that script is an
-    /// agent. Eval and module flags are not a path. A flag that takes a
-    /// value is not the script either.
+    /// agent. Eval and module flags are not a path, including a value
+    /// glued onto the flag. A flag that takes a value is not the script
+    /// either.
     private static func runtimeScriptIsAgent(_ process: ForegroundProcess) -> Bool {
         guard let argv = launchArguments(process), let script = runtimeScript(argv) else {
             return false
@@ -1409,7 +1410,7 @@ private enum ShellForeground {
                 guard index + 1 < argv.count else { return nil }
                 return argv[index + 1]
             }
-            if runtimeEvalFlags.contains(arg) || arg.hasPrefix("-m=") {
+            if runtimeAbandonsScript(arg) {
                 return nil
             }
             if runtimeValueFlags.contains(arg) {
@@ -1427,6 +1428,32 @@ private enum ShellForeground {
             return arg
         }
         return nil
+    }
+
+    /// Eval and module flags, including the payload glued on.
+    ///
+    /// herdr's node and bun walker matches `-eCODE`, `--eval=code`,
+    /// `-pCODE`, and `--print=code` as the flag itself, then stops. Python's
+    /// walker does the same for `-cCODE` and `-mmodule`. An exact `-e`
+    /// already did, and so did an exact `-c` or `-m` on every runtime.
+    /// The glued form was skipped as an unknown flag, so the next word
+    /// (`/tmp/codex`, a Letta path) became the script and outranked the
+    /// real agent, including when that node was the group leader. A short
+    /// flag only has to start with `-e`, `-p`, `-c`, or `-m`; herdr's
+    /// `short_flag_payload` is that prefix for the flags that walker names.
+    private static func runtimeAbandonsScript(_ arg: String) -> Bool {
+        if runtimeEvalFlags.contains(arg) || arg.hasPrefix("-m=") {
+            return true
+        }
+        if arg.hasPrefix("--eval=") || arg.hasPrefix("--print=") {
+            return true
+        }
+        guard !arg.hasPrefix("--") else { return false }
+        let shorts = ["-e", "-p", "-c", "-m"]
+        for flag in shorts where arg.hasPrefix(flag) && arg.count > flag.count {
+            return true
+        }
+        return false
     }
 
     /// `--require=mod` and `-rpreload` keep the value in the same word.

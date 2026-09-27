@@ -1423,6 +1423,52 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([eval, wrapped]) == 40)
     }
 
+    @Test("A glued eval or module flag is not a script, so a later agent path is not the process")
+    func gluedEvalIsNotTheAgent() {
+        let wrapped = process(
+            40,
+            ".codex-wrapped",
+            argv: ["/etc/profiles/per-user/user/bin/codex"]
+        )
+        let claude = process(42, "claude", argv: ["claude"])
+        let interactive = process(30, "letta", argv: ["letta", "--backend", "local"])
+        let vectors: [[String]] = [
+            ["node", "-econsole.log(1)", "/tmp/codex"],
+            ["node", "--eval=console.log(1)", "/tmp/codex"],
+            ["node", "-pconsole.log(1)", "/tmp/codex"],
+            ["bun", "--print=1", "/tmp/codex"],
+            ["python3", "-cimport time", "/tmp/codex"],
+            ["python3.11", "-mhttp.server", "/tmp/codex"],
+            ["node", "-m=codex", "/tmp/other"],
+            ["nodejs", "-eCODE", "--", "/tmp/codex"],
+        ]
+        for argv in vectors {
+            let eval = process(9, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([eval, wrapped]) == 40)
+            // The glued node is not the leader herdr would return.
+            #expect(Diagnoser.cpuSamplePid([eval, claude], foregroundProcessGroupId: 9) == 42)
+        }
+        let lettaEval = process(
+            9,
+            "node",
+            argv: ["node", "-econsole.log(1)", "/home/user/project/node_modules/.bin/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([lettaEval, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([lettaEval, interactive], foregroundProcessGroupId: 9) == 30)
+
+        // Alone, the eval process is still the only sample.
+        let only = process(9, "node", argv: ["node", "--eval=console.log(1)", "/tmp/codex"])
+        #expect(Diagnoser.cpuSamplePid([only]) == 9)
+
+        // A real script after an ordinary flag, or after `--`, is still the agent.
+        let script = process(4, "node", argv: ["node", "--experimental-strip-types", "codex"])
+        #expect(Diagnoser.cpuSamplePid([script, claude]) == 4)
+        let dashed = process(4, "node", argv: ["node", "--", "codex"])
+        #expect(Diagnoser.cpuSamplePid([dashed]) == 4)
+        let required = process(4, "node", argv: ["node", "-rpreload.js", "codex"])
+        #expect(Diagnoser.cpuSamplePid([required, claude]) == 4)
+    }
+
     @Test("Windows Cursor's bundled node is the sample, and a lookalike is not")
     func cursorBundledNodeIsTheSample() {
         let version = #"C:\Users\user\AppData\Local\cursor-agent\versions\2026.08.11-e8db854"#
