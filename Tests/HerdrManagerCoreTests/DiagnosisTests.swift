@@ -1578,10 +1578,11 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([helper, configGlued]) == 20)
         #expect(Diagnoser.cpuSamplePid([externalShort, claude]) == 12)
 
-        // Node and python do not take bun's flags. The next word is the script.
+        // Node 22.23 rejects bun's `--define` and does not run the file.
+        // Python's `-d` is still the script.
         let nodeDefine = process(4, "node", argv: ["node", "--define", "codex", "server.js"])
         let pythonDebug = process(4, "python3", argv: ["python3", "-d", "/tmp/codex"])
-        #expect(Diagnoser.cpuSamplePid([nodeDefine, claude]) == 4)
+        #expect(Diagnoser.cpuSamplePid([nodeDefine, claude]) == 12)
         #expect(Diagnoser.cpuSamplePid([pythonDebug, claude]) == 4)
 
         // Bun 1.4.2 still consumes these. The value named codex is not the script.
@@ -1776,11 +1777,11 @@ struct DiagnoserCpuSamplePidTests {
             Diagnoser.cpuSamplePid([mcp, title], foregroundProcessGroupId: 20) == 20
         )
 
-        // Node still skips an unknown long option. The path is the script.
+        // Node 22.23 rejects `--port`. The path after it does not run.
         let nodePort = process(
             20, "node", argv: ["node", "--port", "--watch", "/usr/local/bin/codex"]
         )
-        #expect(Diagnoser.cpuSamplePid([helper, nodePort]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodePort]) == 10)
 
         // A rejected value in front of Letta is not the TUI. `--title
         // --watch` still is, and so is a define that has a separator.
@@ -2006,16 +2007,16 @@ struct DiagnoserCpuSamplePidTests {
             Diagnoser.cpuSamplePid([mcp, shellEquals], foregroundProcessGroupId: 20) == 20
         )
 
-        // Node does not use bun's value lists. `--port` is an unknown
-        // flag, so the next word `codex` is the script. `--title bun`
-        // is a title, and the path after it is the script.
+        // Node 22.23 rejects `--port`, so `codex` in that slot is not
+        // the script. `--title bun` is a title, and the path after it
+        // is the script.
         let nodePort = process(
             20, "node", argv: ["node", "--port", "codex", "server.js"]
         )
         let nodeTitle = process(
             20, "node", argv: ["node", "--title", "bun", "/tmp/codex"]
         )
-        #expect(Diagnoser.cpuSamplePid([helper, nodePort]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodePort]) == 10)
         #expect(Diagnoser.cpuSamplePid([helper, nodeTitle]) == 20)
 
         // A rejected value in front of Letta is not the TUI. An attached
@@ -2993,6 +2994,7 @@ struct DiagnoserCpuSamplePidTests {
         let nodeRequire = process(
             20, "node", argv: ["node", "-r", "preload.js", "/tmp/codex"]
         )
+        // Node rejects `--import-map`. Deno still consumes it above.
         let nodeImportMap = process(
             4, "node", argv: ["node", "--import-map", "codex", "server.js"]
         )
@@ -3004,7 +3006,7 @@ struct DiagnoserCpuSamplePidTests {
         )
         #expect(Diagnoser.cpuSamplePid([nodeEnv, claude]) == 12)
         #expect(Diagnoser.cpuSamplePid([helper, nodeRequire]) == 20)
-        #expect(Diagnoser.cpuSamplePid([nodeImportMap, claude]) == 4)
+        #expect(Diagnoser.cpuSamplePid([nodeImportMap, claude]) == 12)
         #expect(Diagnoser.cpuSamplePid([helper, pythonWarn]) == 20)
         #expect(Diagnoser.cpuSamplePid([pythonEval, claude]) == 12)
 
@@ -4605,8 +4607,7 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([bunOneShot, interactive]) == 30)
 
         // Deno was not installed. An unknown short is still skipped.
-        // `--help` and `--version` are the next test. `node --not-a-flag`
-        // still exits and still names the path.
+        // `node --not-a-flag` exits and does not name the path.
         let denoUnknown = process(
             20, "deno", argv: ["deno", "run", "-z", "/usr/local/bin/codex"]
         )
@@ -4614,7 +4615,7 @@ struct DiagnoserCpuSamplePidTests {
             20, "node", argv: ["node", "--not-a-flag", "/usr/local/bin/codex"]
         )
         #expect(Diagnoser.cpuSamplePid([helper, denoUnknown]) == 20)
-        #expect(Diagnoser.cpuSamplePid([helper, nodeBadLong]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeBadLong]) == 10)
     }
 
     @Test("node and bun help and version are not the agent script")
@@ -4848,24 +4849,228 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([bunLetta, interactive]) == 40)
 
         // Deno was not installed. Its long help and version are still
-        // skipped, and so is a node option the binary rejects that is
-        // not exactly `--help` or `--version`.
+        // skipped. Node's other rejected long options are the next test.
         let denoHelp = process(
             20, "deno", argv: ["deno", "run", "--help", "/usr/local/bin/codex"]
         )
         let denoVersion = process(
             20, "deno", argv: ["deno", "run", "--version", "/tmp/codex"]
         )
-        let nodeBad = process(
-            20, "node", argv: ["node", "--not-a-flag", "/usr/local/bin/codex"]
-        )
-        let nodeRevision = process(
-            20, "node", argv: ["node", "--revision", "/tmp/codex"]
-        )
         #expect(Diagnoser.cpuSamplePid([helper, denoHelp]) == 20)
         #expect(Diagnoser.cpuSamplePid([helper, denoVersion]) == 20)
-        #expect(Diagnoser.cpuSamplePid([helper, nodeBad]) == 20)
-        #expect(Diagnoser.cpuSamplePid([helper, nodeRevision]) == 20)
+    }
+
+    @Test("an unknown node long option is not the agent script")
+    func nodeUnknownLongOptionIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23 exits before the file runs. The path is not the
+        // script, and that node is not the group leader. An attached
+        // `=` is the same bad option.
+        let nodeBad = process(
+            4, "node", argv: ["node", "--not-a-flag", "/usr/local/bin/codex"]
+        )
+        let nodeBadEquals = process(
+            4, "node.exe", argv: ["node.exe", "--not-a-flag=1", "/tmp/codex"]
+        )
+        let nodeRevision = process(
+            4, "nodejs", argv: ["nodejs", "--revision", "/usr/local/bin/codex"]
+        )
+        let nodeRevisionEquals = process(
+            4, "Node.EXE", argv: ["Node.EXE", "--revision=1", "/tmp/codex"]
+        )
+        let nodePort = process(
+            4, "node", argv: ["node", "--port", "codex", "/usr/local/bin/codex"]
+        )
+        let nodeDefine = process(
+            4, "node", argv: ["node", "--define", "KEY:1", "/tmp/codex"]
+        )
+        let nodeImportMap = process(
+            4, "node", argv: ["node", "--import-map", "codex", "server.js"]
+        )
+        let nodeHarmonyEquals = process(
+            4, "node", argv: ["node", "--harmony=true", "/usr/local/bin/codex"]
+        )
+        let nodeHeapWord = process(
+            4, "node", argv: ["node", "--max-old-space-size", "4096", "/tmp/codex"]
+        )
+        let nodeTestEquals = process(
+            4, "nodejs", argv: ["nodejs", "--test=true", "/usr/local/bin/codex"]
+        )
+        let nodeEmptyTrace = process(
+            4, "node", argv: ["node", "--stack-trace-limit=", "/tmp/codex"]
+        )
+        let nodeCheck = process(
+            4, "node", argv: ["node", "--check", "/usr/local/bin/codex"]
+        )
+        let nodeCompletion = process(
+            4, "node.exe", argv: ["node.exe", "--completion-bash", "/tmp/codex"]
+        )
+        let nodeV8Options = process(
+            4, "node", argv: ["node", "--v8-options", "/usr/local/bin/codex"]
+        )
+        let nodeProfProcess = process(
+            4, "node", argv: ["node", "--prof-process", "/tmp/codex"]
+        )
+        let nodeShortWatch = process(
+            4, "node", argv: ["node", "-watch", "/usr/local/bin/codex"]
+        )
+        let nodeShortBad = process(
+            4, "nodejs", argv: ["nodejs", "-not-a-flag", "/tmp/codex"]
+        )
+        let nodeDoubleNo = process(
+            4, "node", argv: ["node", "--no-no-warnings", "/usr/local/bin/codex"]
+        )
+        let exited = [
+            nodeBad, nodeBadEquals, nodeRevision, nodeRevisionEquals,
+            nodePort, nodeDefine, nodeImportMap, nodeHarmonyEquals,
+            nodeHeapWord, nodeTestEquals, nodeEmptyTrace, nodeCheck,
+            nodeCompletion, nodeV8Options, nodeProfProcess, nodeShortWatch,
+            nodeShortBad, nodeDoubleNo,
+        ]
+        for sample in exited {
+            #expect(Diagnoser.cpuSamplePid([sample, claude]) == 12)
+        }
+        #expect(Diagnoser.cpuSamplePid([helper, nodeBad]) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, nodeRevision], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, nodeHeapWord], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([nodeBad]) == 4)
+
+        // Flags Node 22.23 actually runs still name the file, including
+        // when that node is the group leader. A V8 value stays in the
+        // flag word. A script written first stays the script.
+        let nodeWatch = process(
+            20, "node", argv: ["node", "--watch", "/usr/local/bin/codex"]
+        )
+        let nodeWatchEquals = process(
+            20, "nodejs", argv: ["nodejs", "--watch=", "/tmp/codex"]
+        )
+        let nodeStrict = process(
+            20, "node.exe", argv: ["node.exe", "--use-strict", "/usr/local/bin/codex"]
+        )
+        let nodeHarmony = process(
+            20, "node", argv: ["node", "--harmony", "/tmp/codex"]
+        )
+        let nodeNoHarmony = process(
+            20, "node", argv: ["node", "--no-harmony", "/usr/local/bin/codex"]
+        )
+        let nodeShortHarmony = process(
+            20, "nodejs", argv: ["nodejs", "-harmony", "/tmp/codex"]
+        )
+        let nodeShortStrict = process(
+            20, "node.exe", argv: ["node.exe", "-use-strict", "/usr/local/bin/codex"]
+        )
+        let nodeHeap = process(
+            20, "node", argv: ["node", "--max-old-space-size=4096", "/usr/local/bin/codex"]
+        )
+        let nodeHeapShort = process(
+            20, "node", argv: ["node", "-max-old-space-size=4096", "/tmp/codex"]
+        )
+        let nodeTrace = process(
+            20, "node", argv: ["node", "--stack-trace-limit=20", "/usr/local/bin/codex"]
+        )
+        let nodeStrip = process(
+            20, "nodejs", argv: ["nodejs", "--experimental-strip-types", "/tmp/codex"]
+        )
+        let nodeNoHelp = process(
+            20, "node", argv: ["node", "--no-help=1", "/usr/local/bin/codex"]
+        )
+        let nodeNoTest = process(
+            20, "node", argv: ["node", "--no-test=true", "/tmp/codex"]
+        )
+        let nodeTest = process(
+            20, "node.exe", argv: ["node.exe", "--test", "/usr/local/bin/codex"]
+        )
+        let nodeRun = process(
+            20, "node", argv: ["node", "--run", "codex"]
+        )
+        let nodeTitle = process(
+            20, "node", argv: ["node", "--title=--not-a-flag", "/usr/local/bin/codex"]
+        )
+        let nodeScriptFirst = process(
+            20, "node", argv: ["node", "/usr/local/bin/codex", "--not-a-flag"]
+        )
+        let nodeNoAbort = process(
+            20, "node", argv: ["node", "--no-abort-on-far-code-range", "/tmp/codex"]
+        )
+        let kept = [
+            nodeWatch, nodeWatchEquals, nodeStrict, nodeHarmony, nodeNoHarmony,
+            nodeShortHarmony, nodeShortStrict, nodeHeap, nodeHeapShort, nodeTrace,
+            nodeStrip, nodeNoHelp, nodeNoTest, nodeTest, nodeRun, nodeTitle,
+            nodeScriptFirst, nodeNoAbort,
+        ]
+        for running in kept {
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20)
+        }
+        #expect(Diagnoser.cpuSamplePid([mcp, nodeHeap], foregroundProcessGroupId: 20) == 20)
+        #expect(Diagnoser.cpuSamplePid([mcp, nodeShortHarmony], foregroundProcessGroupId: 20) == 20)
+        #expect(Diagnoser.cpuSamplePid([mcp, nodeRun], foregroundProcessGroupId: 20) == 20)
+        #expect(Diagnoser.cpuSamplePid([nodeRun, claude]) == 20)
+
+        // An unknown flag in front of a Letta path is not the TUI.
+        // `--use-strict` and `-harmony` in front of one still are.
+        let nodeFalseLetta = process(
+            8,
+            "node",
+            argv: ["node", "--not-a-flag", "/home/user/node_modules/.bin/letta"]
+        )
+        let nodeRevisionLetta = process(
+            8,
+            "node",
+            argv: ["node", "--revision", "/tmp/letta"]
+        )
+        let nodeLetta = process(
+            40,
+            "node",
+            argv: ["node", "--use-strict", "/home/user/node_modules/.bin/letta"]
+        )
+        let nodeHarmonyLetta = process(
+            40,
+            "nodejs",
+            argv: ["nodejs", "-harmony", "/tmp/letta"]
+        )
+        let nodeHeapLetta = process(
+            40,
+            "node.exe",
+            argv: ["node.exe", "--max-old-space-size=4096", "/tmp/letta"]
+        )
+        let nodeOneShot = process(
+            40,
+            "node",
+            argv: ["node", "--watch", "/tmp/letta", "--prompt"]
+        )
+        #expect(Diagnoser.cpuSamplePid([nodeFalseLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([nodeFalseLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([nodeRevisionLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([nodeFalseLetta]) == 8)
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, nodeFalseLetta], foregroundProcessGroupId: 8) == 10
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, nodeLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeHarmonyLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeHeapLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([nodeLetta, interactive]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeOneShot]) == 10)
+        #expect(Diagnoser.cpuSamplePid([nodeOneShot, interactive]) == 30)
+
+        // Bun still runs the file after an unknown long option. Deno's
+        // unknown short and `--help` are still skipped.
+        let bunUnknown = process(
+            20, "bun", argv: ["bun", "--not-a-flag", "/usr/local/bin/codex"]
+        )
+        let denoUnknown = process(
+            20, "deno", argv: ["deno", "run", "-z", "/usr/local/bin/codex"]
+        )
+        let denoHelp = process(
+            20, "deno", argv: ["deno", "run", "--help", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, bunUnknown]) == 20)
+        #expect(Diagnoser.cpuSamplePid([mcp, bunUnknown], foregroundProcessGroupId: 20) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, denoUnknown]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, denoHelp]) == 20)
     }
 }
 

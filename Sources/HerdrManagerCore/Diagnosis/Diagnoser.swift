@@ -1204,7 +1204,10 @@ private enum ShellForeground {
                 // it is Letta. A path, and `--inspect=9229`, still are.
                 // Node's `--debug-port` consumes a port word. A dash
                 // word, or no word, makes that node exit. The same is
-                // true of every node value flag. Bun rejects `-W`,
+                // true of every node value flag. A long option Node
+                // 22.23 does not recognize (`--not-a-flag`, `--revision`,
+                // `--port`) exits too, so the path after it is not Letta.
+                // Bun rejects `-W`,
                 // `-X`, `-S`, `-L`, and `-o`; the path after one is
                 // not Letta. A bun value that starts with `-` is not
                 // Letta either when that flag rejects it, and neither
@@ -1560,9 +1563,12 @@ private enum ShellForeground {
     /// is the value of `--title` is not a print, and `run` in that slot
     /// is not the subcommand. `--interactive`, `--watch`, `--hot`,
     /// `--bun`, and `bun --not-a-flag` still run the file.
-    /// `node --not-a-flag` still exits and is still skipped. Deno still
-    /// skips an unknown short and was not checked for these long flags.
-    /// Node and Bun still consume the long flags they accept.
+    /// Node 22.23 exits on a long option it does not recognize, so
+    /// `node --not-a-flag` and `node --revision` are not the script.
+    /// A boolean Node or V8 accepts (`--watch`, `--use-strict`,
+    /// `-harmony`, `--max-old-space-size=4096`) still names the file.
+    /// Deno still skips an unknown short and was not checked for these
+    /// long flags. Node and Bun still consume the long flags they accept.
     /// Bun's own value flags are not that node rule. `--title --watch`
     /// and `--user-agent --watch` run the file. `--port`, `--shell`,
     /// `--install`, and the other flags in `bunDashRejectedFlags` exit
@@ -1779,8 +1785,10 @@ private enum ShellForeground {
             // short, help, version, and stdin are not a script. `--help`
             // and `--version` print and exit, so the path is not a script
             // either, unless bun is `run` or `x` and that flag still
-            // reaches the file. Any other long option, and a Deno short,
-            // still skip one word. `node --not-a-flag` is that skip.
+            // reaches the file. Node's other long options were decided
+            // in `nodeOption`: an unrecognized one is not a script.
+            // A Deno short, and a bun long option that is not a print,
+            // still skip one word. `bun --not-a-flag` is that skip.
             if arg.hasPrefix("-") {
                 if runtimePrintsAndExits(arg, runtime: runtime, argv: argv) {
                     return nil
@@ -2605,16 +2613,98 @@ private enum ShellForeground {
     /// `-X`, `-S`, `-L`, `-o`, and `-F` are not node options, including
     /// `--cwd=/tmp` and `-Wignore`, so the path after them is not a
     /// program. A short value glued on (`-rpreload.js`, `-Cdev`) is
-    /// the same exit. Bun does not use this check: `--title --watch`
-    /// runs the file, and `--cwd` takes the directory. Python's `-W`
-    /// and `-X` still take the next word.
+    /// the same exit. A long option that is not a Node boolean, a V8
+    /// flag, or one of those value flags is `nodeLongOption`: Node
+    /// exits, so `node --not-a-flag /tmp/codex` and `node --revision`
+    /// do not run the file. Bun does not use this check: `--title
+    /// --watch` runs the file, `--not-a-flag` is the script, and
+    /// `--cwd` takes the directory. Python's `-W` and `-X` still take
+    /// the next word.
     private static func nodeOption(_ arg: String, following: String?) -> NodeOption? {
         if nodeOptionExits(arg) { return .exits }
-        guard nodeTakesSeparateValue(arg) else { return nil }
-        if let following, !following.hasPrefix("-") {
-            return .skip(2)
+        if nodeTakesSeparateValue(arg) {
+            if let following, !following.hasPrefix("-") {
+                return .skip(2)
+            }
+            return .exits
+        }
+        return nodeLongOption(arg)
+    }
+
+    /// A Node long option after the value flags have been claimed.
+    /// Nil when `arg` is not a long option, so a single dash still
+    /// reaches `nodeBareShort`.
+    ///
+    /// `--watch`, `--interactive`, `--experimental-strip-types`, and
+    /// `--run` leave the next word as the script. `--watch=true` does
+    /// too. `--test=true` does not. `--use-strict` and `--harmony` are
+    /// V8 booleans: the bare flag and `--no-harmony` name the file, and
+    /// `--harmony=true` does not. `--max-old-space-size=4096` names the
+    /// file. A separate word (`--max-old-space-size 4096`) is not a
+    /// value. `--help`, `--version`, `--v8-options`, and
+    /// `--completion-bash` print and exit. Anything else, including
+    /// `--not-a-flag` and `--revision`, exits before the file runs.
+    private static func nodeLongOption(_ arg: String) -> NodeOption? {
+        guard let (name, value) = splitNodeFlag(arg) else { return nil }
+        if NodeRuntimeFlags.printFlags.contains(name) { return .exits }
+        if nodeValueFlagName(name) {
+            guard let value else { return nil }
+            return value.isEmpty ? .exits : .skip(1)
+        }
+        if NodeRuntimeFlags.v8Values.contains(name) {
+            guard let value else { return .exits }
+            if value.isEmpty, NodeRuntimeFlags.v8EmptyEqualsExits.contains(name) {
+                return .exits
+            }
+            return .skip(1)
+        }
+        if NodeRuntimeFlags.v8Booleans.contains(name) {
+            return value == nil ? .skip(1) : .exits
+        }
+        if NodeRuntimeFlags.scriptBooleans.contains(name) {
+            if value != nil, NodeRuntimeFlags.equalsRejected.contains(name) {
+                return .exits
+            }
+            return .skip(1)
+        }
+        if let positive = nodeNegatedFlag(name) {
+            let nodeLike = NodeRuntimeFlags.scriptBooleans.contains(positive)
+                || NodeRuntimeFlags.printFlags.contains(positive)
+            if nodeLike { return .skip(1) }
+            let v8Like = NodeRuntimeFlags.v8Booleans.contains(positive)
+                || NodeRuntimeFlags.v8NegationOnly.contains(positive)
+            if v8Like {
+                return value == nil ? .skip(1) : .exits
+            }
         }
         return .exits
+    }
+
+    /// `--title` and `--require`. The `=` form is not the set member;
+    /// `nodeLongOption` reads the name before `=`.
+    private static func nodeValueFlagName(_ name: String) -> Bool {
+        nodeRequiredValueFlags.contains(name) || nodeAcceptedSharedFlags.contains(name)
+    }
+
+    /// The flag name and, when the word contains `=`, the attached value.
+    /// Nil when `arg` is not a long option.
+    private static func splitNodeFlag(_ arg: String) -> (name: String, value: Substring?)? {
+        guard arg.hasPrefix("--") else { return nil }
+        guard let equals = arg.firstIndex(of: "=") else { return (arg, nil) }
+        let name = String(arg[..<equals])
+        let value = arg[arg.index(after: equals)...]
+        return (name, value)
+    }
+
+    /// `--no-watch` is `--watch`. `--no-no-warnings` is not a second
+    /// negation: the remainder starts with `no-`, and Node rejects it.
+    /// `--not-a-flag` does not start with `--no-`.
+    private static func nodeNegatedFlag(_ name: String) -> String? {
+        let prefix = "--no-"
+        guard name.hasPrefix(prefix) else { return nil }
+        let rest = name.dropFirst(prefix.count)
+        guard !rest.isEmpty, !rest.hasPrefix("no-") else { return nil }
+        return "--" + rest
     }
 
     private static func nodeTakesSeparateValue(_ arg: String) -> Bool {
@@ -2948,7 +3038,8 @@ private enum ShellForeground {
     /// too, and still require their separator. `e` and `p` are eval.
     /// Any other letter exits, and so does `-b=1`. A lone `-` is stdin.
     /// `--help` and `--version` are `runtimePrintsAndExits`.
-    /// `--not-a-flag` is not this check: Bun still runs the file.
+    /// A Node long option is `nodeLongOption`. `--not-a-flag` is not
+    /// this check: Bun still runs the file.
     private static func runtimeShort(
         _ arg: String,
         runtime: String,
@@ -2980,7 +3071,7 @@ private enum ShellForeground {
     /// `--title` or `--user-agent` was consumed before this check.
     /// `--interactive`, `--watch`, `--hot`, `--bun`, and
     /// `bun --not-a-flag` are not this exit. `node --not-a-flag` exits
-    /// too and stays a skipped long option. Deno was not installed, so
+    /// in `nodeLongOption` before this check. Deno was not installed, so
     /// its long flags are not this check. A script written before the
     /// flag is already returned. `--` is handled before this check, so
     /// the word after it stays the script.
@@ -3058,10 +3149,29 @@ private enum ShellForeground {
         return 1
     }
 
-    /// Exactly `-i`. Node 22.23 rejects every other single-dash word
-    /// that the earlier checks did not already consume.
+    /// Exactly `-i`, or a V8 flag spelled with one dash.
+    ///
+    /// Node 22.23 rejects every other single-dash word that the earlier
+    /// checks did not already consume. `-harmony` and `-use-strict` run
+    /// the file. `-max-old-space-size=4096` keeps the value in the word
+    /// and the next word is the script. `-watch`, `-not-a-flag`, and
+    /// `-harmony=true` do not run the file: a node boolean is not a V8
+    /// flag, and a V8 boolean rejects `=`.
     private static func nodeBareShort(_ arg: String) -> RuntimeShort {
         if arg == "-i" { return .skip(1) }
+        guard arg.hasPrefix("-"), !arg.hasPrefix("--"), arg.count > 1 else { return .exits }
+        let body = arg.dropFirst()
+        if let equals = body.firstIndex(of: "=") {
+            let name = "--" + body[..<equals]
+            let value = body[body.index(after: equals)...]
+            guard NodeRuntimeFlags.v8Values.contains(name) else { return .exits }
+            if value.isEmpty, NodeRuntimeFlags.v8EmptyEqualsExits.contains(name) {
+                return .exits
+            }
+            return .skip(1)
+        }
+        let name = "--" + body
+        if NodeRuntimeFlags.v8Booleans.contains(name) { return .skip(1) }
         return .exits
     }
 
