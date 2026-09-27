@@ -599,12 +599,19 @@ final class AppModel {
             // pre-event status used to notify for events the store dropped
             // (stale seq, untracked pane), so a blocked alert could fire for a
             // pane the panel still showed as working.
+            // Captured before apply drops the old id. The heartbeat hashes
+            // by pane id; the move has to carry that hash or the next poll
+            // treats the new id as a first look and swallows its screen.
+            let movedHeartbeat = heartbeatRetarget(for: event)
             let transition = store.applyEvent(event)
             // After the store re-keys. A move it ignored leaves no row, so
             // the alert stays on the old id and the next pass drops it. A
             // move that keeps the quiet row would otherwise look like a new
             // pane and alert again for the same silence.
             retargetSilentAlert(for: event)
+            if let movedHeartbeat, store.agents[movedHeartbeat.to] != nil {
+                await poller.retarget(from: movedHeartbeat.from, to: movedHeartbeat.to)
+            }
             if let transition {
                 notifyAndDiagnoseIfNeeded(transition)
             }
@@ -618,6 +625,20 @@ final class AppModel {
         let newId = AgentID(info.paneId)
         guard previous != newId, selectedAgentId == previous, store.agents[previous] != nil else { return }
         selectedAgentId = newId
+    }
+
+    /// The tracked pane a move will re-key, before the store drops the old id.
+    ///
+    /// A shell move and a move of a pane the store is not tracking are not
+    /// included: there is no detection hash to carry, and the call after
+    /// apply still requires the row to land on the new id.
+    private func heartbeatRetarget(for event: HerdrEvent) -> (from: AgentID, to: AgentID)? {
+        guard case .paneMoved(let previousPaneId, let info, _, _) = event else { return nil }
+        guard !info.paneId.isEmpty, let kind = info.agent, !kind.isEmpty else { return nil }
+        let previous = AgentID(previousPaneId.isEmpty ? info.paneId : previousPaneId)
+        let newId = AgentID(info.paneId)
+        guard previous != newId, store.agents[previous] != nil else { return nil }
+        return (previous, newId)
     }
 
     /// Carry a silence already announced onto the id a move just published.

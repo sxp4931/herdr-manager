@@ -21,6 +21,23 @@ private final class ReadLinesLog: @unchecked Sendable {
     }
 }
 
+/// Detection screens in poll order. The heartbeat reads one pane at a time.
+private final class ReadScript: @unchecked Sendable {
+    private let lock = NSLock()
+    private var texts: [String]
+
+    init(_ texts: [String]) {
+        self.texts = texts
+    }
+
+    func next() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !texts.isEmpty else { return nil }
+        return texts.removeFirst()
+    }
+}
+
 private struct MockHerdrAdapter: HerdrAdapter {
     var snapshotResult: HerdrSnapshot?
     var readResult: PaneReadResult?
@@ -36,14 +53,18 @@ private struct MockHerdrAdapter: HerdrAdapter {
     var reportMetadataError: Error?
     var connectionState: HerdrConnectionState = .connected
     var readLinesLog: ReadLinesLog?
-    
+    var readScript: ReadScript?
+
     func snapshot() async throws -> HerdrSnapshot {
         guard let result = snapshotResult else { throw NSError(domain: "Mock", code: 1) }
         return result
     }
-    
+
     func read(paneId: String, source: PaneReadSource, lines: Int?) async throws -> PaneReadResult {
         readLinesLog?.append(lines)
+        if let text = readScript?.next() {
+            return PaneReadResult(text: text, source: source.rawValue)
+        }
         guard let result = readResult else { throw NSError(domain: "Mock", code: 1) }
         return result
     }
@@ -355,6 +376,126 @@ struct HeartbeatPollerHashTests {
         await poller.prune(keeping: [keep.id])
         #expect(await poller.lastOutputDate(for: keep.id) != nil)
         #expect(await poller.lastOutputDate(for: drop.id) == nil)
+    }
+
+    @Test("A moved pane keeps its detection hash, so the same screen is not a new change")
+    func retargetKeepsTheDetectionHash() async {
+        let script = ReadScript(["one", "two", "two", "three"])
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = script
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let moved = Agent(id: AgentID("wB:p4"), status: .working)
+
+        let baseline = await poller.poll(agents: [origin], adapter: adapter)
+        #expect(baseline.isEmpty)
+
+        let changed = await poller.poll(agents: [origin], adapter: adapter)
+        #expect(changed[origin.id] != nil)
+
+        await poller.retarget(from: origin.id, to: moved.id)
+
+        let sameScreen = await poller.poll(agents: [moved], adapter: adapter)
+        #expect(sameScreen.isEmpty)
+        #expect(await poller.lastOutputDate(for: origin.id) == nil)
+
+        let afterMove = await poller.poll(agents: [moved], adapter: adapter)
+        #expect(afterMove[moved.id] != nil)
+        #expect(afterMove[origin.id] == nil)
+        #expect(await poller.lastOutputDate(for: moved.id) != nil)
+    }
+
+    @Test("Output that arrives before the first poll of the new id is not swallowed")
+    func retargetReportsTheScreenTheMoveLandedOn() async {
+        let script = ReadScript(["one", "two"])
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = script
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let moved = Agent(id: AgentID("wB:p4"), status: .working)
+
+        let baseline = await poller.poll(agents: [origin], adapter: adapter)
+        #expect(baseline.isEmpty)
+        await poller.retarget(from: origin.id, to: moved.id)
+
+        let landed = await poller.poll(agents: [moved], adapter: adapter)
+        #expect(landed[moved.id] != nil)
+        #expect(landed[origin.id] == nil)
+    }
+
+    @Test("Retargeting replaces a hash the destination id already had")
+    func retargetReplacesTheDestinationHash() async {
+        let script = ReadScript(["alpha", "other", "alpha", "beta"])
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = script
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let destination = Agent(id: AgentID("wB:p9"), status: .working)
+
+        let baseline = await poller.poll(agents: [origin, destination], adapter: adapter)
+        #expect(baseline.isEmpty)
+        await poller.retarget(from: origin.id, to: destination.id)
+
+        // "alpha" is the mover's screen. The destination's old "other" hash
+        // would have called this a change.
+        let moverScreen = await poller.poll(agents: [destination], adapter: adapter)
+        #expect(moverScreen.isEmpty)
+
+        let changed = await poller.poll(agents: [destination], adapter: adapter)
+        #expect(changed[destination.id] != nil)
+        #expect(await poller.lastOutputDate(for: origin.id) == nil)
+    }
+
+    @Test("A mover that has never been polled does not inherit the destination hash")
+    func retargetWithoutAHashDoesNotCompareAgainstTheOldOccupant() async {
+        let script = ReadScript(["other", "different"])
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = script
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let destination = Agent(id: AgentID("wB:p9"), status: .working)
+
+        let baseline = await poller.poll(agents: [destination], adapter: adapter)
+        #expect(baseline.isEmpty)
+        await poller.retarget(from: origin.id, to: destination.id)
+
+        let firstLook = await poller.poll(agents: [destination], adapter: adapter)
+        #expect(firstLook.isEmpty)
+        #expect(await poller.lastOutputDate(for: destination.id) != nil)
+    }
+
+    @Test("Retargeting an id onto itself keeps the hash")
+    func retargetOntoItselfKeepsTheHash() async {
+        let script = ReadScript(["one", "one", "two"])
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = script
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+
+        let baseline = await poller.poll(agents: [origin], adapter: adapter)
+        #expect(baseline.isEmpty)
+        await poller.retarget(from: origin.id, to: origin.id)
+
+        let same = await poller.poll(agents: [origin], adapter: adapter)
+        #expect(same.isEmpty)
+        let changed = await poller.poll(agents: [origin], adapter: adapter)
+        #expect(changed[origin.id] != nil)
+    }
+
+    @Test("Prune after a retarget drops the old id and keeps the new one")
+    func pruneAfterRetargetKeepsTheNewId() async {
+        var adapter = MockHerdrAdapter()
+        adapter.readResult = PaneReadResult(text: "screen", source: "detection")
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let moved = Agent(id: AgentID("wB:p4"), status: .working)
+
+        _ = await poller.poll(agents: [origin], adapter: adapter)
+        await poller.retarget(from: origin.id, to: moved.id)
+        await poller.prune(keeping: [moved.id])
+
+        #expect(await poller.lastOutputDate(for: origin.id) == nil)
+        #expect(await poller.lastOutputDate(for: moved.id) != nil)
     }
 }
 

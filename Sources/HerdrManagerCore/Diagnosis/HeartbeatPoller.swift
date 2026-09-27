@@ -67,6 +67,33 @@ public actor HeartbeatPoller {
         return updates
     }
 
+    /// Carry the detection hash onto the id a cross-workspace move just
+    /// published.
+    ///
+    /// The poll compares a pane's screen to the hash stored for its id. A
+    /// move assigns a new id and does not change the screen, so the next
+    /// poll of that id would be a first look: the screen the move landed on
+    /// is stored and not reported. A pane that just produced output then
+    /// stays on the old silence clock until the screen changes again. The
+    /// hash moves with the row. An id that has not been polled yet does not
+    /// take the destination's hash — that screen belonged to whoever was
+    /// there before.
+    public func retarget(from previous: AgentID, to newID: AgentID) {
+        guard previous != newID else { return }
+        let hash = hashes.removeValue(forKey: previous)
+        let date = lastOutputDates.removeValue(forKey: previous)
+        if let hash {
+            hashes[newID] = hash
+        } else {
+            hashes.removeValue(forKey: newID)
+        }
+        if let date {
+            lastOutputDates[newID] = date
+        } else {
+            lastOutputDates.removeValue(forKey: newID)
+        }
+    }
+
     /// Remove tracking for an agent (e.g., when it's closed).
     public func remove(agentId: AgentID) {
         hashes.removeValue(forKey: agentId)
