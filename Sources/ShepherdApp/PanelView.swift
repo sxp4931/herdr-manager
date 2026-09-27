@@ -238,8 +238,10 @@ struct PanelView: View {
         for agent in appModel.store.agents.values where matchesSearch(agent, query: query) {
             matching += 1
             if Self.needsYou(agent) { needsYou += 1 }
-            if agent.status == .working { running += 1 }
-            if agent.status == .done { done += 1 }
+            // herdr leaves the status in place after the process dies.
+            // Running is a live worker, quiet included. Finished is the done bucket.
+            if AttentionTriage.isRunning(agent) { running += 1 }
+            if AttentionTriage.isFinished(agent) { done += 1 }
         }
 
         let groups: [WorkspaceGroup]
@@ -808,7 +810,7 @@ struct PanelView: View {
     private var runningAgents: [Agent] {
         let query = searchQuery
         return appModel.store.agents.values
-            .filter { $0.status == .working && matchesSearch($0, query: query) }
+            .filter { AttentionTriage.isRunning($0) && matchesSearch($0, query: query) }
             .sorted { a, b in
                 if a.enteredAt != b.enteredAt { return a.enteredAt < b.enteredAt }
                 return a.id.raw < b.id.raw

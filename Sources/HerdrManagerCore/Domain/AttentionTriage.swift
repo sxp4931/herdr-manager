@@ -29,6 +29,22 @@ public enum AttentionTriage: Sendable {
         agent.status == .blocked && !agent.verdict.isProcessGone
     }
 
+    /// The panel's Running scope and its header count.
+    ///
+    /// herdr leaves `working` in place after the process dies, so a status
+    /// check alone puts that pane in the running list and counts it again
+    /// beside "needs you". A quiet worker is still running: silence is a
+    /// clock on a live process, not an exit.
+    public static func isRunning(_ agent: Agent) -> Bool {
+        agent.status == .working && !agent.verdict.isProcessGone
+    }
+
+    /// Finished, and still that episode. A crash outranks `done`, so the
+    /// header does not count one pane as done and as needing you.
+    public static func isFinished(_ agent: Agent) -> Bool {
+        kind(for: agent) == .done
+    }
+
     /// Glance list: needs-you plus finished-unseen.
     public static func attentionWorthy(_ agent: Agent) -> Bool {
         needsYou(agent) || agent.status == .done

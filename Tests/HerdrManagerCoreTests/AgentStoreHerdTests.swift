@@ -644,6 +644,54 @@ struct AttentionTriageTests {
             == "1 agents | 0 blocked | 1 gone | 0 silent | 0 done")
     }
 
+    @Test("A crash is not running or finished, and a quiet worker still is")
+    func runningExcludesProcessGone() {
+        let crashedWorking = Agent(
+            id: AgentID("crash-working"),
+            status: .working,
+            verdict: .processGone(lastLine: "zsh")
+        )
+        let crashedDone = Agent(
+            id: AgentID("crash-done"),
+            status: .done,
+            verdict: .processGone(lastLine: "zsh")
+        )
+        let quiet = Agent(
+            id: AgentID("quiet"),
+            status: .working,
+            verdict: .silent(since: Date(), cpu: nil)
+        )
+        let working = Agent(id: AgentID("working"), status: .working, verdict: .healthy)
+        let finished = Agent(id: AgentID("done"), status: .done, verdict: .healthy)
+        let blocked = Agent(id: AgentID("blocked"), status: .blocked, verdict: .healthy)
+        let crashedBlocked = Agent(
+            id: AgentID("crash-blocked"),
+            status: .blocked,
+            verdict: .processGone(lastLine: "zsh")
+        )
+
+        #expect(!AttentionTriage.isRunning(crashedWorking))
+        #expect(!AttentionTriage.isRunning(crashedDone))
+        #expect(!AttentionTriage.isRunning(finished))
+        #expect(!AttentionTriage.isRunning(blocked))
+        #expect(!AttentionTriage.isRunning(crashedBlocked))
+        #expect(AttentionTriage.isRunning(quiet))
+        #expect(AttentionTriage.isRunning(working))
+
+        #expect(!AttentionTriage.isFinished(crashedDone))
+        #expect(!AttentionTriage.isFinished(crashedWorking))
+        #expect(!AttentionTriage.isFinished(quiet))
+        #expect(AttentionTriage.isFinished(finished))
+
+        // The header used to count the crash twice: needs-you and running,
+        // or needs-you and done. The running list is the same predicate.
+        #expect(AttentionTriage.needsYou(crashedWorking))
+        #expect(AttentionTriage.needsYou(crashedDone))
+        #expect(AttentionTriage.needsYou(quiet))
+        #expect(!AttentionTriage.needsYou(working))
+        #expect(!AttentionTriage.needsYou(finished))
+    }
+
     @Test("Worst-first order is gone/blocked, silent, done")
     func worstFirstOrder() {
         #expect(AttentionTriage.priority(Agent(
