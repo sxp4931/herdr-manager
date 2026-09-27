@@ -1197,11 +1197,26 @@ private enum ShellForeground {
                 // does not treat the following path as the script.
                 // `--experimental-loader` and space-separated
                 // `--inspect-port` are the same shape on Bun 1.4.2.
-                // Node's `--debug-port` consumes a port word. A dash
-                // word, or no word, makes that node exit.
+                // `--loader` without a colon makes bun exit, so the
+                // next word is not Letta. Node's `--debug-port`
+                // consumes a port word. A dash word, or no word, makes
+                // that node exit.
                 if runtimeName == "bun",
                    bunConfigFlagWidth(arg) != nil || bunFlagNamesTheScript(arg) {
                     index += 1
+                    continue
+                }
+                if runtimeName == "bun",
+                   let loader = bunLoader(
+                    arg,
+                    following: index + 1 < argv.count ? argv[index + 1] : nil
+                   ) {
+                    switch loader {
+                    case .skip(let width):
+                        index += width
+                    case .exits:
+                        return nil
+                    }
                     continue
                 }
                 if isNodeRuntime(runtimeName),
@@ -1466,6 +1481,12 @@ private enum ShellForeground {
     /// `--inspect-port`: `bun --debug-port 9229 /tmp/codex` tries to
     /// run `9229`. Python rejects `--debug-port`, including the `=`
     /// form, and exits.
+    /// Bun's `--loader` and `-l` require a value that contains `:`.
+    /// `bun --loader .js:jsx /tmp/codex` and `bun -l.js:jsx /tmp/codex`
+    /// run that file. A value with no colon (`/tmp/codex.js`,
+    /// `--loader=script.js`, `-lnocolon`) makes bun exit, so the path
+    /// after it is not a program. Node's `--loader` is still a module
+    /// specifier: the script is the word after the value.
     /// `--inspect`, `--inspect-wait`, and `--inspect-brk` take the next
     /// word only when it is a port or host:port, and only on bun.
     /// `bun --inspect ./codex` keeps the path. Node's and Deno's
@@ -1485,9 +1506,11 @@ private enum ShellForeground {
     /// Shared flags whose next word is a value, not the script. Bun 1.4.2
     /// does not take a separate word for `--experimental-loader` or
     /// `--inspect-port` (`bunFlagNamesTheScript`); `--config` is
-    /// `bunConfigFlagWidth`. Python rejects both node flags and
-    /// `--config`. Deno still consumes this set. `-S` is Python's own
-    /// boolean and Deno's permission flag, handled before the set.
+    /// `bunConfigFlagWidth`. Bun's `--loader` is `bunLoader`: a value
+    /// with no `:` makes bun exit. Python rejects both node flags and
+    /// `--config`. Deno still consumes this set, including `--loader`.
+    /// `-S` is Python's own boolean and Deno's permission flag, handled
+    /// before the set.
     private static let runtimeValueFlags: Set<String> = [
         "-r", "--require", "--loader", "--import", "--experimental-loader",
         "--inspect-port", "-W", "-X", "-S", "-L", "-o",
@@ -1528,9 +1551,19 @@ private enum ShellForeground {
             // run before the eval abandon, which is python's `-c` and
             // still applies to node. `--experimental-loader` and
             // space-separated `--inspect-port` are the same bun shape.
+            // `--loader` without a colon exits before any script runs.
             if runtime == "bun",
                bunConfigFlagWidth(arg) != nil || bunFlagNamesTheScript(arg) {
                 index += 1
+                continue
+            }
+            if runtime == "bun", let loader = bunLoader(arg, following: following) {
+                switch loader {
+                case .skip(let width):
+                    index += width
+                case .exits:
+                    return nil
+                }
                 continue
             }
             if runtime == "deno", let width = denoFlagWidth(arg, following: following) {
@@ -1648,9 +1681,12 @@ private enum ShellForeground {
     ///
     /// The list is the string and number options on Bun 1.4.2's `bun run`
     /// help, plus `--origin`, which that binary still consumes and the
-    /// help no longer prints. `--loader`, `--require`, `--import`,
-    /// `--preload`, `--cwd`, `--env-file`, `--filter`, and
-    /// `--tsconfig-override` are already `runtimeValueFlags`. Bun's
+    /// help no longer prints. `--require`, `--import`, `--preload`,
+    /// `--cwd`, `--env-file`, `--filter`, and `--tsconfig-override`
+    /// are already `runtimeValueFlags`. Bun's `--loader` and `-l` are
+    /// `bunLoader`: the value has to contain `:`, and a value that does
+    /// not makes bun exit. Node and Deno still take `--loader` from
+    /// `runtimeValueFlags`. Bun's
     /// space-separated `--config` is not: the next word is the script.
     /// Deno still takes `--config` from that set. `-e` and
     /// `-p` abandon the walk before this set is consulted, so they are
@@ -1665,7 +1701,6 @@ private enum ShellForeground {
     private static let bunRequiredValueFlags: Set<String> = [
         "--define", "-d",
         "--drop",
-        "-l",
         "--shell",
         "--title",
         "--unhandled-rejections",
@@ -1852,6 +1887,50 @@ private enum ShellForeground {
     /// rejects them in `pythonRejectsNodeFlag`.
     private static func bunFlagNamesTheScript(_ arg: String) -> Bool {
         arg == "--experimental-loader" || arg == "--inspect-port"
+    }
+
+    /// How Bun's `--loader` / `-l` occupies argv. Nil when `arg` is not
+    /// that flag, so node and deno still take `--loader` from the shared
+    /// value set.
+    private enum BunLoader {
+        /// Words to advance, including the flag.
+        case skip(Int)
+        /// Bun rejects the invocation and does not run a script.
+        case exits
+    }
+
+    /// Bun 1.4.2's loader value has to contain `:`.
+    ///
+    /// `bun --loader .js:jsx /tmp/codex`, `bun --loader=.md:text /tmp/codex`,
+    /// `bun -l .js:jsx /tmp/codex`, `bun -l.js:jsx /tmp/codex`, and
+    /// `bun -l=.js:jsx /tmp/codex` run that file. `bun --loader
+    /// /tmp/codex.js /usr/local/bin/codex`, `bun --loader=script.js
+    /// /tmp/codex`, `bun -l nocolon /tmp/codex`, and `bun -lnocolon
+    /// /tmp/codex` exit before any script runs: the error is that the
+    /// value is missing a `:`. `--watch` in the value slot is that same
+    /// exit. A missing word and an empty `--loader=` exit too. A `:`
+    /// whose loader name bun rejects (`.js:notaloader`, an empty name)
+    /// also exits; the name list is not checked here. Node's `--loader`
+    /// is a module specifier and is not this check.
+    private static func bunLoader(_ arg: String, following: String?) -> BunLoader? {
+        if arg == "--loader" || arg == "-l" {
+            guard let following, following.contains(":") else { return .exits }
+            return .skip(2)
+        }
+        guard let value = bunLoaderAttachedValue(arg) else { return nil }
+        guard value.contains(":") else { return .exits }
+        return .skip(1)
+    }
+
+    /// The value glued onto `--loader=` or `-l`, not including the flag.
+    /// Nil for a separate word and for `--loader` itself.
+    private static func bunLoaderAttachedValue(_ arg: String) -> Substring? {
+        let longFlag = "--loader="
+        if arg.hasPrefix(longFlag) {
+            return arg.dropFirst(longFlag.count)
+        }
+        guard arg.hasPrefix("-l"), !arg.hasPrefix("--"), arg.count > 2 else { return nil }
+        return arg.dropFirst(2)
     }
 
     /// Bun 1.4.2 keeps a config path glued to the flag (`-cPATH`,

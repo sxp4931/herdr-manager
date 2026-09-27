@@ -1949,8 +1949,8 @@ struct DiagnoserCpuSamplePidTests {
             ) == 10
         )
 
-        // `--loader` still takes the next word. The agent path after it
-        // is not the script, and a value named codex is not either.
+        // A `--loader` value with no colon makes bun exit. Neither word
+        // is the script. `--require` still takes the next word.
         let loaderFlag = process(
             4,
             "bun",
@@ -2905,6 +2905,188 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([helper, pythonFirst]) == 20)
         #expect(Diagnoser.cpuSamplePid([helper, pythonLetta]) == 10)
         #expect(Diagnoser.cpuSamplePid([pythonLetta, interactive]) == 30)
+    }
+
+    @Test("bun's --loader value needs a colon, and the script is the word after it")
+    func bunLoaderValueNeedsAColon() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Bun 1.4.2 runs the file after a value that contains `:`.
+        let colon = process(
+            20, "bun", argv: ["bun", "--loader", ".js:jsx", "/usr/local/bin/codex"]
+        )
+        let colonRun = process(
+            20, "bun", argv: ["bun", "run", "--loader", ".md:text", "/tmp/codex"]
+        )
+        let colonEquals = process(
+            20, "bun", argv: ["bun", "--loader=.js:jsx", "/tmp/codex"]
+        )
+        let colonCase = process(
+            20, "bun", argv: ["bun", "--loader", ".JS:JSX", "/tmp/codex"]
+        )
+        let colonOnly = process(
+            20, "bun", argv: ["bun", "--loader=:jsx", "/usr/local/bin/codex"]
+        )
+        let short = process(
+            20, "bun", argv: ["bun", "-l", ".js:jsx", "/usr/local/bin/codex"]
+        )
+        let shortGlued = process(
+            20, "bun", argv: ["bun", "-l.js:jsx", "/tmp/codex"]
+        )
+        let shortEquals = process(
+            20, "bun.exe", argv: ["bun.exe", "-l=.js:jsx", "/tmp/codex"]
+        )
+        let shortColon = process(
+            20, "bun", argv: ["bun", "-l:jsx", "/usr/local/bin/codex"]
+        )
+        let watch = process(
+            20, "bun", argv: ["bun", "--loader", ".js:jsx", "--watch", "/tmp/codex"]
+        )
+        let scriptFirst = process(
+            20, "bun", argv: ["bun", "/usr/local/bin/codex", "--loader", "nocolon"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, colon]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, colonRun]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, colonEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, colonCase]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, colonOnly]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, short]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, shortGlued]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, shortEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, shortColon]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, watch]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, scriptFirst]) == 20)
+        #expect(Diagnoser.cpuSamplePid([mcp, colon]) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, colon], foregroundProcessGroupId: 20) == 20)
+
+        // No colon: bun exits, and the agent path after the value is not
+        // the script. That bun does not take the sample as the leader.
+        let noColon = process(
+            4,
+            "bun",
+            argv: ["bun", "--loader", "/tmp/codex.js", "/usr/local/bin/codex"]
+        )
+        let noColonRun = process(
+            4, "bun", argv: ["bun", "run", "--loader", "nope", "/tmp/codex"]
+        )
+        let noColonEquals = process(
+            4, "bun", argv: ["bun", "--loader=script.js", "/usr/local/bin/codex"]
+        )
+        let emptyEquals = process(
+            4, "bun", argv: ["bun", "--loader=", "/tmp/codex"]
+        )
+        let shortBad = process(
+            4, "bun", argv: ["bun", "-l", "nocolon", "/usr/local/bin/codex"]
+        )
+        let shortGluedBad = process(
+            4, "bun.exe", argv: ["bun.exe", "-lnocolon", "/tmp/codex"]
+        )
+        let shortEqualsBad = process(
+            4, "bun", argv: ["bun", "-l=script.js", "/tmp/codex"]
+        )
+        let watchValue = process(
+            4, "bun", argv: ["bun", "--loader", "--watch", "/usr/local/bin/codex"]
+        )
+        let missing = process(4, "bun", argv: ["bun", "--loader"])
+        #expect(Diagnoser.cpuSamplePid([noColon, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([noColonRun, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([noColonEquals, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([emptyEquals, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([shortBad, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([shortGluedBad, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([shortEqualsBad, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([watchValue, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([missing, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([mcp, noColon]) == 10)
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, noColon], foregroundProcessGroupId: 4) == 10
+        )
+
+        // The word after a real mapping is the program, including Letta.
+        // A value with no colon is not that program.
+        let letta = process(
+            30,
+            "bun",
+            argv: ["bun", "--loader", ".js:jsx", "/home/user/node_modules/.bin/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, letta]) == 30)
+        let shortLetta = process(
+            30,
+            "bun",
+            argv: ["bun", "-l", ".md:text", "/home/user/node_modules/.bin/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, shortLetta]) == 30)
+        let oneShot = process(
+            8,
+            "bun",
+            argv: [
+                "bun", "--loader", ".js:jsx",
+                "/home/user/node_modules/.bin/letta", "--prompt", "hello",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([oneShot, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([oneShot]) == 8)
+        #expect(
+            Diagnoser.cpuSamplePid([oneShot, interactive], foregroundProcessGroupId: 8) == 30
+        )
+        let notLetta = process(
+            40,
+            "bun",
+            argv: [
+                "bun", "--loader", "/tmp/foo.js",
+                "/home/user/node_modules/.bin/letta",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([notLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([helper, notLetta]) == 10)
+        #expect(Diagnoser.cpuSamplePid([notLetta]) == 40)
+
+        // Node still consumes the module specifier. The script follows it.
+        let nodeValue = process(
+            4, "node", argv: ["node", "--loader", "codex", "server.js"]
+        )
+        let nodeScript = process(
+            20,
+            "node",
+            argv: ["node", "--loader", "preload.js", "/usr/local/bin/codex"]
+        )
+        let nodeEquals = process(
+            20, "nodejs", argv: ["nodejs", "--loader=preload.js", "/tmp/codex"]
+        )
+        let nodeExe = process(
+            20, "node.exe", argv: ["node.exe", "--loader", "preload.js", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([nodeValue, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeScript]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeExe]) == 20)
+        #expect(Diagnoser.cpuSamplePid([mcp, nodeScript]) == 10)
+        #expect(
+            Diagnoser.cpuSamplePid(
+                [mcp, nodeScript], foregroundProcessGroupId: 20
+            ) == 20
+        )
+        let nodeLetta = process(
+            30,
+            "node",
+            argv: ["node", "--loader", "preload.js", "/home/user/node_modules/.bin/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, nodeLetta]) == 30)
+
+        // Deno still consumes the shared flag. The value is not the script.
+        let denoValue = process(
+            4, "deno", argv: ["deno", "run", "--loader", "codex", "server.js"]
+        )
+        let denoScript = process(
+            20,
+            "deno",
+            argv: ["deno", "run", "--loader", "preload.js", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([denoValue, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, denoScript]) == 20)
     }
 }
 
