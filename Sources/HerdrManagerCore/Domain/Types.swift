@@ -598,7 +598,8 @@ public struct HerdrAgentInfo: Sendable, Equatable {
     /// agent-session id (`source|agent|kind|value`) so two agents of the
     /// same kind in the same pane still differ. Falls back to kind and
     /// title only when no session id is present. The string is the value
-    /// stored on pending actions as `_fp_occupant`.
+    /// stored on pending actions as `_fp_occupant`. The pane id is part of
+    /// the string, so a cross-workspace move does not compare equal.
     public var occupantFingerprint: String {
         if let session = agentSession {
             return "session|\(session.source)|\(session.agent)|\(session.kind)|\(session.value)|\(paneId)"
@@ -606,6 +607,15 @@ public struct HerdrAgentInfo: Sendable, Equatable {
         let kind = agent ?? "unknown"
         let label = title ?? name ?? terminalTitleStripped ?? kind
         return "fallback|\(kind)|\(label)|\(paneId)"
+    }
+
+    /// Session identity without the pane id. `occupantFingerprint` changes
+    /// on a move; this is the part that stays put. An empty session value
+    /// is not an identity: several panes look like that, and matching them
+    /// would glue unrelated agents together.
+    public var sessionIdentity: String? {
+        guard let session = agentSession, !session.value.isEmpty else { return nil }
+        return "\(session.source)|\(session.agent)|\(session.kind)|\(session.value)"
     }
 
     public static func == (lhs: HerdrAgentInfo, rhs: HerdrAgentInfo) -> Bool {

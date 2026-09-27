@@ -460,7 +460,7 @@ public final class AgentStore {
             guard let agent = info.agent, !agent.isEmpty else { continue }
             let id = AgentID(info.paneId)
             listed.insert(id)
-            if let session = Self.sessionIdentity(of: info) {
+            if let session = info.sessionIdentity {
                 incoming[id] = session
             }
         }
@@ -516,7 +516,7 @@ public final class AgentStore {
             guard !info.paneId.isEmpty else { continue }
             let id = AgentID(info.paneId)
             listed.insert(id)
-            if let session = Self.sessionIdentity(of: info) {
+            if let session = info.sessionIdentity {
                 incoming[id] = session
             }
         }
@@ -531,13 +531,14 @@ public final class AgentStore {
         sessionByPane = next
     }
 
-    /// Session identity without the pane id. `occupantFingerprint` is for
-    /// write revalidation of one pane and includes that id, so it changes
-    /// on a move. The value is herdr's agent-session id; an empty value is
-    /// not an id.
-    nonisolated private static func sessionIdentity(of info: HerdrAgentInfo) -> String? {
-        guard let session = info.agentSession, !session.value.isEmpty else { return nil }
-        return "\(session.source)|\(session.agent)|\(session.kind)|\(session.value)"
+    /// Session identity last stored for `id`, without the pane id.
+    ///
+    /// The menu bar copies this before awaiting the herd re-read that
+    /// Approve and Deny send against. A move that lands during that read
+    /// takes the identity off this id; the copy is what still names the
+    /// occupant on the new one.
+    public func sessionIdentity(for id: AgentID) -> String? {
+        sessionByPane[id]
     }
 
     /// A list captured before this poll still names `paneId`. Keep it from
@@ -556,7 +557,7 @@ public final class AgentStore {
     /// `agent_session`; the identity the last list stored is the one a
     /// later poll has to match. A payload that does name a session wins.
     private func carrySession(of info: HerdrAgentInfo, from previousId: AgentID, to newId: AgentID) {
-        if let incoming = Self.sessionIdentity(of: info) {
+        if let incoming = info.sessionIdentity {
             if previousId != newId {
                 sessionByPane.removeValue(forKey: previousId)
             }

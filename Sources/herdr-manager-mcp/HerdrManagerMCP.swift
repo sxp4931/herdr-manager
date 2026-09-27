@@ -858,36 +858,43 @@ actor MCPServer {
                         return error
                     }
 
-                    // Revalidate pane occupant + status episode after the wait
+                    // Revalidate pane occupant + status episode after the wait.
+                    // A move during the wait addresses the session's new pane.
+                    let current: HerdrAgentInfo
                     do {
-                        try await revalidate(action: claimed, paneId: paneId)
+                        current = try await revalidate(action: claimed, paneId: paneId)
                     } catch {
                         try? await sharedActionStore.markFailed(actionId, detail: "revalidation failed: \(error)")
                         return makeToolError("Revalidation failed: \(error). No input sent.")
                     }
 
+                    let addressed = Self.addressedParams(
+                        requested: agentIdStr,
+                        resolved: current.paneId,
+                        extra: ["text_length": "\(text.count)"]
+                    )
                     do {
-                        try await adapter.prompt(paneId: paneId, text: text)
+                        try await adapter.prompt(paneId: current.paneId, text: text)
                     } catch {
                         return await failClaimedWrite(
                             actionId: actionId, tool: "agent.say",
-                            params: ["agent_id": agentIdStr, "text_length": "\(text.count)"],
+                            params: addressed,
                             preState: "status=\(status)", error: error
                         )
                     }
-                    await policy.recordWrite(agentId: agentIdStr)
+                    await policy.recordWrite(agentId: current.paneId)
                     try? await sharedActionStore.markExecuted(actionId)
 
                     await journal.record(JournalEntry(
                         actionId: actionId, tool: "agent.say",
-                        params: ["agent_id": agentIdStr, "text_length": "\(text.count)"],
+                        params: addressed,
                         caller: "mcp", preState: "status=\(status)",
                         postState: "sent", outcome: "executed"
                     ))
 
                     if let waitFor = arguments["wait_for"] as? String {
                         let timeoutMs = JSONNumber.int(arguments["timeout_ms"]) ?? 30000
-                        let settled = try await adapter.waitStatus(paneId: paneId, until: [waitFor], timeoutMs: timeoutMs)
+                        let settled = try await adapter.waitStatus(paneId: current.paneId, until: [waitFor], timeoutMs: timeoutMs)
                         return makeToolResult("{\"sent\":true,\"actionId\":\"\(actionId)\",\"outcome\":\"\(settled ? "settled" : "timeout")\"}")
                     }
                     return makeToolResult("{\"sent\":true,\"actionId\":\"\(actionId)\",\"outcome\":\"sent\"}")
@@ -998,30 +1005,37 @@ actor MCPServer {
                     return error
                 }
 
-                // Revalidate pane occupant + status episode after the wait
+                // Revalidate pane occupant + status episode after the wait.
+                // A move during the wait addresses the session's new pane.
+                let current: HerdrAgentInfo
                 do {
-                    _ = try await revalidate(action: claimed, paneId: paneId)
+                    current = try await revalidate(action: claimed, paneId: paneId)
                 } catch {
                     try? await sharedActionStore.markFailed(actionId, detail: "revalidation failed: \(error)")
                     return makeToolError("Revalidation failed: \(error). No input sent.")
                 }
 
                 let keys: [String] = level == "escape" ? ["esc"] : ["ctrl+c"]
+                let addressed = Self.addressedParams(
+                    requested: agentIdStr,
+                    resolved: current.paneId,
+                    extra: ["level": level]
+                )
                 do {
-                    try await adapter.sendKeys(paneId: paneId, keys: keys)
+                    try await adapter.sendKeys(paneId: current.paneId, keys: keys)
                 } catch {
                     return await failClaimedWrite(
                         actionId: actionId, tool: "agent.interrupt",
-                        params: ["agent_id": agentIdStr, "level": level],
+                        params: addressed,
                         preState: "status=\(paneInfo.agentStatus)", error: error
                     )
                 }
-                await policy.recordWrite(agentId: agentIdStr)
+                await policy.recordWrite(agentId: current.paneId)
                 try? await sharedActionStore.markExecuted(actionId)
 
                 await journal.record(JournalEntry(
                     actionId: actionId, tool: "agent.interrupt",
-                    params: ["agent_id": agentIdStr, "level": level],
+                    params: addressed,
                     caller: "mcp", preState: "status=\(paneInfo.agentStatus)",
                     postState: "interrupted", outcome: "executed"
                 ))
@@ -1100,30 +1114,37 @@ actor MCPServer {
                     return error
                 }
 
-                // Revalidate pane occupant + status episode after the wait
+                // Revalidate pane occupant + status episode after the wait.
+                // A move during the wait closes the session's new pane.
+                let current: HerdrAgentInfo
                 do {
-                    _ = try await revalidate(action: claimed, paneId: paneId)
+                    current = try await revalidate(action: claimed, paneId: paneId)
                 } catch {
                     try? await sharedActionStore.markFailed(actionId, detail: "revalidation failed: \(error)")
                     return makeToolError("Revalidation failed: \(error). No input sent.")
                 }
 
+                let addressed = Self.addressedParams(
+                    requested: agentIdStr,
+                    resolved: current.paneId,
+                    extra: ["reason": reason]
+                )
                 do {
-                    try await adapter.closePane(paneId: paneId)
+                    try await adapter.closePane(paneId: current.paneId)
                 } catch {
                     return await failClaimedWrite(
                         actionId: actionId, tool: "agent.stop",
-                        params: ["agent_id": agentIdStr, "reason": reason],
+                        params: addressed,
                         preState: "status=\(paneInfo.agentStatus)", error: error,
                         keepForever: true
                     )
                 }
-                await policy.recordWrite(agentId: agentIdStr)
+                await policy.recordWrite(agentId: current.paneId)
                 try? await sharedActionStore.markExecuted(actionId)
 
                 await journal.record(JournalEntry(
                     actionId: actionId, tool: "agent.stop",
-                    params: ["agent_id": agentIdStr, "reason": reason],
+                    params: addressed,
                     caller: "mcp", preState: "status=\(paneInfo.agentStatus)",
                     postState: "closed", outcome: "executed",
                     keepForever: true
@@ -1343,11 +1364,13 @@ actor MCPServer {
                 guard let targetInfo else {
                     throw AgentResolutionError(description: "split target missing")
                 }
-                try await revalidate(action: claimed, paneId: targetInfo.paneId)
-                finalWorkspaceId = targetInfo.workspaceId
+                // The target can move while the claim is in flight. Split
+                // the pane that still has that occupant.
+                let current = try await revalidate(action: claimed, paneId: targetInfo.paneId)
+                finalWorkspaceId = current.workspaceId
                 paneId = try await adapter.splitPane(
-                    targetPaneId: targetInfo.paneId,
-                    cwd: cwdHint
+                    targetPaneId: current.paneId,
+                    cwd: current.foregroundCwd ?? current.cwd ?? cwdHint
                 )
 
             default:
@@ -1599,52 +1622,56 @@ actor MCPServer {
         }
     }
 
-    /// Revalidate that the pane still has the same occupant and status episode
-    /// as when the action was created. Throws if mismatch.
-    /// Reads fingerprint info from action.params["_fp_*"] keys.
-    private func revalidate(action: PendingAction, paneId: String) async throws {
+    /// Revalidate that the approved occupant is still on the same status
+    /// episode, and return the pane to address.
+    ///
+    /// The pane id from approval wins when it still runs an agent. A
+    /// cross-workspace move drops that id. The session stored in
+    /// `_fp_occupant` then has to name exactly one other agent, on the
+    /// same status and seq. Anything else throws, and the caller sends
+    /// nothing. Reads fingerprint info from action.params["_fp_*"] keys.
+    private func revalidate(action: PendingAction, paneId: String) async throws -> HerdrAgentInfo {
         let herd = try await readHerd()
-
-        guard let paneInfo = herd.agents.first(where: { $0.paneId == paneId }) else {
-            throw MCPRevalidationError.paneGone(paneId)
-        }
-
-        let seq = paneInfo.stateChangeSeq
-
-        // Compare the NATIVE occupant fingerprint (agent-session identity).
-        let currentFingerprint = occupantFingerprint(from: paneInfo)
         let expectedFingerprint = action.params["_fp_occupant"]
-        if let expectedFingerprint, !expectedFingerprint.isEmpty,
-           expectedFingerprint != currentFingerprint {
-            throw MCPRevalidationError.occupantChanged(
-                expected: expectedFingerprint,
-                current: currentFingerprint
-            )
-        }
-
-        // Compare status episode (seq)
-        let expectedSeq = action.params["_fp_seq"].flatMap { UInt64($0) }
-        if let expectedSeq, expectedSeq != seq {
-            throw MCPRevalidationError.seqAdvanced(
-                expected: expectedSeq,
-                current: seq
-            )
-        }
-
-        // Compare status
         let expectedStatus = action.params["_fp_status"]
-        if let expectedStatus, !expectedStatus.isEmpty,
-           expectedStatus != paneInfo.agentStatus {
-            throw MCPRevalidationError.statusChanged(
-                expected: expectedStatus,
-                current: paneInfo.agentStatus
-            )
+        let expectedSeq = action.params["_fp_seq"].flatMap { UInt64($0) }
+        switch ConfirmedPaneFollow.resolve(
+            previousPaneId: paneId,
+            occupantFingerprint: expectedFingerprint,
+            expectedStatus: expectedStatus,
+            expectedSeq: expectedSeq,
+            in: herd.agents
+        ) {
+        case .success(let info):
+            // The herd read is a newer protocol observation than the refresh
+            // that opened the gate. A downgrade it just recorded must fail
+            // here, before prompt / keys / close, with no input sent.
+            try throwIfWritesDisabled()
+            return info
+        case .failure(.paneGone):
+            throw MCPRevalidationError.paneGone(paneId)
+        case .failure(.occupantChanged(let expected, let current)):
+            throw MCPRevalidationError.occupantChanged(expected: expected, current: current)
+        case .failure(.seqAdvanced(let expected, let current)):
+            throw MCPRevalidationError.seqAdvanced(expected: expected, current: current)
+        case .failure(.statusChanged(let expected, let current)):
+            throw MCPRevalidationError.statusChanged(expected: expected, current: current)
         }
+    }
 
-        // The herd read is a newer protocol observation than the refresh
-        // that opened the gate. A downgrade it just recorded must fail
-        // here, before prompt / keys / close, with no input sent.
-        try throwIfWritesDisabled()
+    /// Journal and failure params for a write. `resolved_agent_id` is set
+    /// when a move sent the write to a pane other than the one approved.
+    nonisolated private static func addressedParams(
+        requested agentId: String,
+        resolved paneId: String,
+        extra: [String: String] = [:]
+    ) -> [String: String] {
+        var params = extra
+        params["agent_id"] = agentId
+        if paneId != agentId {
+            params["resolved_agent_id"] = paneId
+        }
+        return params
     }
 
     /// The protocol currently on the gate. Call after the read that should

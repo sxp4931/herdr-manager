@@ -149,6 +149,138 @@ struct PromptAnswerCheckTests {
         #expect(refreshed.verdict.isAwaitingInput)
         #expect(PromptAnswerCheck.refusal(answering: refreshed, in: fresh) == nil)
     }
+
+    @Test("Approve follows the session captured before the re-read")
+    func approveFollowsMovedSession() throws {
+        let occupant = session("abc")
+        let store = AgentStore()
+        store.applyHerdSnapshot(herd([info(status: "blocked", seq: 5, session: occupant)]))
+        let shown = try #require(store.agents[AgentID(paneId)])
+        let captured = store.sessionIdentity(for: shown.id)
+        #expect(captured == "agent|claude|session|abc")
+
+        let moved = herd([info(pane: "wB:p4", status: "blocked", seq: 5, session: occupant)])
+        #expect(
+            PromptAnswerCheck.destination(answering: shown, in: moved, sessionIdentity: captured)
+                == .success("wB:p4")
+        )
+        #expect(PromptAnswerCheck.refusal(answering: shown, in: moved, sessionIdentity: captured) == nil)
+        // No captured identity, and an empty one: the new pane is someone else.
+        #expect(PromptAnswerCheck.refusal(answering: shown, in: moved) == .agentGone)
+        #expect(
+            PromptAnswerCheck.destination(answering: shown, in: moved, sessionIdentity: "")
+                == .failure(.agentGone)
+        )
+    }
+
+    @Test("A move drops the old id's session, which is why Approve copies it first")
+    func moveClearsSessionOnTheOldId() {
+        let occupant = session("abc")
+        let store = AgentStore()
+        store.applyHerdSnapshot(herd([info(status: "blocked", seq: 5, session: occupant)]))
+        let identity = store.sessionIdentity(for: AgentID(paneId))
+        _ = store.applyEvent(.paneMoved(
+            previousPaneId: paneId,
+            pane: info(pane: "wB:p4", status: "blocked", seq: 0, session: occupant),
+            createdWorkspaceLabel: nil,
+            createdTabLabel: nil
+        ))
+        #expect(store.sessionIdentity(for: AgentID(paneId)) == nil)
+        #expect(store.sessionIdentity(for: AgentID("wB:p4")) == identity)
+    }
+
+    @Test("The pane the row named wins when it still runs an agent")
+    func samePaneWinsOverAnotherCopyOfTheSession() throws {
+        let occupant = session("abc")
+        let shown = try shownRow(after: herd([info(status: "blocked", seq: 5, session: occupant)]))
+        let both = herd([
+            info(status: "blocked", seq: 5, session: occupant),
+            info(pane: "wB:p4", status: "blocked", seq: 5, session: occupant),
+        ])
+        #expect(
+            PromptAnswerCheck.destination(
+                answering: shown,
+                in: both,
+                sessionIdentity: "agent|claude|session|abc"
+            ) == .success(paneId)
+        )
+    }
+
+    @Test("Two panes with the captured session do not receive the keys")
+    func ambiguousSessionRefuses() throws {
+        let shown = try shownRow(after: herd([info(status: "blocked", seq: 5, session: session("abc"))]))
+        let both = herd([
+            info(pane: "wB:p4", status: "blocked", seq: 5, session: session("abc")),
+            info(pane: "wC:p8", status: "blocked", seq: 5, session: session("abc")),
+        ])
+        #expect(
+            PromptAnswerCheck.destination(
+                answering: shown,
+                in: both,
+                sessionIdentity: "agent|claude|session|abc"
+            ) == .failure(.agentGone)
+        )
+    }
+
+    @Test("A moved session that left blocked, or changed seq, still refuses")
+    func movedSessionKeepsTheEpisodeCheck() throws {
+        let shown = try shownRow(after: herd([info(status: "blocked", seq: 5, session: session("abc"))]))
+        let identity = "agent|claude|session|abc"
+        #expect(
+            PromptAnswerCheck.destination(
+                answering: shown,
+                in: herd([info(pane: "wB:p4", status: "working", seq: 5, session: session("abc"))]),
+                sessionIdentity: identity
+            ) == .failure(.notBlocked(now: .working))
+        )
+        #expect(
+            PromptAnswerCheck.destination(
+                answering: shown,
+                in: herd([info(pane: "wB:p4", status: "blocked", seq: 6, session: session("abc"))]),
+                sessionIdentity: identity
+            ) == .failure(.promptChanged)
+        )
+        #expect(
+            PromptAnswerCheck.destination(
+                answering: shown,
+                in: herd([info(pane: "wB:p4", status: "blocked", seq: 1, session: session("abc"))]),
+                sessionIdentity: identity
+            ) == .failure(.promptChanged)
+        )
+    }
+
+    @Test("A shell left behind does not hide the moved session")
+    func shellAtTheOldIdFollowsTheSession() throws {
+        let shown = try shownRow(after: herd([info(status: "blocked", seq: 5, session: session("abc"))]))
+        let moved = herd([
+            info(agent: nil, status: "unknown", seq: 0),
+            info(pane: "wB:p4", status: "blocked", seq: 5, session: session("abc")),
+        ])
+        #expect(
+            PromptAnswerCheck.destination(
+                answering: shown,
+                in: moved,
+                sessionIdentity: "agent|claude|session|abc"
+            ) == .success("wB:p4")
+        )
+    }
+
+    @Test("A followed pane of a different kind refuses")
+    func followedKindMismatchRefuses() {
+        let shown = Agent(
+            id: AgentID(paneId),
+            kind: .custom("other"),
+            status: .blocked,
+            stateChangeSeq: 5
+        )
+        #expect(
+            PromptAnswerCheck.destination(
+                answering: shown,
+                in: herd([info(pane: "wB:p4", status: "blocked", seq: 5, session: session("abc"))]),
+                sessionIdentity: "agent|claude|session|abc"
+            ) == .failure(.agentReplaced)
+        )
+    }
 }
 
 @Suite("agent.answer re-reads the prompt before sending keys")
@@ -200,8 +332,10 @@ struct AnswerSendCheckTests {
         )
     }
 
-    @Test("A pane that left the agent list refuses")
+    @Test("A pane that left the agent list refuses, including the same session on a new id")
     func gonePaneRefuses() {
+        // The answer cap was recorded on this pane id. Confirm-tier writes
+        // follow the session; this check does not.
         let observed = info(status: "blocked", seq: 5, session: session("abc"))
         #expect(AnswerSendCheck.refusal(sendingTo: observed, in: herd([])) == .agentGone)
         #expect(
@@ -230,5 +364,178 @@ struct AnswerSendCheckTests {
             in: herd([info(agent: "codex", status: "blocked", seq: 5)])
         )
         #expect(refusal == .occupantChanged)
+    }
+}
+
+@Suite("An approved write follows a moved session")
+struct ConfirmedPaneFollowTests {
+
+    private func resolve(
+        _ observed: HerdrAgentInfo,
+        in agents: [HerdrAgentInfo],
+        status: String? = nil,
+        seq: UInt64? = nil
+    ) -> Result<HerdrAgentInfo, ConfirmedPaneFollow.Refusal> {
+        ConfirmedPaneFollow.resolve(
+            previousPaneId: observed.paneId,
+            occupantFingerprint: observed.occupantFingerprint,
+            expectedStatus: status ?? observed.agentStatus,
+            expectedSeq: seq ?? observed.stateChangeSeq,
+            in: agents
+        )
+    }
+
+    @Test("Session identity drops the pane id and ignores an empty value")
+    func sessionIdentityOmitsThePane() {
+        let identified = info(status: "blocked", seq: 1, session: session("abc"))
+        #expect(identified.sessionIdentity == "agent|claude|session|abc")
+        #expect(info(status: "blocked", seq: 1, session: session("")).sessionIdentity == nil)
+        #expect(info(status: "blocked", seq: 1).sessionIdentity == nil)
+    }
+
+    @Test("The approved pane still receives the write when it is the same occupant")
+    func samePanePasses() {
+        let observed = info(status: "working", seq: 4, session: session("abc"))
+        let renamed = info(status: "working", seq: 4, session: session("abc"), title: "renamed")
+        #expect(resolve(observed, in: [renamed]) == .success(renamed))
+    }
+
+    @Test("A different occupant in the approved pane refuses, even if the session sits elsewhere")
+    func samePaneDoesNotFollowAway() {
+        let observed = info(status: "working", seq: 4, session: session("abc"))
+        let replaced = info(status: "working", seq: 4, session: session("xyz"))
+        let elsewhere = info(pane: "wB:p4", status: "working", seq: 4, session: session("abc"))
+        #expect(
+            resolve(observed, in: [replaced, elsewhere])
+                == .failure(.occupantChanged(
+                    expected: observed.occupantFingerprint,
+                    current: replaced.occupantFingerprint
+                ))
+        )
+    }
+
+    @Test("Occupant is checked before seq when both differ")
+    func occupantBeforeSeq() {
+        let observed = info(status: "working", seq: 4, session: session("abc"))
+        let replaced = info(status: "blocked", seq: 9, session: session("xyz"))
+        #expect(
+            resolve(observed, in: [replaced])
+                == .failure(.occupantChanged(
+                    expected: observed.occupantFingerprint,
+                    current: replaced.occupantFingerprint
+                ))
+        )
+    }
+
+    @Test("A title change without a session still refuses on that pane")
+    func fallbackTitleChangeRefuses() {
+        let observed = info(agent: "codex", status: "blocked", seq: 1, title: "Review")
+        let renamed = info(agent: "codex", status: "blocked", seq: 1, title: "Other")
+        #expect(
+            resolve(observed, in: [renamed])
+                == .failure(.occupantChanged(
+                    expected: observed.occupantFingerprint,
+                    current: renamed.occupantFingerprint
+                ))
+        )
+    }
+
+    @Test("A unique session successor on the same episode receives the write")
+    func followsUniqueSession() {
+        let observed = info(status: "working", seq: 4, session: session("abc"))
+        let moved = info(pane: "wB:p4", status: "working", seq: 4, session: session("abc"), title: "renamed")
+        #expect(resolve(observed, in: [moved]) == .success(moved))
+    }
+
+    @Test("A session value that contains the separator still matches only itself")
+    func sessionValueMayContainTheSeparator() {
+        let occupant = session("abc|def")
+        let observed = info(status: "working", seq: 4, session: occupant)
+        let moved = info(pane: "wB:p4", status: "working", seq: 4, session: occupant)
+        #expect(resolve(observed, in: [moved]) == .success(moved))
+
+        let longer = info(pane: "wB:p4", status: "working", seq: 4, session: session("abc|wA:p1"))
+        let plain = info(status: "working", seq: 4, session: session("abc"))
+        #expect(resolve(plain, in: [longer]) == .failure(.paneGone))
+    }
+
+    @Test("A successor on a different seq or status refuses")
+    func successorKeepsTheEpisode() {
+        let observed = info(status: "working", seq: 4, session: session("abc"))
+        #expect(
+            resolve(observed, in: [info(pane: "wB:p4", status: "working", seq: 9, session: session("abc"))])
+                == .failure(.seqAdvanced(expected: 4, current: 9))
+        )
+        #expect(
+            resolve(observed, in: [info(pane: "wB:p4", status: "working", seq: 1, session: session("abc"))])
+                == .failure(.seqAdvanced(expected: 4, current: 1))
+        )
+        #expect(
+            resolve(observed, in: [info(pane: "wB:p4", status: "blocked", seq: 4, session: session("abc"))])
+                == .failure(.statusChanged(expected: "working", current: "blocked"))
+        )
+    }
+
+    @Test("Two successors, a fallback fingerprint, and an empty session value do not follow")
+    func ambiguousOrUnidentifiedRefuses() {
+        let observed = info(status: "working", seq: 4, session: session("abc"))
+        #expect(
+            resolve(observed, in: [
+                info(pane: "wB:p4", status: "working", seq: 4, session: session("abc")),
+                info(pane: "wC:p8", status: "working", seq: 4, session: session("abc")),
+            ]) == .failure(.paneGone)
+        )
+        #expect(resolve(observed, in: []) == .failure(.paneGone))
+
+        let fallback = info(agent: "codex", status: "working", seq: 2, title: "Review")
+        let other = info(pane: "wB:p4", agent: "codex", status: "working", seq: 2, title: "Review")
+        #expect(resolve(fallback, in: [other]) == .failure(.paneGone))
+
+        let empty = info(status: "working", seq: 4, session: session(""))
+        let emptyMoved = info(pane: "wB:p4", status: "working", seq: 4, session: session(""))
+        #expect(resolve(empty, in: [emptyMoved]) == .failure(.paneGone))
+    }
+
+    @Test("A shell is not a successor, and a shell left at the old id does not block the move")
+    func shellIsNotTheOccupant() {
+        let observed = info(status: "working", seq: 4, session: session("abc"))
+        let shell = info(pane: "wB:p4", agent: "", status: "working", seq: 4, session: session("abc"))
+        #expect(resolve(observed, in: [shell]) == .failure(.paneGone))
+
+        let leftBehind = info(agent: "", status: "unknown", seq: 0, session: session("abc"))
+        let moved = info(pane: "wB:p4", status: "working", seq: 4, session: session("abc"))
+        #expect(resolve(observed, in: [leftBehind, moved]) == .success(moved))
+    }
+
+    @Test("An empty fingerprint or a missing seq skips that comparison, and an empty pane id refuses")
+    func skippedComparisons() {
+        let replaced = info(status: "working", seq: 9, session: session("xyz"))
+        #expect(
+            ConfirmedPaneFollow.resolve(
+                previousPaneId: paneId,
+                occupantFingerprint: "",
+                expectedStatus: "working",
+                expectedSeq: 9,
+                in: [replaced]
+            ) == .success(replaced)
+        )
+        #expect(
+            ConfirmedPaneFollow.resolve(
+                previousPaneId: paneId,
+                occupantFingerprint: replaced.occupantFingerprint,
+                expectedStatus: "",
+                expectedSeq: nil,
+                in: [info(status: "blocked", seq: 3, session: session("xyz"))]
+            ) == .success(info(status: "blocked", seq: 3, session: session("xyz")))
+        )
+        #expect(
+            ConfirmedPaneFollow.resolve(
+                previousPaneId: "",
+                occupantFingerprint: replaced.occupantFingerprint,
+                expectedStatus: "working",
+                expectedSeq: 9,
+                in: [replaced]
+            ) == .failure(.paneGone)
+        )
     }
 }

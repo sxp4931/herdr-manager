@@ -11,6 +11,12 @@ import Foundation
 /// The app re-reads `agent.list` right before the send, and this check asks
 /// whether the prompt the row showed is still the one waiting. It is the
 /// panel's counterpart to the seq check MCP `agent.answer` makes.
+///
+/// The re-read can already show a cross-workspace move: the row's pane id
+/// is gone and the same session is blocked on the new id. `sessionIdentity`
+/// is the value the store had for the row before that read. When exactly
+/// one pane carries it, the keys go there. Without an identity, a missing
+/// pane still refuses — kind and title are not an occupant.
 public enum PromptAnswerCheck: Sendable {
 
     public enum Refusal: Equatable, Sendable {
@@ -47,20 +53,69 @@ public enum PromptAnswerCheck: Sendable {
     /// episode before it, and that refuses too. The caller applies
     /// `snapshot`, so the next click goes through. A refused click is the
     /// safe side.
-    public static func refusal(answering shown: Agent, in snapshot: HerdSnapshot) -> Refusal? {
-        guard let current = snapshot.displayAgents().first(where: { $0.id == shown.id }) else {
-            return .agentGone
-        }
-        guard current.kind == shown.kind else {
-            return .agentReplaced
-        }
-        guard current.status == .blocked else {
-            return .notBlocked(now: current.status)
-        }
-        guard current.stateChangeSeq == shown.stateChangeSeq else {
-            return .promptChanged
+    ///
+    /// `sessionIdentity` follows a move. See `destination`. Omit it and a
+    /// pane that left the list refuses, which is what callers that have
+    /// not captured an identity do.
+    public static func refusal(
+        answering shown: Agent,
+        in snapshot: HerdSnapshot,
+        sessionIdentity: String? = nil
+    ) -> Refusal? {
+        if case .failure(let refusal) = destination(
+            answering: shown,
+            in: snapshot,
+            sessionIdentity: sessionIdentity
+        ) {
+            return refusal
         }
         return nil
+    }
+
+    /// The pane id the keys should be sent to, or why they should not.
+    ///
+    /// The row's own id wins when that pane still runs an agent. A move
+    /// drops it. The captured session then has to name exactly one other
+    /// agent, and that agent still has to be the blocked episode the row
+    /// showed. A different kind, a status that left blocked, or a different
+    /// seq refuses. The returned id is the one to address: sending to
+    /// `shown.id` would hit the pane the agent left.
+    public static func destination(
+        answering shown: Agent,
+        in snapshot: HerdSnapshot,
+        sessionIdentity: String? = nil
+    ) -> Result<String, Refusal> {
+        let currentInfo: HerdrAgentInfo?
+        if let same = snapshot.agents.first(where: { $0.paneId == shown.id.raw && Self.isListedAgent($0) }) {
+            currentInfo = same
+        } else if let sessionIdentity, !sessionIdentity.isEmpty,
+                  let followed = ConfirmedPaneFollow.uniqueSuccessor(
+                    sessionIdentity: sessionIdentity,
+                    excluding: shown.id.raw,
+                    in: snapshot.agents
+                  ) {
+            currentInfo = followed
+        } else {
+            currentInfo = nil
+        }
+        guard let currentInfo, let current = snapshot.displayAgent(for: currentInfo) else {
+            return .failure(.agentGone)
+        }
+        guard current.kind == shown.kind else {
+            return .failure(.agentReplaced)
+        }
+        guard current.status == .blocked else {
+            return .failure(.notBlocked(now: current.status))
+        }
+        guard current.stateChangeSeq == shown.stateChangeSeq else {
+            return .failure(.promptChanged)
+        }
+        return .success(current.id.raw)
+    }
+
+    private static func isListedAgent(_ info: HerdrAgentInfo) -> Bool {
+        guard let agent = info.agent, !agent.isEmpty else { return false }
+        return true
     }
 }
 
@@ -71,6 +126,12 @@ public enum PromptAnswerCheck: Sendable {
 /// replaced, or restarted in that gap. This is the re-read immediately
 /// before the keys: same pane, still blocked, same `state_change_seq`,
 /// same occupant as the read that authorized the answer.
+///
+/// A move to a new pane id refuses, including when the same session is
+/// still blocked there. The answer cap was recorded against the id this
+/// read authorized. Confirm-tier writes follow that session
+/// (`ConfirmedPaneFollow`); they do not spend the cap, and their wait is
+/// long enough for the move to be the common case.
 public enum AnswerSendCheck: Sendable {
 
     public enum Refusal: Equatable, Sendable {

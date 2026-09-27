@@ -94,6 +94,12 @@ final class AppModel {
     /// the permission prompt, not two.
     private(set) var inFlightAgentWrites: Set<AgentID> = []
 
+    /// Sessions whose Approve or Deny is in flight. A move publishes a new
+    /// pane id while the re-read is still out; the id set alone would let a
+    /// click on that row send a second Enter. Not panel state.
+    @ObservationIgnored
+    private var inFlightAnswerSessions: Set<String> = []
+
     /// Cached adapter health for the footer badge. Refreshed on every
     /// successful snapshot so protocol/version mismatches surface quickly.
     var adapterHealth: AdapterHealth?
@@ -784,10 +790,26 @@ final class AppModel {
     /// reading the write gate uses, so a herdr restart since the last poll
     /// is seen too.
     private func sendKeys(_ agent: Agent, keys: [String], actionName: String) {
+        // Before the task. A move can take this pane's session off the old
+        // id as soon as sendKeys returns to the event loop, and the re-read
+        // then has to recognize the occupant on the new id. The same copy
+        // blocks a second click on the row after that move.
+        let followedSession = store.sessionIdentity(for: agent.id)
         guard !inFlightAgentWrites.contains(agent.id) else { return }
+        if let followedSession, inFlightAnswerSessions.contains(followedSession) {
+            setLastError("A response is already being sent to this agent")
+            return
+        }
         inFlightAgentWrites.insert(agent.id)
-        Task { [weak self] in
-            defer { self?.inFlightAgentWrites.remove(agent.id) }
+        if let followedSession { inFlightAnswerSessions.insert(followedSession) }
+        Task { [weak self, followedSession] in
+            defer {
+                guard let self else { return }
+                self.inFlightAgentWrites.remove(agent.id)
+                if let followedSession {
+                    self.inFlightAnswerSessions.remove(followedSession)
+                }
+            }
             guard let self else { return }
             do {
                 let (snapshot, requestedAt) = try await self.herdSnapshotForApply()
@@ -804,16 +826,23 @@ final class AppModel {
                     self.setLastError("\(actionName) skipped: \(health.reason ?? "writes disabled")")
                     return
                 }
-                if let refusal = PromptAnswerCheck.refusal(answering: agent, in: snapshot) {
+                switch PromptAnswerCheck.destination(
+                    answering: agent,
+                    in: snapshot,
+                    sessionIdentity: followedSession
+                ) {
+                case .failure(let refusal):
                     // Show what herdr reports now, so the row matches the
                     // reason and a retry uses the current episode.
                     await self.applyHerd(snapshot, requestedAt: requestedAt)
                     self.updateDwellForAllAgents()
                     self.setLastError("\(actionName) skipped: \(refusal.message)")
-                    return
+                case .success(let paneId):
+                    // `paneId` is the row's id, or the one pane its session
+                    // moved to. The row's id is the pane the agent left.
+                    try await self.adapter.sendKeys(paneId: paneId, keys: keys)
+                    self.setLastError(nil)
                 }
-                try await self.adapter.sendKeys(paneId: agent.id.raw, keys: keys)
-                self.setLastError(nil)
             } catch {
                 self.setLastError("\(actionName) failed: \(error.localizedDescription)")
             }
