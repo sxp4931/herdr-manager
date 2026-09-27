@@ -203,6 +203,30 @@ public final class SecretRedactor: Sendable {
             ),
             // AWS access key IDs
             ("AKIA[0-9A-Z]{16}", "AKIA[REDACTED]"),
+            // Google API keys. Maps, Firebase, and YouTube put `AIza`
+            // plus 35 characters in `?key=` and in `current_key`.
+            // Neither name is an assignment keyword, so the value
+            // reached MCP tails and `herdmgr --json`. The body is
+            // exactly 35: a shorter one stays, and a longer one stays
+            // whole so a tail is not left behind. A letter, digit, or
+            // underscore glued to the front is not the prefix. The
+            // case is the one Google issues. A temporary `ASIA` access
+            // key id is not this prefix.
+            (
+                "(?<![A-Za-z0-9_])AIza[0-9A-Za-z_-]{35}(?![A-Za-z0-9_-])",
+                "AIza[REDACTED]"
+            ),
+            // Google OAuth client secrets. `GOCSPX-` plus 28 is the
+            // value in `client_secret.json`, and the body includes
+            // `-`. `client_secret` is already an assignment; this
+            // keeps the prefix and also catches a bare paste. A
+            // shorter body stays unless that assignment takes it. A
+            // longer body stays whole. A letter, digit, or underscore
+            // glued to the front is not the prefix.
+            (
+                "(?<![A-Za-z0-9_])GOCSPX-[0-9A-Za-z_-]{28}(?![A-Za-z0-9_-])",
+                "GOCSPX-[REDACTED]"
+            ),
             // Bearer scheme. HTTP treats the scheme as case-insensitive,
             // and pane logs paste `authorization: bearer …`. A letter,
             // digit, or underscore glued to the front is not the scheme

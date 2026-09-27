@@ -701,6 +701,119 @@ struct SecretRedactorTests {
         #expect(pemAgain.redactionCount == 0)
     }
 
+    @Test("Redacts a Google API key and an OAuth client secret")
+    func redactsGoogleAPIKeysAndOAuthClientSecrets() {
+        let redactor = SecretRedactor()
+        let apiBody = "SyAb-0123456789_cdefghijklmnopqrstu"
+        #expect(apiBody.count == 35)
+        let apiKey = "AIza" + apiBody
+        let oauthBody = "4uHg-MPm_1o7SkgeV6Cu5clXFsxl"
+        #expect(oauthBody.count == 28)
+        let oauth = "GOCSPX-" + oauthBody
+
+        let maps = redactor.redact(
+            "https://maps.googleapis.com/maps/api/js?key=\(apiKey)&libraries=places"
+        )
+        #expect(
+            maps.redactedText
+                == "https://maps.googleapis.com/maps/api/js?key=AIza[REDACTED]&libraries=places"
+        )
+        #expect(maps.redactionCount == 1)
+        #expect(!maps.redactedText.contains(apiBody))
+        let mapsAgain = redactor.redact(maps.redactedText)
+        #expect(mapsAgain.redactedText == maps.redactedText)
+        #expect(mapsAgain.redactionCount == 0)
+
+        let firebase = redactor.redact(#"{"current_key": "\#(apiKey)"}"#)
+        #expect(firebase.redactedText == #"{"current_key": "AIza[REDACTED]"}"#)
+        #expect(firebase.redactionCount == 1)
+        #expect(!firebase.redactedText.contains(apiBody))
+        let firebaseAgain = redactor.redact(firebase.redactedText)
+        #expect(firebaseAgain.redactedText == firebase.redactedText)
+        #expect(firebaseAgain.redactionCount == 0)
+
+        let client = redactor.redact(#"{"client_secret": "\#(oauth)"}"#)
+        #expect(client.redactedText == #"{"client_secret": "GOCSPX-[REDACTED]"}"#)
+        #expect(client.redactionCount == 1)
+        #expect(!client.redactedText.contains(oauthBody))
+        let clientAgain = redactor.redact(client.redactedText)
+        #expect(clientAgain.redactedText == client.redactedText)
+        #expect(clientAgain.redactionCount == 0)
+
+        let pair = redactor.redact("saw \(apiKey) and \(oauth).")
+        #expect(pair.redactedText == "saw AIza[REDACTED] and GOCSPX-[REDACTED].")
+        #expect(pair.redactionCount == 2)
+        let pairAgain = redactor.redact(pair.redactedText)
+        #expect(pairAgain.redactedText == pair.redactedText)
+        #expect(pairAgain.redactionCount == 0)
+
+        let assigned = redactor.redact("token=\(apiKey)")
+        #expect(assigned.redactedText == "token=AIza[REDACTED]")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactedText == assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+
+        let jsonKey = redactor.redact(#"{"apiKey": "\#(apiKey)"}"#)
+        #expect(jsonKey.redactedText == #"{"apiKey": "AIza[REDACTED]"}"#)
+        #expect(jsonKey.redactionCount == 1)
+
+        let url = redactor.redact("https://app:\(apiKey)@example.com/path")
+        #expect(url.redactedText == "https://app:AIza[REDACTED]@example.com/path")
+        #expect(url.redactionCount == 1)
+        #expect(url.redactedText.contains("@example.com/path"))
+        let urlAgain = redactor.redact(url.redactedText)
+        #expect(urlAgain.redactedText == url.redactedText)
+        #expect(urlAgain.redactionCount == 0)
+
+        let oauthURL = redactor.redact("https://user:\(oauth)@accounts.google.com/token")
+        #expect(oauthURL.redactedText == "https://user:GOCSPX-[REDACTED]@accounts.google.com/token")
+        #expect(oauthURL.redactionCount == 1)
+
+        // `@` is still not the end of an ordinary assignment, so the
+        // tail after a recognized key is not published.
+        let leftover = redactor.redact("token=\(apiKey)@leftoversecret")
+        #expect(leftover.redactedText == "token=[REDACTED]")
+        #expect(leftover.redactionCount == 2)
+        #expect(!leftover.redactedText.contains("leftoversecret"))
+        #expect(!leftover.redactedText.contains(apiBody))
+
+        let query = redactor.redact("\(apiKey)?x=1")
+        #expect(query.redactedText == "AIza[REDACTED]?x=1")
+        #expect(query.redactionCount == 1)
+
+        // A short client secret assigned to that name is still an
+        // assignment. A bare short one is not this shape.
+        let shortOAuth = "GOCSPX-" + String(repeating: "a", count: 27)
+        #expect(shortOAuth.count == 34)
+        let shortAssigned = redactor.redact("client_secret=\(shortOAuth)")
+        #expect(shortAssigned.redactedText == "client_secret=[REDACTED]")
+        #expect(shortAssigned.redactionCount == 1)
+        #expect(!shortAssigned.redactedText.contains(shortOAuth))
+
+        let kept = [
+            "keys start with AIza and GOCSPX- on Google",
+            "AIza" + String(repeating: "a", count: 34),
+            "AIza" + String(repeating: "a", count: 36),
+            "GOCSPX-" + String(repeating: "a", count: 27),
+            "GOCSPX-" + String(repeating: "a", count: 29),
+            "aiza" + apiBody,
+            "gocspx-" + oauthBody,
+            "x" + apiKey,
+            "_" + apiKey,
+            "x" + oauth,
+            "_" + oauth,
+            "ya29.a0AfH6SMC-short-access-token",
+            "123456789012-abcdefghijklmnopqrstuv.apps.googleusercontent.com",
+            "ASIAIOSFODNN7EXAMPLE",
+        ]
+        for line in kept {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line)")
+            #expect(result.redactedText == line)
+        }
+    }
+
     @Test("Redacts a URL userinfo password and leaves the host")
     func redactsURLUserinfo() {
         let redactor = SecretRedactor()
