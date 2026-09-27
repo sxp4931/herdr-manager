@@ -54,6 +54,9 @@ private struct MockHerdrAdapter: HerdrAdapter {
     var connectionState: HerdrConnectionState = .connected
     var readLinesLog: ReadLinesLog?
     var readScript: ReadScript?
+    /// Runs after the read is issued and before the text is returned, so a
+    /// test can note a newer herd serial while the poll is in `pane.read`.
+    var onRead: (@Sendable () async -> Void)?
 
     func snapshot() async throws -> HerdrSnapshot {
         guard let result = snapshotResult else { throw NSError(domain: "Mock", code: 1) }
@@ -62,6 +65,7 @@ private struct MockHerdrAdapter: HerdrAdapter {
 
     func read(paneId: String, source: PaneReadSource, lines: Int?) async throws -> PaneReadResult {
         readLinesLog?.append(lines)
+        if let onRead { await onRead() }
         if let text = readScript?.next() {
             return PaneReadResult(text: text, source: source.rawValue)
         }
@@ -361,6 +365,91 @@ struct HeartbeatPollerHashTests {
         )
         #expect(log.snapshot == [HeartbeatPoller.detectionReadLines])
         #expect(HeartbeatPoller.detectionReadLines == 80)
+    }
+
+    @Test("A poll from an older herd serial does not replace the screen a newer read stored")
+    func olderHerdSerialDoesNotReplaceTheDetectionHash() async {
+        let poller = HeartbeatPoller()
+        let agent = Agent(id: AgentID("w1:p1"), status: .working)
+        var first = MockHerdrAdapter()
+        first.readResult = PaneReadResult(text: "one", source: "detection")
+        let baseline = await poller.poll(agents: [agent], adapter: first, herdSerial: 1)
+        #expect(baseline.isEmpty)
+        let started = await poller.lastOutputDate(for: agent.id)
+
+        var during = MockHerdrAdapter()
+        during.readScript = ReadScript(["two"])
+        during.onRead = {
+            await poller.noteHerdSerial(4)
+        }
+        let ignored = await poller.poll(agents: [agent], adapter: during, herdSerial: 1)
+        #expect(ignored.isEmpty)
+        #expect(await poller.lastOutputDate(for: agent.id) == started)
+
+        var same = MockHerdrAdapter()
+        same.readResult = PaneReadResult(text: "one", source: "detection")
+        let still = await poller.poll(agents: [agent], adapter: same, herdSerial: 4)
+        #expect(still.isEmpty)
+
+        var changed = MockHerdrAdapter()
+        changed.readResult = PaneReadResult(text: "two", source: "detection")
+        let update = await poller.poll(agents: [agent], adapter: changed, herdSerial: 4)
+        #expect(update[agent.id] != nil)
+
+        // Already behind, before the read. The screen is not fetched.
+        await poller.noteHerdSerial(6)
+        let lateScript = ReadScript(["three"])
+        var late = MockHerdrAdapter()
+        late.readScript = lateScript
+        let dropped = await poller.poll(agents: [agent], adapter: late, herdSerial: 4)
+        #expect(dropped.isEmpty)
+        #expect(lateScript.next() == "three")
+        var stillTwo = MockHerdrAdapter()
+        stillTwo.readResult = PaneReadResult(text: "two", source: "detection")
+        let afterDrop = await poller.poll(agents: [agent], adapter: stillTwo, herdSerial: 6)
+        #expect(afterDrop.isEmpty)
+
+        // Untagged polls are Shepherd's heartbeat. They still record.
+        var untagged = MockHerdrAdapter()
+        untagged.readResult = PaneReadResult(text: "four", source: "detection")
+        let recorded = await poller.poll(agents: [agent], adapter: untagged)
+        #expect(recorded[agent.id] != nil)
+
+        var zero = MockHerdrAdapter()
+        zero.readResult = PaneReadResult(text: "five", source: "detection")
+        let notASerial = await poller.poll(agents: [agent], adapter: zero, herdSerial: 0)
+        #expect(notASerial.isEmpty)
+        var stillFour = MockHerdrAdapter()
+        stillFour.readResult = PaneReadResult(text: "four", source: "detection")
+        let unchanged = await poller.poll(agents: [agent], adapter: stillFour)
+        #expect(unchanged.isEmpty)
+    }
+
+    @Test("A move's herd serial retires a poll of the pane that was left")
+    func retargetNotesTheHerdSerial() async {
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let moved = Agent(id: AgentID("wB:p4"), status: .working)
+        var adapter = MockHerdrAdapter()
+        adapter.readResult = PaneReadResult(text: "one", source: "detection")
+        _ = await poller.poll(agents: [origin], adapter: adapter, herdSerial: 2)
+        _ = await poller.retarget(replacing: [origin.id: moved.id], herdSerial: 5)
+
+        var older = MockHerdrAdapter()
+        older.readResult = PaneReadResult(text: "shell", source: "detection")
+        let dropped = await poller.poll(agents: [origin], adapter: older, herdSerial: 2)
+        #expect(dropped.isEmpty)
+        // "shell" was not stored on the old id. The next screen there is a
+        // first look, not a change from the shell.
+        var probe = MockHerdrAdapter()
+        probe.readResult = PaneReadResult(text: "other", source: "detection")
+        let firstLook = await poller.poll(agents: [origin], adapter: probe)
+        #expect(firstLook.isEmpty)
+
+        var same = MockHerdrAdapter()
+        same.readResult = PaneReadResult(text: "one", source: "detection")
+        let kept = await poller.poll(agents: [moved], adapter: same, herdSerial: 5)
+        #expect(kept.isEmpty)
     }
 
     @Test("Prune drops last-output dates for agents that left the herd")

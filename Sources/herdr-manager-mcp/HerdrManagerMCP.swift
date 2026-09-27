@@ -284,36 +284,86 @@ actor MCPServer {
     /// moves with a session so a cross-workspace move does not make the
     /// next read a first look. A working pane with no baseline is treated
     /// as having just produced output: a failed screen read is not silence.
-    private func agentsForDiagnosis(from herd: HerdSnapshot) async -> [AgentID: Agent] {
+    ///
+    /// `readSerial` is the id captured before this herd request. Tool calls
+    /// overlap, and the slower response is often the earlier herd. A serial
+    /// that loses does not observe, poll, or prune: observing would rewind
+    /// the episode, and pruning would delete the detection baseline the
+    /// later read just stored. That call still reports a clock the ledger
+    /// already has for the same status and seq.
+    private func agentsForDiagnosis(
+        from herd: HerdSnapshot,
+        readSerial: UInt64
+    ) async -> [AgentID: Agent] {
         let now = Date()
-        let observed = episodes.observe(herd.agents, now: now)
+        guard let observed = episodes.observeIfCurrent(herd.agents, readSerial: readSerial, now: now) else {
+            return await agentsKeepingClocks(from: herd)
+        }
+        // Note the serial on the poller before any later await returns an
+        // older pane.read into it. A move does that inside the retarget.
+        // A herd with no move still has to note it, or a poll that is
+        // already waiting stores the earlier screen over this one.
         if !observed.moves.isEmpty {
-            _ = await outputPoller.retarget(replacing: observed.moves)
+            _ = await outputPoller.retarget(replacing: observed.moves, herdSerial: readSerial)
+        } else {
+            await outputPoller.noteHerdSerial(readSerial)
         }
         var agents = buildAgents(from: herd)
         for (id, enteredAt) in observed.enteredAt {
             agents[id]?.enteredAt = enteredAt
         }
 
-        let due = agents.values.filter { agent in
-            guard agent.status == .working else { return false }
-            if let last = lastOutputPoll[agent.id], now.timeIntervalSince(last) < outputPollInterval {
-                return false
+        // The retarget await can let a newer serial adopt. Polling this
+        // snapshot then hashes panes that read already replaced, and the
+        // prune below would drop the baseline it stored.
+        if episodes.isLatestHerd(readSerial) {
+            let due = agents.values.filter { agent in
+                guard agent.status == .working else { return false }
+                if let last = lastOutputPoll[agent.id], now.timeIntervalSince(last) < outputPollInterval {
+                    return false
+                }
+                return true
             }
-            return true
-        }
-        if !due.isEmpty {
-            for agent in due {
-                lastOutputPoll[agent.id] = now
+            if !due.isEmpty {
+                _ = await outputPoller.poll(agents: due, adapter: adapter, herdSerial: readSerial)
+                // After the read. A newer serial noted during it drops
+                // these bytes, and stamping the cadence beforehand would
+                // make that newer herd skip the screen for ten seconds.
+                if episodes.isLatestHerd(readSerial) {
+                    let polledAt = Date()
+                    for agent in due {
+                        lastOutputPoll[agent.id] = polledAt
+                    }
+                }
             }
-            _ = await outputPoller.poll(agents: due, adapter: adapter)
         }
-        let live = Set(agents.keys)
-        lastOutputPoll = lastOutputPoll.filter { live.contains($0.key) }
-        await outputPoller.prune(keeping: live)
+        agents = await stampDetectionOutput(agents)
 
-        // Applied after the loop. Writing `agents` while it is being
-        // iterated is a trap, and each baseline read is an await.
+        if episodes.isLatestHerd(readSerial) {
+            let live = Set(agents.keys)
+            lastOutputPoll = lastOutputPoll.filter { live.contains($0.key) }
+            await outputPoller.prune(keeping: live)
+        }
+        return agents
+    }
+
+    /// The herd read lost the serial race. Report clocks already stored
+    /// for the same episode, and do not move the ledger or the poller.
+    private func agentsKeepingClocks(from herd: HerdSnapshot) async -> [AgentID: Agent] {
+        var agents = buildAgents(from: herd)
+        for id in Array(agents.keys) {
+            guard var agent = agents[id],
+                  let enteredAt = episodes.enteredAt(matching: agent) else { continue }
+            agent.enteredAt = enteredAt
+            agents[id] = agent
+        }
+        return await stampDetectionOutput(agents)
+    }
+
+    /// `lastOutputAt` from the detection baseline. The dictionary is copied
+    /// back after the reads: writing it while it is being iterated, and
+    /// holding that write across an await, is a trap.
+    private func stampDetectionOutput(_ agents: [AgentID: Agent]) async -> [AgentID: Agent] {
         let stamped = Date()
         var outputs: [AgentID: Date] = [:]
         for (id, agent) in agents {
@@ -326,10 +376,11 @@ actor MCPServer {
                 outputs[id] = output
             }
         }
+        var stampedAgents = agents
         for (id, output) in outputs {
-            agents[id]?.lastOutputAt = output
+            stampedAgents[id]?.lastOutputAt = output
         }
-        return agents
+        return stampedAgents
     }
 
     /// Build the MCP inventory from the same authoritative merged view
@@ -458,8 +509,8 @@ actor MCPServer {
     private func handleHerdOverview() async -> [String: Any] {
         do {
             try await ensureConnected()
-            let herd = try await readHerd()
-            var agents = await agentsForDiagnosis(from: herd)
+            let (herd, herdSerial) = try await readNumberedHerd()
+            var agents = await agentsForDiagnosis(from: herd, readSerial: herdSerial)
 
             // Diagnose non-idle agents. The episode clock and the detection
             // baseline come from earlier calls in this process.
@@ -487,8 +538,8 @@ actor MCPServer {
     private func handleAgentList(arguments: [String: Any]) async -> [String: Any] {
         do {
             try await ensureConnected()
-            let herd = try await readHerd()
-            var agents = await agentsForDiagnosis(from: herd)
+            let (herd, herdSerial) = try await readNumberedHerd()
+            var agents = await agentsForDiagnosis(from: herd, readSerial: herdSerial)
 
             // Diagnose non-idle agents. The episode clock and the detection
             // baseline come from earlier calls in this process.
@@ -545,7 +596,7 @@ actor MCPServer {
     private func handleAgentInspect(arguments: [String: Any]) async -> [String: Any] {
         do {
             try await ensureConnected()
-            let herd = try await readHerd()
+            let (herd, herdSerial) = try await readNumberedHerd()
             let info: HerdrAgentInfo
             switch resolveAgent(arguments: arguments, herd: herd) {
             case .success(let resolved):
@@ -561,7 +612,7 @@ actor MCPServer {
                 return makeToolError("Rate limit exceeded. Try again in \(retry) seconds.")
             }
 
-            var agents = await agentsForDiagnosis(from: herd)
+            var agents = await agentsForDiagnosis(from: herd, readSerial: herdSerial)
 
             // Diagnose
             var verdict: Verdict = .unclassifiable(reason: "agent not found")
@@ -678,7 +729,7 @@ actor MCPServer {
     private func handleAgentDiagnose(arguments: [String: Any]) async -> [String: Any] {
         do {
             try await ensureConnected()
-            let herd = try await readHerd()
+            let (herd, herdSerial) = try await readNumberedHerd()
             let info: HerdrAgentInfo
             switch resolveAgent(arguments: arguments, herd: herd) {
             case .success(let resolved):
@@ -692,7 +743,7 @@ actor MCPServer {
                 return makeToolError("Rate limit exceeded. Try again in \(retry) seconds.")
             }
 
-            let agents = await agentsForDiagnosis(from: herd)
+            let agents = await agentsForDiagnosis(from: herd, readSerial: herdSerial)
             let agentId = AgentID(info.paneId)
             guard let agent = agents[agentId] else {
                 return makeToolError("Agent not found: \(info.paneId)")
@@ -1705,10 +1756,18 @@ actor MCPServer {
     /// One herd read, ordered against every other MCP herd read and against
     /// `checkWritesEnabled`. The serial is captured here, with no await
     /// before the request. `agent.answer` captures its own serials because
-    /// the answer cap records the same id.
+    /// the answer cap records the same id. Diagnosing tools keep the serial
+    /// (`readNumberedHerd`) so a slower earlier snapshot does not rewind
+    /// the episode clock.
     private func readHerd() async throws -> HerdSnapshot {
+        let (snapshot, _) = try await readNumberedHerd()
+        return snapshot
+    }
+
+    private func readNumberedHerd() async throws -> (HerdSnapshot, UInt64) {
         let readSerial = captureHerdReadSerial()
-        return try await adapter.herdSnapshot(readSerial: readSerial)
+        let snapshot = try await adapter.herdSnapshot(readSerial: readSerial)
+        return (snapshot, readSerial)
     }
 
     // MARK: - Write-Gate Helper

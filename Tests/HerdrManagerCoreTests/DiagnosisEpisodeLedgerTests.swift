@@ -211,6 +211,72 @@ struct DiagnosisEpisodeLedgerTests {
         #expect(back.moves.isEmpty)
     }
 
+    @Test("An older herd serial does not rewind the episode a newer read adopted")
+    func olderSerialDoesNotRewind() {
+        var ledger = DiagnosisEpisodeLedger()
+        let first = Date(timeIntervalSince1970: 1_000)
+        let later = Date(timeIntervalSince1970: 1_600)
+        let blocked = info(pane: "wA:p1", status: "blocked", seq: 5, session: session("abc"))
+
+        // A missing serial is not a herd. It must not become the latest.
+        #expect(ledger.observeIfCurrent([blocked], readSerial: 0, now: first) == nil)
+        #expect(!ledger.isLatestHerd(0))
+
+        let opened = ledger.observeIfCurrent([blocked], readSerial: 2, now: first)
+        #expect(opened?.enteredAt[AgentID("wA:p1")] == first)
+        #expect(ledger.isLatestHerd(2))
+
+        // The slow read: a different status, captured earlier, returning now.
+        let stale = ledger.observeIfCurrent(
+            [info(pane: "wA:p1", status: "working", seq: 1, session: session("abc"))],
+            readSerial: 1,
+            now: later
+        )
+        #expect(stale == nil)
+        #expect(!ledger.isLatestHerd(1))
+        #expect(ledger.enteredAt(matching: Agent(
+            id: AgentID("wA:p1"),
+            status: .blocked,
+            stateChangeSeq: 5,
+            enteredAt: later
+        )) == first)
+        // The stale snapshot's status is not the episode the ledger kept.
+        #expect(ledger.enteredAt(matching: Agent(
+            id: AgentID("wA:p1"),
+            status: .working,
+            stateChangeSeq: 1
+        )) == nil)
+
+        let moved = ledger.observeIfCurrent(
+            [info(pane: "wB:p4", status: "blocked", seq: 5, session: session("abc"))],
+            readSerial: 4,
+            now: later
+        )
+        #expect(moved?.moves == [AgentID("wA:p1"): AgentID("wB:p4")])
+        #expect(moved?.enteredAt[AgentID("wB:p4")] == first)
+        #expect(!ledger.isLatestHerd(2))
+        #expect(ledger.isLatestHerd(4))
+        #expect(ledger.enteredAt(matching: Agent(
+            id: AgentID("wA:p1"),
+            status: .blocked,
+            stateChangeSeq: 5
+        )) == nil)
+
+        // The same serial again, even with a status that would reset the clock.
+        let repeated = ledger.observeIfCurrent(
+            [info(pane: "wB:p4", status: "working", seq: 9, session: session("abc"))],
+            readSerial: 4,
+            now: first
+        )
+        #expect(repeated == nil)
+        #expect(ledger.enteredAt(matching: Agent(
+            id: AgentID("wB:p4"),
+            status: .blocked,
+            stateChangeSeq: 5
+        )) == first)
+        #expect(ledger.isLatestHerd(4))
+    }
+
     @Test("Silence is timed from a detection baseline, not from a screen that was never read")
     func outputDateNeedsABaseline() {
         let now = Date(timeIntervalSince1970: 2_000)

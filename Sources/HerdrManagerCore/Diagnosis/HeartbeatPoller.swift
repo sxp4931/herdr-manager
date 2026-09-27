@@ -33,6 +33,15 @@ public actor HeartbeatPoller {
     /// not recorded here.
     private var outputChanges: [AgentID: Date] = [:]
 
+    /// Herd-read serial of the diagnosis that currently owns this poller.
+    ///
+    /// MCP diagnoses overlap. A poll tagged with an older serial does not
+    /// record: that read is the earlier herd, and storing it would replace
+    /// the screen a later read just hashed, or plant a first look on a pane
+    /// the later read already dropped. An untagged poll always records.
+    /// Shepherd does not tag its polls; it has one heartbeat task.
+    private var latestPollSerial: UInt64 = 0
+
     /// Origins whose screen was already carried to a pane id.
     ///
     /// The poll and `pane.moved` both retarget the same hop. Whichever
@@ -50,8 +59,18 @@ public actor HeartbeatPoller {
     /// - Parameters:
     ///   - agents: The agents to poll (typically only working agents).
     ///   - adapter: The HerdrAdapter to use for pane reads.
+    ///   - herdSerial: The herd read this poll belongs to. Omit it and the
+    ///     result is always recorded. A serial older than one already noted
+    ///     is dropped, including when a newer read notes its serial while
+    ///     this one is waiting on `pane.read`.
     /// - Returns: A dictionary of AgentID → Date for agents whose output changed.
-    public func poll(agents: [Agent], adapter: HerdrAdapter) async -> [AgentID: Date] {
+    public func poll(
+        agents: [Agent],
+        adapter: HerdrAdapter,
+        herdSerial: UInt64? = nil
+    ) async -> [AgentID: Date] {
+        note(herdSerial)
+        guard acceptsPoll(herdSerial) else { return [:] }
         var updates: [AgentID: Date] = [:]
 
         // Sequential approach for hash comparison (actor-isolated state)
@@ -65,6 +84,9 @@ public actor HeartbeatPoller {
                 )
                 let hash = Self.sha256(result.text)
                 let now = Date()
+                // A newer herd read can have noted its serial during this
+                // read. The rest of this poll is the same earlier herd.
+                guard acceptsPoll(herdSerial) else { break }
 
                 if let previousHash = hashes[agent.id] {
                     if hash != previousHash {
@@ -139,7 +161,14 @@ public actor HeartbeatPoller {
     /// prune cannot run between the panes of a single poll. Each hop
     /// still follows `retarget(from:to:)`, including a hop that already
     /// moved and an origin that was never polled.
-    public func retarget(replacing moves: [AgentID: AgentID]) -> [AgentID: Date] {
+    public func retarget(
+        replacing moves: [AgentID: AgentID],
+        herdSerial: UInt64? = nil
+    ) -> [AgentID: Date] {
+        // A poll waiting on pane.read resumes only after this call returns.
+        // Noting the serial first is what makes that poll drop its bytes
+        // instead of storing them over the hashes moved here.
+        note(herdSerial)
         var carried: [AgentID: Date] = [:]
         for (from, to) in moves {
             if let date = retarget(from: from, to: to) {
@@ -206,6 +235,30 @@ public actor HeartbeatPoller {
         return carried
     }
 
+    /// Remember a herd-read serial that did not retarget or poll.
+    ///
+    /// A diagnosis whose panes are all blocked still owns the poller. An
+    /// in-flight poll of an earlier read has to notice that before it
+    /// stores, or its screen replaces this herd's.
+    public func noteHerdSerial(_ serial: UInt64) {
+        note(serial)
+    }
+
+    /// Raise the poll serial. A smaller one is an earlier read and stays behind.
+    private func note(_ serial: UInt64?) {
+        guard let serial, serial > latestPollSerial else { return }
+        latestPollSerial = serial
+    }
+
+    /// Untagged polls record. A tagged poll records only while its serial
+    /// is the one most recently noted. Zero is not a serial: a caller that
+    /// failed to capture one must not count as the current herd.
+    private func acceptsPoll(_ herdSerial: UInt64?) -> Bool {
+        guard let herdSerial else { return true }
+        guard herdSerial > 0 else { return false }
+        return herdSerial == latestPollSerial
+    }
+
     /// Remove tracking for an agent (e.g., when it's closed).
     public func remove(agentId: AgentID) {
         hashes.removeValue(forKey: agentId)
@@ -236,6 +289,7 @@ public actor HeartbeatPoller {
         lastOutputDates.removeAll()
         outputChanges.removeAll()
         relocatedTo.removeAll()
+        latestPollSerial = 0
     }
 
     /// Get the last known output date for an agent.

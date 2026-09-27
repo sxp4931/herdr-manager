@@ -14,6 +14,14 @@ import Foundation
 /// An empty session value is not an identity. Two panes sharing one value
 /// do not trade clocks. A session string that merely continues another
 /// (`abc` and `abc|extra`) is a different occupant.
+///
+/// MCP runs tool calls concurrently. Each diagnosing call carries the
+/// herd-read serial captured before its request, and the later capture is
+/// the later herd. `observeIfCurrent` ignores a serial that is not strictly
+/// newer, so a slow earlier read cannot replace the episode a later read
+/// already stored or forget a pane that read added. The direct `observe`
+/// does not record a serial; callers that order overlapping reads use
+/// `observeIfCurrent` only.
 public struct DiagnosisEpisodeLedger: Sendable {
     /// Pane ids whose episode continued onto a new id.
     ///
@@ -40,6 +48,9 @@ public struct DiagnosisEpisodeLedger: Sendable {
     }
 
     private var episodes: [AgentID: Episode] = [:]
+    /// Highest herd-read serial `observeIfCurrent` adopted. Zero until the
+    /// first. A read that started earlier returns later with a smaller one.
+    private var latestHerdSerial: UInt64 = 0
 
     public init() {}
 
@@ -88,6 +99,44 @@ public struct DiagnosisEpisodeLedger: Sendable {
         }
         episodes = episodes.filter { listed[$0.key] != nil }
         return Observation(enteredAt: enteredAt, moves: moves)
+    }
+
+    /// Observe `infos` when `readSerial` is strictly newer than every serial
+    /// already adopted. Nil leaves every clock where it is.
+    ///
+    /// The serial is the one captured before the herd request, not the order
+    /// the responses happened to resume in. An equal serial is the same
+    /// read seen twice and does not open a new episode. Zero never adopts:
+    /// a caller that failed to capture a serial must not wipe the ledger.
+    public mutating func observeIfCurrent(
+        _ infos: [HerdrAgentInfo],
+        readSerial: UInt64,
+        now: Date = Date()
+    ) -> Observation? {
+        guard readSerial > latestHerdSerial else { return nil }
+        latestHerdSerial = readSerial
+        return observe(infos, now: now)
+    }
+
+    /// True while `readSerial` is the herd this ledger most recently adopted.
+    ///
+    /// A later `observeIfCurrent` makes this false. A caller that awaited
+    /// between adopting and pruning uses that: the older snapshot must not
+    /// delete panes, or a detection baseline, the newer read just stored.
+    public func isLatestHerd(_ readSerial: UInt64) -> Bool {
+        readSerial > 0 && readSerial == latestHerdSerial
+    }
+
+    /// Clock for `agent` when this ledger still has that status episode.
+    ///
+    /// A read that lost the serial race reports this instead of observing.
+    /// The same pane id on a different status or seq does not borrow the
+    /// clock: that episode is the one the winning read already replaced.
+    public func enteredAt(matching agent: Agent) -> Date? {
+        guard let episode = episodes[agent.id],
+              episode.status == agent.status,
+              episode.seq == agent.stateChangeSeq else { return nil }
+        return episode.enteredAt
     }
 
     /// `lastOutputAt` for one agent, given the detection baseline.
