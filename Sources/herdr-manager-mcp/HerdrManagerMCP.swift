@@ -492,6 +492,25 @@ actor MCPServer {
     // MARK: - agent.list
 
     private func handleAgentList(arguments: [String: Any]) async -> [String: Any] {
+        // An unknown word used to be ignored, which returned the whole
+        // herd. `gone` and `silent` are the marks the overview prints;
+        // they are not herdr statuses. `working` stays herdr's status,
+        // so a crash is still included. Check this before any socket call.
+        let statusFilter: AgentListFilter.Status
+        if let statusStr = arguments["status"] as? String {
+            switch AgentListFilter.parseStatus(statusStr) {
+            case .parsed(let parsed):
+                statusFilter = parsed
+            case .unrecognized(let text):
+                return makeToolError(
+                    "Invalid status '\(text)'. Must be one of: \(AgentListFilter.statusWords)"
+                )
+            }
+        } else {
+            statusFilter = .any
+        }
+        let workspaceQuery = arguments["workspace"] as? String ?? ""
+
         do {
             try await ensureConnected()
             let (herd, herdSerial) = try await readNumberedHerd()
@@ -509,17 +528,13 @@ actor MCPServer {
 
             var agentList = Array(agents.values)
 
-            // Apply filters
-            if let statusStr = arguments["status"] as? String,
-               let filterStatus = AgentStatus(rawValue: statusStr) {
-                agentList = agentList.filter { $0.status == filterStatus }
-            }
-            if let workspace = arguments["workspace"] as? String {
-                agentList = agentList.filter { agent in
-                    let wsName = herd.workspaceNames[agent.id.workspaceId] ?? agent.id.workspaceId
-                    return wsName.lowercased().contains(workspace.lowercased()) ||
-                           agent.id.workspaceId.lowercased().contains(workspace.lowercased())
-                }
+            agentList = agentList.filter { agent in
+                AgentListFilter.matchesStatus(agent, status: statusFilter)
+                    && AgentListFilter.matchesWorkspace(
+                        agent,
+                        query: workspaceQuery,
+                        workspaceNames: herd.workspaceNames
+                    )
             }
             // Same fields as inspect, tail, and diagnose. The collapsed
             // row name hid a pane label or a terminal title those tools
@@ -2250,18 +2265,18 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "agent.list",
-            "description": "List all agents with their current status. The ID column is the agent_id other tools accept, in workspace:pane form (for example w5:p2), not the bare pane suffix. Optionally filter by status, workspace, or the same query text agent.inspect accepts.",
+            "description": "List all agents with their current status. The ID column is the agent_id other tools accept, in workspace:pane form (for example w5:p2), not the bare pane suffix. Optionally filter by herdr status, by the overview marks gone and silent, by workspace, or by the same query text agent.inspect accepts. An unknown status is an error.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
                     "status": [
                         "type": "string",
-                        "enum": ["blocked", "working", "idle", "done", "unknown"],
-                        "description": "Filter by agent status"
+                        "enum": ["blocked", "working", "idle", "done", "unknown", "gone", "silent", "quiet"],
+                        "description": "herdr status (blocked, working, idle, done, unknown) or an overview mark (gone, silent; quiet is silent). Case-insensitive; surrounding space is ignored. A blank value does not filter. working is herdr's status, so a pane marked GONE or silent can still be included. An unknown word is an error."
                     ],
                     "workspace": [
                         "type": "string",
-                        "description": "Filter by workspace name or ID (substring match)"
+                        "description": "Filter by workspace name or ID (substring match). Surrounding space is ignored. A blank value does not filter."
                     ],
                     "query": [
                         "type": "string",

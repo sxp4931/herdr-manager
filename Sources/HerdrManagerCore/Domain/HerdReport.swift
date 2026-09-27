@@ -137,3 +137,74 @@ public enum HerdReport: Sendable {
         return string + String(repeating: " ", count: width - string.count)
     }
 }
+
+/// How `agent.list` narrows a herd before it prints.
+///
+/// herdr's five statuses are matched as herdr reported them. `working`
+/// therefore still includes a pane whose process is gone, and a quiet
+/// worker: that row's status string did not change. `gone` and `silent`
+/// are the marks the overview prints, which are not statuses. `quiet` is
+/// the word the tool descriptions use for that same mark. An unknown word
+/// is refused rather than ignored, because ignoring it returned the whole
+/// herd as if the filter had applied.
+public enum AgentListFilter: Sendable {
+    public enum Status: Equatable, Sendable {
+        case any
+        case herdr(AgentStatus)
+        case gone
+        case silent
+    }
+
+    public enum StatusParse: Equatable, Sendable {
+        case parsed(Status)
+        case unrecognized(String)
+    }
+
+    /// The words a rejection lists. `quiet` is accepted as `silent`.
+    public static let statusWords = "blocked, working, idle, done, unknown, gone, silent, quiet"
+
+    public static func parseStatus(_ raw: String) -> StatusParse {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .parsed(.any) }
+        switch trimmed.lowercased() {
+        case "gone":
+            return .parsed(.gone)
+        case "silent", "quiet":
+            return .parsed(.silent)
+        default:
+            if let status = AgentStatus(rawValue: trimmed.lowercased()) {
+                return .parsed(.herdr(status))
+            }
+            return .unrecognized(trimmed)
+        }
+    }
+
+    public static func matchesStatus(_ agent: Agent, status: Status) -> Bool {
+        switch status {
+        case .any:
+            return true
+        case .herdr(let expected):
+            return agent.status == expected
+        case .gone:
+            return agent.verdict.isProcessGone
+        case .silent:
+            return AttentionTriage.isActionablySilent(agent)
+        }
+    }
+
+    /// Substring match on the workspace name the list prints, and on the
+    /// workspace id. Blank is not a filter. Comparison ignores case and
+    /// surrounding space, which a padded copy of the printed name used to
+    /// miss entirely.
+    public static func matchesWorkspace(
+        _ agent: Agent,
+        query: String,
+        workspaceNames: [String: String]
+    ) -> Bool {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return true }
+        let printed = workspaceNames[agent.id.workspaceId] ?? agent.id.workspaceId
+        if printed.lowercased().contains(needle) { return true }
+        return agent.id.workspaceId.lowercased().contains(needle)
+    }
+}

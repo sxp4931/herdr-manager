@@ -69,6 +69,133 @@ struct HerdReportTests {
     }
 }
 
+@Suite("agent.list status and workspace filters")
+struct AgentListFilterTests {
+    private let names = ["w1": "Proj", "w2": "Other", "w100": "Long"]
+
+    private func sample() -> [Agent] {
+        let blocked = Agent(
+            id: AgentID("w1:p1"),
+            name: "Review",
+            status: .blocked,
+            verdict: .awaitingInput(BlockClassification(
+                kind: .confirmation, since: Date(), summary: "confirmation prompt"
+            )),
+            workspaceName: "not the printed name"
+        )
+        let working = Agent(
+            id: AgentID("w1:p2"),
+            name: "Build",
+            status: .working,
+            verdict: .healthy,
+            workspaceName: "Proj"
+        )
+        let quiet = Agent(
+            id: AgentID("w1:p3"),
+            name: "Quiet",
+            status: .working,
+            verdict: .silent(since: Date(), cpu: nil),
+            workspaceName: "Proj"
+        )
+        let crashedWorking = Agent(
+            id: AgentID("w1:p4"),
+            name: "Crash",
+            status: .working,
+            verdict: .processGone(lastLine: "zsh"),
+            workspaceName: "Proj"
+        )
+        let crashedBlocked = Agent(
+            id: AgentID("w2:p1"),
+            name: "Prompt",
+            status: .blocked,
+            verdict: .processGone(lastLine: "zsh"),
+            workspaceName: "Other"
+        )
+        let done = Agent(
+            id: AgentID("w2:p2"),
+            name: "Finished",
+            status: .done,
+            verdict: .healthy,
+            workspaceName: "Other"
+        )
+        let doneQuiet = Agent(
+            id: AgentID("w2:p3"),
+            name: "Stale",
+            status: .done,
+            verdict: .silent(since: Date(), cpu: nil),
+            workspaceName: "Other"
+        )
+        let doneGone = Agent(
+            id: AgentID("w2:p4"),
+            name: "Died",
+            status: .done,
+            verdict: .processGone(lastLine: "zsh"),
+            workspaceName: "Other"
+        )
+        let idle = Agent(
+            id: AgentID("w100:p1"),
+            name: "Idle",
+            status: .idle,
+            verdict: .healthy,
+            workspaceName: "Long"
+        )
+        return [blocked, working, quiet, crashedWorking, crashedBlocked, done, doneQuiet, doneGone, idle]
+    }
+
+    private func ids(status: String, workspace: String = "") -> [String] {
+        guard case .parsed(let parsed) = AgentListFilter.parseStatus(status) else {
+            return ["unrecognized"]
+        }
+        return sample().filter {
+            AgentListFilter.matchesStatus($0, status: parsed)
+                && AgentListFilter.matchesWorkspace($0, query: workspace, workspaceNames: names)
+        }.map(\.id.raw).sorted()
+    }
+
+    @Test("herdr statuses keep their rows, including a crash still marked working")
+    func herdrStatuses() {
+        #expect(AgentListFilter.parseStatus(" WORKING ") == .parsed(.herdr(.working)))
+        #expect(ids(status: "working") == ["w1:p2", "w1:p3", "w1:p4"])
+        #expect(ids(status: " blocked ") == ["w1:p1", "w2:p1"])
+        #expect(ids(status: "done") == ["w2:p2", "w2:p3", "w2:p4"])
+        #expect(ids(status: "idle") == ["w100:p1"])
+        #expect(AgentListFilter.parseStatus("unknown") == .parsed(.herdr(.unknown)))
+        #expect(ids(status: "   ") == [
+            "w100:p1", "w1:p1", "w1:p2", "w1:p3", "w1:p4", "w2:p1", "w2:p2", "w2:p3", "w2:p4"
+        ])
+    }
+
+    @Test("gone and silent select the overview marks, and a stale quiet on done does not")
+    func marks() {
+        #expect(AgentListFilter.parseStatus(" GONE ") == .parsed(.gone))
+        #expect(AgentListFilter.parseStatus("Quiet") == .parsed(.silent))
+        #expect(ids(status: "gone") == ["w1:p4", "w2:p1", "w2:p4"])
+        #expect(ids(status: "silent") == ["w1:p3"])
+        #expect(ids(status: " quiet ") == ["w1:p3"])
+    }
+
+    @Test("An unknown status is refused, and it is not the whole herd")
+    func unknownStatus() {
+        #expect(AgentListFilter.parseStatus(" running ") == .unrecognized("running"))
+        #expect(AgentListFilter.parseStatus("blockedd") == .unrecognized("blockedd"))
+        #expect(ids(status: "running") == ["unrecognized"])
+    }
+
+    @Test("A workspace filter trims, ignores case, and still matches the id")
+    func workspace() {
+        #expect(ids(status: "working", workspace: "  proj ") == ["w1:p2", "w1:p3", "w1:p4"])
+        #expect(ids(status: "gone", workspace: "W2") == ["w2:p1", "w2:p4"])
+        #expect(ids(status: "", workspace: "w100") == ["w100:p1"])
+        #expect(ids(status: "", workspace: "  ") == [
+            "w100:p1", "w1:p1", "w1:p2", "w1:p3", "w1:p4", "w2:p1", "w2:p2", "w2:p3", "w2:p4"
+        ])
+        #expect(ids(status: "working", workspace: "nope") == [])
+        // The list prints the snapshot name, not a different name stored on the row.
+        #expect(ids(status: "blocked", workspace: "not the printed name") == [])
+        #expect(ids(status: "blocked", workspace: "pro") == ["w1:p1"])
+    }
+}
+
 @Suite("A copied pane suffix resolves only when it names one agent")
 struct HerdResolveTests {
     @Test("The full id wins, and a unique suffix still finds that pane")
