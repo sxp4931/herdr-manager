@@ -1484,6 +1484,53 @@ struct TokenMeterCompactionTests {
         #expect(snapshot.agentSummary(for: claude.id, window: .day).hasUsage == false)
     }
 
+    @Test("A live OpenCode row, stored as a custom kind, still matches every provider")
+    func customOpenCodeKindMatchesAnyProvider() {
+        let now = date("2026-01-15T13:00:00Z")
+        // The store's row is AgentKind.resolved, which is .custom so the
+        // settings fingerprint stays custom:opencode. The enum case is
+        // the same runtime.
+        let opencode = Agent(id: AgentID("w1:p1"), kind: .custom("opencode"), cwd: "/repo")
+        let claude = Agent(id: AgentID("w1:p2"), kind: .custom("claude"), cwd: "/repo")
+        var aggregator = TokenMeterAggregator(
+            agents: [opencode, claude],
+            priceBook: priceBook,
+            now: now,
+            calendar: utcCalendar()
+        )
+
+        aggregator.add([
+            event("claude-1", session: "a", model: "claude-sonnet-4.5", at: "2026-01-15T11:00:00Z",
+                  usage: TokenUsage(inputTokens: 100, outputTokens: 1)),
+            event("codex-1", provider: .codex, session: "c", model: nil, at: "2026-01-15T11:05:00Z",
+                  usage: TokenUsage(inputTokens: 40, outputTokens: 2)),
+            event("claude-2", session: "a", model: "claude-sonnet-4.5", at: "2026-01-15T11:10:00Z",
+                  usage: TokenUsage(inputTokens: 100, outputTokens: 1)),
+        ])
+        let snapshot = aggregator.snapshot()
+
+        #expect(TokenMeterProvider.matchesAnyUsageProvider(.opencode))
+        #expect(TokenMeterProvider.matchesAnyUsageProvider(.custom("OpenCode")))
+        #expect(!TokenMeterProvider.matchesAnyUsageProvider(.custom("claude")))
+        #expect(!TokenMeterProvider.matchesAnyUsageProvider(.claude))
+        #expect(snapshot.ambiguousAttributionCount == 2)
+        #expect(snapshot.agentSummary(for: opencode.id, window: .day).usage.inputTokens == 40)
+        #expect(snapshot.agentSummary(for: claude.id, window: .day).hasUsage == false)
+
+        var alone = TokenMeterAggregator(
+            agents: [Agent(id: opencode.id, kind: .custom("opencode"), cwd: "/repo")],
+            priceBook: priceBook,
+            now: now,
+            calendar: utcCalendar()
+        )
+        alone.add([
+            event("claude-1", session: "a", model: "claude-sonnet-4.5", at: "2026-01-15T11:00:00Z",
+                  usage: TokenUsage(inputTokens: 100, outputTokens: 1)),
+        ])
+        #expect(alone.snapshot().ambiguousAttributionCount == 0)
+        #expect(alone.snapshot().agentSummary(for: opencode.id, window: .day).usage.inputTokens == 100)
+    }
+
     @Test("A cached log is re-read when the clock moves back before its compacted history")
     func cacheRescansWhenCutoffMovesBack() async throws {
         let home = FileManager.default.temporaryDirectory

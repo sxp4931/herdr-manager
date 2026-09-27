@@ -1649,13 +1649,11 @@ struct TokenMeterAggregator {
             (window: window, start: window.startDate(now: now, calendar: calendar))
         }
         self.candidates = agents.map { agent in
-            AgentCandidate(
+            let matchesAnyProvider = TokenMeterProvider.matchesAnyUsageProvider(agent.kind)
+            return AgentCandidate(
                 id: agent.id,
-                // opencode is one CLI that can run deepseek/qwen/local
-                // models, so it matches any priced event whose working
-                // directory matches, regardless of the event's provider.
-                provider: agent.kind == .opencode ? nil : TokenMeterProvider(agentKind: agent.kind),
-                matchesAnyProvider: agent.kind == .opencode,
+                provider: matchesAnyProvider ? nil : TokenMeterProvider(agentKind: agent.kind),
+                matchesAnyProvider: matchesAnyProvider,
                 cwd: Self.normalizedAgentCWD(agent.cwd)
             )
         }
