@@ -1216,6 +1216,11 @@ private enum ShellForeground {
                 // `nan` do not. `--experimental-test-isolation nope`
                 // exits only when `--test` is also set. Without it, and
                 // with `none` or `process`, the path is still Letta.
+                // `--test` with `--interactive`, `-i`, or `--watch-path`
+                // exits before the file, so that path is not Letta.
+                // `--interactive` alone, and `--watch-path` without
+                // `--test`, still are. `--watch` without a path still
+                // runs beside `--test`.
                 // Bun rejects `-W`,
                 // `-X`, `-S`, `-L`, and `-o`; the path after one is
                 // not Letta. A bun value that starts with `-` is not
@@ -1573,6 +1578,11 @@ private enum ShellForeground {
     /// is the value of `--title` is not a print, and `run` in that slot
     /// is not the subcommand. `--interactive`, `--watch`, `--hot`,
     /// `--bun`, and `bun --not-a-flag` still run the file.
+    /// `node --test` with `--interactive`, `-i`, or `--watch-path`
+    /// does not: Node 22.23 exits, and the path is not the script.
+    /// `--watch` without `--watch-path` still runs beside `--test`.
+    /// `--interactive` and `--watch-path` without `--test` still name
+    /// the file. `--test-only` is not `--test`.
     /// Node 22.23 exits on a long option it does not recognize, so
     /// `node --not-a-flag` and `node --revision` are not the script.
     /// A boolean Node or V8 accepts (`--watch`, `--use-strict`,
@@ -1656,8 +1666,11 @@ private enum ShellForeground {
     private static func runtimeScript(_ argv: [String]) -> String? {
         let runtime = argv.first.map { shellBase($0) } ?? ""
         // Node exits before the file when two booleans cannot be set
-        // together. A script written first is already the program:
-        // options after it are arguments, and that prefix has no conflict.
+        // together, and when `--test` is combined with `--interactive`
+        // (`-i` is the same flag) or with `--watch-path`. A script
+        // written first is already the program: options after it are
+        // arguments, and that prefix has no conflict. `--watch` without
+        // a path still runs beside `--test`.
         if isNodeRuntime(runtime), nodePrefixFlags(argv).conflicts {
             return nil
         }
@@ -2939,13 +2952,28 @@ private enum ShellForeground {
         /// Final `--test` / `--no-test` state. `--test=true` is on:
         /// Node's boolean parser ignores the attached word.
         var testRunner = false
+        /// Final `--interactive` / `-i` / `--no-interactive` state.
+        /// `--interactive=false` is still on: the parser ignores the
+        /// attached word. `-i` is the alias and is set by the scan.
+        var interactive = false
+        /// `--watch-path` appeared before the script. The path may be
+        /// attached (`--watch-path=/tmp`) or the next word. `--watch`
+        /// without this flag is not a conflict with `--test`.
+        var watchPath = false
         /// Last `--experimental-test-isolation` operand before the
         /// script. Nil when that flag was not set. Node keeps the last
         /// one, including an empty word.
         var testIsolation: String?
 
+        /// TLS pair, CA pair, or `--test` with `--interactive` / `-i`
+        /// or with `--watch-path`. `CheckOptions` rejects each of those
+        /// before the file runs. `--watch` alone is not here: it still
+        /// runs beside `--test`. A later `--no-` wins for the booleans.
+        /// `--watch-path` is not a boolean, so it stays set.
         var conflicts: Bool {
             (tlsMin13 && tlsMax12) || (opensslCA && bundledCA)
+                || (testRunner && interactive)
+                || (testRunner && watchPath)
         }
 
         mutating func set(_ flag: NodeBoolFlag, on: Bool) {
@@ -2958,6 +2986,7 @@ private enum ShellForeground {
             case .bundled: bundledCA = on
             case .permission: permission = on
             case .test: testRunner = on
+            case .interactive: interactive = on
             }
         }
     }
@@ -2971,6 +3000,7 @@ private enum ShellForeground {
         case bundled
         case permission
         case test
+        case interactive
     }
 
     private static func nodePrefixFlags(_ argv: [String]) -> NodePrefix {
@@ -2980,6 +3010,13 @@ private enum ShellForeground {
         while index < argv.count {
             let arg = argv[index]
             if arg == "--" || !arg.hasPrefix("-") { break }
+            // `-i` is `--interactive`. Node does not cluster shorts, so
+            // `-ii` is a different word and is not this flag.
+            if arg == "-i" {
+                state.interactive = true
+                index += 1
+                continue
+            }
             if let (flag, on) = nodeBooleanUpdate(arg) {
                 state.set(flag, on: on)
                 index += 1
@@ -2988,6 +3025,15 @@ private enum ShellForeground {
             if let isolation = nodeIsolationOperand(arg, argv: argv, index: index) {
                 state.testIsolation = isolation.value
                 index += isolation.width
+                continue
+            }
+            // Implies `--watch`, but the `--test` conflict is the path
+            // list, not watch mode. `--watch` without this flag still
+            // runs the file. A dash word in the value slot still exits
+            // in the walk; counting the flag here does not name a script.
+            if arg == "--watch-path" || arg.hasPrefix("--watch-path=") {
+                state.watchPath = true
+                index += arg.hasPrefix("--watch-path=") ? 1 : 2
                 continue
             }
             let width = arg.contains("=") || !nodeTakesSeparateValue(arg) ? 1 : 2
@@ -3042,6 +3088,7 @@ private enum ShellForeground {
         case "--use-bundled-ca": flag = .bundled
         case "--permission", "--experimental-permission": flag = .permission
         case "--test": flag = .test
+        case "--interactive": flag = .interactive
         default: flag = nil
         }
         guard let flag else { return nil }

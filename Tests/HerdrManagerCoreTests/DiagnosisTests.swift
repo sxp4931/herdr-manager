@@ -5454,6 +5454,159 @@ struct DiagnoserCpuSamplePidTests {
         )
         #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)
     }
+
+    @Test("node --test with --interactive or --watch-path is not the agent script")
+    func nodeTestInteractiveOrWatchPathIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23 exits on `--test` with `--interactive` / `-i`, and
+        // on `--test` with `--watch-path`. The attached boolean word is
+        // ignored, so `--interactive=false` is still interactive. The
+        // last `--no-` wins. `--test=` is still an exit on its own.
+        let rejected: [(String, [String])] = [
+            ("interactive", ["node", "--test", "--interactive", "/usr/local/bin/codex"]),
+            ("interactive-first", ["nodejs", "--interactive", "--test", "/tmp/codex"]),
+            ("short", ["node.exe", "-i", "--test", "/usr/local/bin/codex"]),
+            ("short-after", ["node", "--test", "-i", "/tmp/codex"]),
+            ("eq-true", ["nodejs", "--test", "--interactive=true", "/usr/local/bin/codex"]),
+            ("eq-false", ["node", "--interactive=false", "--test", "/tmp/codex"]),
+            ("reenabled", [
+                "node.exe", "--no-interactive", "--interactive", "--test", "/usr/local/bin/codex",
+            ]),
+            ("short-reenabled", ["node", "--no-interactive", "-i", "--test", "/tmp/codex"]),
+            ("watch-path", ["node", "--test", "--watch-path", "/tmp", "/usr/local/bin/codex"]),
+            ("watch-path-first", ["nodejs", "--watch-path", "/tmp", "--test", "/tmp/codex"]),
+            ("watch-path-eq", ["node.exe", "--test", "--watch-path=/tmp", "/usr/local/bin/codex"]),
+            ("two-paths", [
+                "node", "--watch-path", "/tmp", "--watch-path", "/var", "--test", "/usr/local/bin/codex",
+            ]),
+            ("title", ["nodejs", "--title", "helper", "--test", "--interactive", "/tmp/codex"]),
+            ("isolation-none", [
+                "node", "--test", "--experimental-test-isolation", "none", "--interactive",
+                "/usr/local/bin/codex",
+            ]),
+            ("isolation-process", [
+                "node.exe", "--experimental-test-isolation=process", "--watch-path", "/tmp", "--test",
+                "/tmp/codex",
+            ]),
+            ("cleared-then-test", [
+                "node", "--watch-path", "/tmp", "--no-test", "--test", "/usr/local/bin/codex",
+            ]),
+            ("require", ["nodejs", "--require", "./preload.js", "-i", "--test", "/tmp/codex"]),
+            ("path-only", ["node", "--test", "--watch-path", "/usr/local/bin/codex"]),
+        ]
+        for (label, argv) in rejected {
+            let exited = process(4, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(label) ranked the path")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(label) took the sample from the leader slot"
+            )
+        }
+        #expect(
+            Diagnoser.cpuSamplePid([
+                process(4, "node", argv: ["node", "--test", "--interactive", "/tmp/codex"])
+            ]) == 4
+        )
+
+        // Without `--test` the file runs, including `--watch` beside
+        // `--test` and a later `--no-test`. `--test-only` is not the
+        // runner. A script written first is already the program, so
+        // flags after it are arguments. The word after `--watch-path`
+        // is the directory, and the next word is the script.
+        let kept: [(String, [String])] = [
+            ("interactive", ["node", "--interactive", "/usr/local/bin/codex"]),
+            ("short", ["nodejs", "-i", "/tmp/codex"]),
+            ("watch-path", ["node.exe", "--watch-path", "/tmp", "/usr/local/bin/codex"]),
+            ("watch-path-eq", ["node", "--watch-path=/tmp", "/tmp/codex"]),
+            ("watch-path-other", [
+                "nodejs", "--watch-path", "/usr/local/bin/claude", "/usr/local/bin/codex",
+            ]),
+            ("test", ["node", "--test", "/usr/local/bin/codex"]),
+            ("test-watch", ["node.exe", "--test", "--watch", "/tmp/codex"]),
+            ("watch-first", ["node", "--watch", "--test", "/usr/local/bin/codex"]),
+            ("no-interactive", ["nodejs", "--test", "--no-interactive", "/tmp/codex"]),
+            ("no-interactive-eq", ["node", "--test", "--no-interactive=false", "/usr/local/bin/codex"]),
+            ("cleared-interactive", [
+                "node.exe", "--interactive", "--no-interactive", "--test", "/tmp/codex",
+            ]),
+            ("cleared-short", ["node", "-i", "--no-interactive", "--test", "/usr/local/bin/codex"]),
+            ("cleared-test", [
+                "nodejs", "--test", "--no-test", "--interactive", "/tmp/codex",
+            ]),
+            ("cleared-watch-path", [
+                "node", "--test", "--watch-path", "/tmp", "--no-test", "/usr/local/bin/codex",
+            ]),
+            ("only", ["node.exe", "--test-only", "--interactive", "/tmp/codex"]),
+            ("preserve", ["node", "--test", "--watch-preserve-output", "/usr/local/bin/codex"]),
+            ("script-first", ["nodejs", "/usr/local/bin/codex", "--test", "--interactive"]),
+            ("script-first-path", ["node", "/tmp/codex", "--watch-path", "/tmp", "--test"]),
+            ("flag-after-script", ["node.exe", "--interactive", "/usr/local/bin/codex", "--test"]),
+            ("isolation-off", [
+                "node", "--interactive", "--experimental-test-isolation", "nope", "/usr/local/bin/codex",
+            ]),
+            ("watch-path-isolation", [
+                "nodejs", "--watch-path", "/tmp", "--experimental-test-isolation", "nope", "/tmp/codex",
+            ]),
+            ("title", ["node", "--title", "helper", "--watch-path", "/tmp", "/usr/local/bin/codex"]),
+        ]
+        for (label, argv) in kept {
+            let running = process(20, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(label) dropped the script")
+        }
+        let leader = process(
+            20,
+            "node",
+            argv: ["node", "--watch", "--test", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+
+        let badInteractive = process(
+            8,
+            "node",
+            argv: ["node", "--test", "--interactive", "/tmp/letta"]
+        )
+        let badPath = process(
+            8,
+            "nodejs",
+            argv: ["nodejs", "--watch-path", "/tmp", "--test", "/tmp/letta"]
+        )
+        let keptLetta = process(
+            40,
+            "node",
+            argv: ["node", "--interactive", "/tmp/letta"]
+        )
+        let keptPath = process(
+            40,
+            "node.exe",
+            argv: ["node.exe", "--watch-path", "/tmp", "/tmp/letta"]
+        )
+        let oneShot = process(
+            40,
+            "nodejs",
+            argv: ["nodejs", "--interactive", "/tmp/letta", "--prompt"]
+        )
+        #expect(Diagnoser.cpuSamplePid([badInteractive, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badInteractive, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([badPath, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badPath, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, keptLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, keptPath]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, oneShot]) == 10)
+        #expect(Diagnoser.cpuSamplePid([oneShot, interactive]) == 30)
+
+        // Bun does not use the node check. Both words are flags, and
+        // the codex path is the script.
+        let bun = process(
+            20,
+            "bun",
+            argv: ["bun", "--test", "--interactive", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, bun]) == 20)
+    }
 }
 
 @Suite("Diagnoser finished vs process-gone")
