@@ -15,6 +15,8 @@ func pad(_ s: String, to width: Int) -> String {
 
 private enum LiveWake: Sendable {
     case event(HerdrEvent)
+    /// `agent.list` for rows the table already shows. Not a process scan.
+    case herd
     case tick
     case ended
 }
@@ -136,9 +138,17 @@ struct HerdmgrCommand: AsyncParsableCommand {
         )
     }
 
-    /// Subscribe, and re-read the process list on a 15s tick — the same
-    /// cadence as the menu bar's diagnosis pass. A dead process often emits
-    /// nothing, so the table cannot wait for the next pane event.
+    /// Subscribe, poll status for the rows already on screen, and re-read
+    /// the process list on a 15s tick — the same cadence as the menu bar's
+    /// diagnosis pass. A dead process often emits nothing, so the table
+    /// cannot wait for the next pane event.
+    ///
+    /// Status is polled every 3s, the same cadence as the menu bar's herd
+    /// read. herdr emits a status change as `pane.agent_status_changed`,
+    /// and that subscription is rejected without a pane id. `pane.updated`
+    /// is not sent for a status change, so a table that only refetches on
+    /// a layout event keeps the previous status until the user creates,
+    /// closes, or focuses a container.
     ///
     /// Silence is not classified here. A full diagnose would time it from
     /// `enteredAt`, and this table has no output clock, so a busy agent
@@ -159,47 +169,64 @@ struct HerdmgrCommand: AsyncParsableCommand {
             continuation.yield(.ended)
             continuation.finish()
         }
-        // 15s. Same cadence as Shepherd's diagnosis pass.
-        let refreshEvery: UInt64 = 15_000_000_000
-        let ticksTask = Task {
+        // 3s matches Shepherd's herd poll. Every fifth step is the 15s
+        // process scan, so an idle table still notices a dead process.
+        let herdEvery: UInt64 = 3_000_000_000
+        let processEverySteps = 5
+        let clockTask = Task {
+            var stepsUntilProcess = processEverySteps
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: refreshEvery)
+                try? await Task.sleep(nanoseconds: herdEvery)
                 if Task.isCancelled { break }
-                continuation.yield(.tick)
+                continuation.yield(.herd)
+                stepsUntilProcess -= 1
+                if stepsUntilProcess == 0 {
+                    continuation.yield(.tick)
+                    stepsUntilProcess = processEverySteps
+                }
             }
         }
         defer {
             eventsTask.cancel()
-            ticksTask.cancel()
+            clockTask.cancel()
             continuation.finish()
         }
 
         for await wake in wakes {
+            let scanProcesses: Bool
             switch wake {
             case .ended:
                 FileHandle.standardError.write(
                     Data("Event stream ended. \(LiveHerdrAdapter.socketHint(resolvedPath: socketPath))\n".utf8)
                 )
                 return
+            case .herd:
+                let before = live.agents
+                let refreshed = try? await adapter.herdSnapshot()
+                live.noteStatusRefresh(refreshed)
+                scanProcesses = false
+                guard live.agents != before else { continue }
             case .tick:
-                break
+                scanProcesses = true
             case .event(let event):
                 if case .workspacesChanged = event {
-                    // Label churn (tab focus, rename) refetches so names stay
-                    // current, and same-id episodes keep their dwell. A move
-                    // also arrives as one of these events, before pane.moved
-                    // and already under the new pane id. Remembering the
+                    // Focus, create, and close. A rename already carries its
+                    // label. A move arrives as one of these before pane.moved,
+                    // already under the new pane id. Remembering the
                     // pre-refetch rows lets that move put the dwell back.
                     let refreshed = try? await adapter.herdSnapshot()
                     live.noteLayoutRefresh(refreshed)
                 } else {
                     live.apply(event)
                 }
+                scanProcesses = true
             }
-            let observations = await processGoneObservations(
-                for: live.agents, adapter: adapter, diagnoser: diagnoser
-            )
-            live.applyProcessGone(observations)
+            if scanProcesses {
+                let observations = await processGoneObservations(
+                    for: live.agents, adapter: adapter, diagnoser: diagnoser
+                )
+                live.applyProcessGone(observations)
+            }
             print("\u{001B}[2J\u{001B}[H")
             printTable(live.agents, showAll: showAll)
         }

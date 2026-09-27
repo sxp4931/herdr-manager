@@ -99,6 +99,91 @@ public struct HerdLiveTable: Sendable {
         self.tabIdByPane = Self.tabIds(in: herd)
     }
 
+    /// Apply one `agent.list` taken so a status change reaches the table.
+    ///
+    /// herdr emits that change as `pane.agent_status_changed`. The
+    /// subscription requires a pane id; omitting it is rejected, and
+    /// `pane.updated` is not emitted for a status change. The menu bar
+    /// polls every 3s. A live table that only refetches on a layout event
+    /// keeps the previous status until the user creates, closes, or
+    /// focuses a container.
+    ///
+    /// Only ids this table already shows are updated. A list that adds a
+    /// pane, or that drops one, does not change membership: a move's new
+    /// id is already in `agent.list` before `pane.moved`, and adopting
+    /// that list here would replace the row the layout refetch remembers.
+    /// `pane.updated` and `pane.closed` still insert and remove. `nil` is
+    /// a failed read. An open layout burst is left in place, including
+    /// its remembered dwell. A rename that arrives while this read is in
+    /// flight is applied by the caller after this returns.
+    public mutating func noteStatusRefresh(_ refreshed: HerdSnapshot?, now: Date = Date()) {
+        guard let refreshed else { return }
+        let previousSessions = sessionByPane
+        let previousTabs = tabIdByPane
+        var listed: [String: HerdrAgentInfo] = [:]
+        for info in refreshed.agents where !info.paneId.isEmpty {
+            listed[info.paneId] = info
+        }
+        var next: [Agent] = []
+        next.reserveCapacity(agents.count)
+        for old in agents {
+            guard let info = listed[old.id.raw],
+                  var updated = refreshed.displayAgent(for: info, now: now) else {
+                next.append(old)
+                continue
+            }
+            // Same episode, including a list that leaves the session off.
+            // The fresh row's verdict is stamped at `now`; the one already
+            // on the table is the episode the process scan and the dwell
+            // are about.
+            if old.status == updated.status,
+               old.stateChangeSeq == updated.stateChangeSeq,
+               !SessionIdentity.replaced(
+                   stored: previousSessions[old.id.raw],
+                   incoming: info.sessionIdentity
+               ) {
+                updated.enteredAt = old.enteredAt
+                updated.verdict = old.verdict
+            }
+            // A list that leaves the title or directory off is not a
+            // rename. `displayAgent` would otherwise fall through to the
+            // kind or to an empty path and the next poll would put it back.
+            if Self.absent(info.title), Self.absent(info.terminalTitleStripped) {
+                updated.name = old.name
+                updated.displayName = old.displayName
+            }
+            if Self.absent(info.foregroundCwd), Self.absent(info.cwd) {
+                updated.cwd = old.cwd
+            }
+            if Self.absent(refreshed.workspaceNames[info.workspaceId]) {
+                updated.workspaceName = old.workspaceName
+            }
+            if Self.absent(refreshed.tabNames[info.tabId]) {
+                updated.tabName = old.tabName
+            }
+            next.append(updated)
+        }
+        if let saved = rowsBeforeLayout {
+            let kept = saved.filter { agent in
+                !SessionIdentity.replaced(
+                    stored: previousSessions[agent.id.raw],
+                    incoming: Self.session(in: refreshed, paneId: agent.id.raw)
+                )
+            }
+            rowsBeforeLayout = kept.isEmpty ? nil : kept
+        }
+        herd = refreshed
+        agents = next
+        adoptSessions(from: refreshed, previous: previousSessions)
+        adoptTabIds(from: refreshed, previous: previousTabs)
+    }
+
+    /// Nil and "" are both "the list did not name this".
+    private static func absent(_ value: String?) -> Bool {
+        guard let value else { return true }
+        return value.isEmpty
+    }
+
     /// Apply one `herdSnapshot` taken because a layout event arrived.
     /// `nil` is a failed read: the table and any open burst stay as they are.
     public mutating func noteLayoutRefresh(_ refreshed: HerdSnapshot?, now: Date = Date()) {

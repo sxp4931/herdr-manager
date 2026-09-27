@@ -11,7 +11,9 @@ private func makeDwellAgentInfo(
     stateChangeSeq: UInt64 = 1,
     session: HerdrSnapshot.AgentSession? = nil,
     title: String? = "Claude",
-    terminalTitleStripped: String? = "Claude"
+    terminalTitleStripped: String? = "Claude",
+    cwd: String? = "/tmp",
+    foregroundCwd: String? = "/tmp"
 ) -> HerdrAgentInfo {
     HerdrAgentInfo(
         paneId: paneId,
@@ -26,8 +28,8 @@ private func makeDwellAgentInfo(
         agentSession: session,
         focused: false,
         stateChangeSeq: stateChangeSeq,
-        cwd: "/tmp",
-        foregroundCwd: "/tmp",
+        cwd: cwd,
+        foregroundCwd: foregroundCwd,
         revision: 1,
         tokens: [:],
         stateLabels: [:],
@@ -683,5 +685,203 @@ struct HerdLiveTableDwellTests {
         #expect(live.agents.first?.tabName == "suite")
         #expect(live.agents.first?.verdict == .processGone(lastLine: "zsh (pid 4)"))
         #expect(live.agents.first { $0.id.raw == "wA:p2" }?.enteredAt == started)
+    }
+
+    @Test("A status poll updates the row it already shows and keeps the episode")
+    func statusRefreshUpdatesTheShownRow() {
+        var live = initialTable()
+        live.applyProcessGone([
+            AgentID("wA:p1"): .gone(lastLine: "zsh (pid 4)")
+        ], now: started)
+        let polledAt = Date(timeIntervalSince1970: 4_000)
+        live.noteStatusRefresh(
+            snapshot([
+                makeDwellAgentInfo(
+                    paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5,
+                    title: "Needs you"
+                ),
+                makeDwellAgentInfo(
+                    paneId: "wA:p2", agentStatus: "done", stateChangeSeq: 9,
+                    title: "Finished"
+                ),
+                makeDwellAgentInfo(paneId: "wA:p9", agentStatus: "working", stateChangeSeq: 1)
+            ], workspaces: ["wA": "Renamed"], tabs: ["wA:t1": "suite"]),
+            now: polledAt
+        )
+
+        let blocked = live.agents.first { $0.id.raw == "wA:p1" }
+        #expect(blocked?.name == "Needs you")
+        #expect(blocked?.workspaceName == "Renamed")
+        #expect(blocked?.tabName == "suite")
+        #expect(blocked?.enteredAt == started)
+        #expect(blocked?.status == .blocked)
+        #expect(blocked?.stateChangeSeq == 5)
+        #expect(blocked?.verdict == .processGone(lastLine: "zsh (pid 4)"))
+
+        let finished = live.agents.first { $0.id.raw == "wA:p2" }
+        #expect(finished?.status == .done)
+        #expect(finished?.stateChangeSeq == 9)
+        #expect(finished?.name == "Finished")
+        #expect(finished?.enteredAt == polledAt)
+        #expect(finished?.verdict.isProcessGone == false)
+        #expect(live.agents.contains { $0.id.raw == "wA:p9" } == false)
+        #expect(live.agents.count == 2)
+
+        // The next list leaves the title and directory off. That is not a
+        // new name, and it does not open an episode.
+        live.noteStatusRefresh(
+            snapshot([
+                makeDwellAgentInfo(
+                    paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5,
+                    title: nil, terminalTitleStripped: nil, cwd: nil, foregroundCwd: nil
+                ),
+                makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "done", stateChangeSeq: 9)
+            ], workspaces: [:], tabs: [:]),
+            now: Date(timeIntervalSince1970: 5_000)
+        )
+        let held = live.agents.first { $0.id.raw == "wA:p1" }
+        #expect(held?.name == "Needs you")
+        #expect(held?.cwd == "/tmp")
+        #expect(held?.workspaceName == "Renamed")
+        #expect(held?.tabName == "suite")
+        #expect(held?.enteredAt == started)
+        #expect(held?.verdict == .processGone(lastLine: "zsh (pid 4)"))
+    }
+
+    @Test("A status poll does not adopt a moved id or drop the one it left")
+    func statusRefreshDoesNotAdoptAMove() {
+        var live = initialTable()
+        let polledAt = Date(timeIntervalSince1970: 4_000)
+        live.noteStatusRefresh(
+            snapshot(
+                [
+                    makeDwellAgentInfo(
+                        paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                        agentStatus: "blocked", stateChangeSeq: 5
+                    )
+                ],
+                workspaces: ["wA": "Cuedora", "wB": "proj"],
+                tabs: ["wA:t1": "main", "wB:t1": "scratch"]
+            ),
+            now: polledAt
+        )
+        #expect(live.agents.map(\.id.raw) == ["wA:p1", "wA:p2"])
+        #expect(live.agents.first?.enteredAt == started)
+        #expect(live.agents.first?.status == .blocked)
+
+        // The layout refetch still remembers these rows, so the move puts
+        // the original dwell on the new id.
+        refreshAfterMove(on: &live, at: refreshedAt)
+        live.apply(moveEvent(), now: moveAt)
+        #expect(live.agents.first?.id.raw == "wB:p4")
+        #expect(live.agents.first?.enteredAt == started)
+        #expect(live.agents.first?.stateChangeSeq == 5)
+    }
+
+    @Test("A status poll during a layout burst does not replace the remembered dwell")
+    func statusRefreshDuringBurstKeepsRememberedDwell() {
+        var live = initialTable()
+        live.applyProcessGone([
+            AgentID("wA:p1"): .gone(lastLine: "zsh (pid 4)")
+        ], now: started)
+        refreshAfterMove(on: &live, at: refreshedAt)
+        #expect(live.agents.first?.enteredAt == refreshedAt)
+
+        let polledAt = Date(timeIntervalSince1970: 9_200)
+        live.noteStatusRefresh(
+            snapshot(
+                [
+                    makeDwellAgentInfo(
+                        paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                        agentStatus: "blocked", stateChangeSeq: 5, title: "Needs you"
+                    ),
+                    makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 3)
+                ],
+                workspaces: ["wA": "Cuedora", "wB": "proj"],
+                tabs: ["wA:t1": "main", "wB:t1": "scratch"]
+            ),
+            now: polledAt
+        )
+        // The refetch already shows the new id. The crash still lives on
+        // the remembered row; this poll must not throw that row away.
+        #expect(live.agents.first?.name == "Needs you")
+        #expect(live.agents.first?.enteredAt == refreshedAt)
+        #expect(live.agents.first?.verdict.isProcessGone == false)
+
+        live.apply(moveEvent(), now: moveAt)
+        #expect(live.agents.first?.id.raw == "wB:p4")
+        #expect(live.agents.first?.enteredAt == started)
+        #expect(live.agents.first?.verdict == .processGone(lastLine: "zsh (pid 4)"))
+        #expect(live.agents.first?.stateChangeSeq == 5)
+    }
+
+    @Test("A failed status poll changes nothing, including an open burst")
+    func failedStatusRefreshLeavesTheBurst() {
+        var live = initialTable()
+        refreshAfterMove(on: &live, at: refreshedAt)
+        live.noteStatusRefresh(nil, now: moveAt)
+        #expect(live.agents.first?.id.raw == "wB:p4")
+        #expect(live.agents.first?.enteredAt == refreshedAt)
+        live.apply(moveEvent(), now: moveAt)
+        #expect(live.agents.first?.enteredAt == started)
+    }
+
+    @Test("A status poll that names a new session opens one dwell")
+    func statusRefreshReplacesTheSession() throws {
+        let same = HerdrSnapshot.AgentSession(source: "agent", agent: "claude", kind: "session", value: "abc")
+        let other = HerdrSnapshot.AgentSession(source: "agent", agent: "claude", kind: "session", value: "other")
+        let first = snapshot([
+            makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: same),
+            makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 3, session: same)
+        ])
+        var rows = first.displayAgents(now: started)
+        let blockedIndex = try #require(rows.firstIndex { $0.id.raw == "wA:p1" })
+        rows[blockedIndex].verdict = .processGone(lastLine: "zsh (pid 1)")
+        var live = HerdLiveTable(herd: first, agents: rows)
+
+        live.noteStatusRefresh(
+            snapshot([
+                makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5),
+                makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 3, session: same)
+            ]),
+            now: refreshedAt
+        )
+        #expect(live.agents.first { $0.id.raw == "wA:p1" }?.enteredAt == started)
+        #expect(live.agents.first { $0.id.raw == "wA:p1" }?.verdict == .processGone(lastLine: "zsh (pid 1)"))
+
+        live.noteStatusRefresh(
+            snapshot([
+                makeDwellAgentInfo(
+                    paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: other
+                ),
+                makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 3, session: same)
+            ]),
+            now: moveAt
+        )
+        let replaced = live.agents.first { $0.id.raw == "wA:p1" }
+        #expect(replaced?.enteredAt == moveAt)
+        #expect(replaced?.verdict.isProcessGone == false)
+        #expect(live.agents.first { $0.id.raw == "wA:p2" }?.enteredAt == started)
+    }
+
+    @Test("A rename that arrives after the status poll still wins")
+    func renameAfterStatusRefreshWins() {
+        var live = initialTable()
+        live.noteStatusRefresh(
+            snapshot([
+                makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5),
+                makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 3)
+            ]),
+            now: refreshedAt
+        )
+        live.apply(.workspaceRenamed(workspaceId: "wA", label: "After"), now: refreshedAt)
+        live.apply(
+            .paneUpdated(makeDwellAgentInfo(
+                paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0
+            )),
+            now: refreshedAt
+        )
+        #expect(live.agents.first { $0.id.raw == "wA:p1" }?.workspaceName == "After")
+        #expect(live.agents.first { $0.id.raw == "wA:p1" }?.enteredAt == started)
     }
 }
