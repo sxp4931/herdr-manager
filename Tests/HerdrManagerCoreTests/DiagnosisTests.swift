@@ -5338,6 +5338,122 @@ struct DiagnoserCpuSamplePidTests {
         )
         #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)
     }
+
+    @Test("a node test-isolation value the runtime rejects is not the agent script")
+    func nodeTestIsolationRejectIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23 rejects the operand only when `--test` is on, and
+        // only the last operand counts. `none` and `process` run.
+        // `--test=` is still an exit on its own, before this check.
+        let rejected: [(String, [String])] = [
+            ("nope", ["node", "--test", "--experimental-test-isolation", "nope", "/usr/local/bin/codex"]),
+            ("nope-eq", ["nodejs", "--test", "--experimental-test-isolation=nope", "/tmp/codex"]),
+            ("case", ["node.exe", "--experimental-test-isolation", "NONE", "--test", "/usr/local/bin/codex"]),
+            ("space", ["node", "--test", "--experimental-test-isolation=none ", "/tmp/codex"]),
+            ("lead-space", ["nodejs", "--experimental-test-isolation", " none", "--test", "/usr/local/bin/codex"]),
+            ("empty", ["node", "--test", "--experimental-test-isolation", "", "/tmp/codex"]),
+            ("empty-eq", ["node.exe", "--experimental-test-isolation=", "--test", "/usr/local/bin/codex"]),
+            ("dash", ["node", "--test", "--experimental-test-isolation", "--watch", "/tmp/codex"]),
+            ("last-nope", [
+                "nodejs", "--experimental-test-isolation", "none", "--test",
+                "--experimental-test-isolation=nope", "/usr/local/bin/codex",
+            ]),
+            ("reenabled", [
+                "node", "--no-test", "--experimental-test-isolation", "nope", "--test", "/tmp/codex",
+            ]),
+            ("title", [
+                "node.exe", "--title", "helper", "--test",
+                "--experimental-test-isolation", "Process", "/usr/local/bin/codex",
+            ]),
+        ]
+        for (label, argv) in rejected {
+            let exited = process(4, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(label) ranked the path")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(label) took the sample from the leader slot"
+            )
+        }
+        #expect(
+            Diagnoser.cpuSamplePid([
+                process(4, "node", argv: [
+                    "node", "--test", "--experimental-test-isolation", "nope", "/tmp/codex",
+                ])
+            ]) == 4
+        )
+
+        // Without `--test` the operand is ignored, so `nope` still names
+        // the file. `--no-test` after `--test` does too. The last `none`
+        // or `process` names the file when the runner is on. A script
+        // written first is already the program.
+        let kept: [(String, [String])] = [
+            ("no-test", ["node", "--experimental-test-isolation", "nope", "/usr/local/bin/codex"]),
+            ("no-test-eq", ["nodejs", "--experimental-test-isolation=NONE", "/tmp/codex"]),
+            ("empty-off", ["node.exe", "--experimental-test-isolation", "", "/usr/local/bin/codex"]),
+            ("none", ["node", "--test", "--experimental-test-isolation", "none", "/usr/local/bin/codex"]),
+            ("process", ["nodejs", "--experimental-test-isolation", "process", "--test", "/tmp/codex"]),
+            ("none-eq", ["node.exe", "--test", "--experimental-test-isolation=none", "/usr/local/bin/codex"]),
+            ("process-eq", ["node", "--experimental-test-isolation=process", "--test", "/tmp/codex"]),
+            ("last-none", [
+                "nodejs", "--test", "--experimental-test-isolation", "nope",
+                "--experimental-test-isolation=none", "/usr/local/bin/codex",
+            ]),
+            ("cleared", [
+                "node", "--test", "--no-test", "--experimental-test-isolation", "nope", "/tmp/codex",
+            ]),
+            ("only", ["node", "--test-only", "--experimental-test-isolation", "nope", "/tmp/codex"]),
+            ("script-first", [
+                "nodejs", "/usr/local/bin/codex", "--test", "--experimental-test-isolation", "nope",
+            ]),
+            ("title-off", [
+                "node", "--title", "helper", "--experimental-test-isolation", "nope",
+                "/usr/local/bin/codex",
+            ]),
+        ]
+        for (label, argv) in kept {
+            let running = process(20, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(label) dropped the script")
+        }
+        let leader = process(
+            20,
+            "node",
+            argv: ["node", "--test", "--experimental-test-isolation", "process", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+
+        let badLetta = process(
+            8,
+            "node",
+            argv: ["node", "--test", "--experimental-test-isolation", "nope", "/tmp/letta"]
+        )
+        let keptLetta = process(
+            40,
+            "node",
+            argv: ["node", "--experimental-test-isolation", "nope", "/tmp/letta"]
+        )
+        let runnerLetta = process(
+            40,
+            "nodejs",
+            argv: ["nodejs", "--test", "--experimental-test-isolation=none", "/tmp/letta", "--prompt"]
+        )
+        #expect(Diagnoser.cpuSamplePid([badLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, keptLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, runnerLetta]) == 10)
+        #expect(Diagnoser.cpuSamplePid([runnerLetta, interactive]) == 30)
+
+        // Bun does not use the node check. `nope` is the script word.
+        let bun = process(
+            20,
+            "bun",
+            argv: ["bun", "--test", "--experimental-test-isolation", "nope", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)
+    }
 }
 
 @Suite("Diagnoser finished vs process-gone")

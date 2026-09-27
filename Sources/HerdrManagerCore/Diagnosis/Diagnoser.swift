@@ -1213,7 +1213,9 @@ private enum ShellForeground {
                 // 22.23 does not recognize (`--not-a-flag`, `--revision`,
                 // `--port`) exits too, so the path after it is not Letta.
                 // `--max-old-space-size-percentage nope` exits; `50` and
-                // `nan` do not.
+                // `nan` do not. `--experimental-test-isolation nope`
+                // exits only when `--test` is also set. Without it, and
+                // with `none` or `process`, the path is still Letta.
                 // Bun rejects `-W`,
                 // `-X`, `-S`, `-L`, and `-o`; the path after one is
                 // not Letta. A bun value that starts with `-` is not
@@ -2639,9 +2641,12 @@ private enum ShellForeground {
     /// (`--cpu-prof-name out` without `--cpu-prof`).
     /// `--max-old-space-size-percentage` exits unless `strtod` reads a
     /// value greater than 0 and at most 100 (`50`, `0x10`, and `nan`
-    /// run; `nope`, `0`, `101`, and `inf` do not). Bun does not use
-    /// this check: `--title --watch` runs the file, `--not-a-flag` is
-    /// the script, and `--cwd` takes the directory. Python's `-W` and
+    /// run; `nope`, `0`, `101`, and `inf` do not).
+    /// `--experimental-test-isolation` exits only when `--test` is on
+    /// and the last operand is not `none` or `process`. Without
+    /// `--test`, `nope` still runs the file. Bun does not use this
+    /// check: `--title --watch` runs the file, `--not-a-flag` is the
+    /// script, and `--cwd` takes the directory. Python's `-W` and
     /// `-X` still take the next word.
     private static func nodeOption(
         _ arg: String,
@@ -2806,7 +2811,12 @@ private enum ShellForeground {
     /// profiling on. `--no-cpu-prof` turns it off, and the later flag
     /// wins. `--max-old-space-size-percentage` is `NodePercentage`:
     /// the word has to be a `strtod` value greater than 0 and at most
-    /// 100, and `nan` still runs. A script written first is not this check.
+    /// 100, and `nan` still runs. `--experimental-test-isolation` is
+    /// checked only when the final `--test` state is on. The last
+    /// operand wins, and only `none` and `process` run. A later
+    /// `--no-test` leaves the file running, including `nope`. A script
+    /// written first is not this check. `--test=` is still
+    /// `equalsRejected` when the walk reaches that word.
     private static func nodeRejectedOperand(
         name: String,
         value: String,
@@ -2824,6 +2834,18 @@ private enum ShellForeground {
             return NodePercentage.rejects(value)
         }
         let prefix = nodePrefixFlags(argv)
+        if name == "--experimental-test-isolation" {
+            // `CheckOptions` reads this only inside `if (test_runner)`.
+            // The last operand wins. `none` and `process` are the only
+            // words that run. An empty word, `NONE`, and `nope` do not.
+            // `--no-test` after `--test` leaves the flag ignored, so
+            // the file still runs. The value on this word is not the
+            // decision: a later `none` replaces an earlier `nope`.
+            guard prefix.testRunner, let isolation = prefix.testIsolation else {
+                return false
+            }
+            return isolation != "none" && isolation != "process"
+        }
         switch name {
         case "--cpu-prof-name", "--cpu-prof-dir":
             return !value.isEmpty && !prefix.cpuProf
@@ -2914,6 +2936,13 @@ private enum ShellForeground {
         var opensslCA = false
         var bundledCA = false
         var permission = false
+        /// Final `--test` / `--no-test` state. `--test=true` is on:
+        /// Node's boolean parser ignores the attached word.
+        var testRunner = false
+        /// Last `--experimental-test-isolation` operand before the
+        /// script. Nil when that flag was not set. Node keeps the last
+        /// one, including an empty word.
+        var testIsolation: String?
 
         var conflicts: Bool {
             (tlsMin13 && tlsMax12) || (opensslCA && bundledCA)
@@ -2928,6 +2957,7 @@ private enum ShellForeground {
             case .openssl: opensslCA = on
             case .bundled: bundledCA = on
             case .permission: permission = on
+            case .test: testRunner = on
             }
         }
     }
@@ -2940,6 +2970,7 @@ private enum ShellForeground {
         case openssl
         case bundled
         case permission
+        case test
     }
 
     private static func nodePrefixFlags(_ argv: [String]) -> NodePrefix {
@@ -2954,10 +2985,37 @@ private enum ShellForeground {
                 index += 1
                 continue
             }
+            if let isolation = nodeIsolationOperand(arg, argv: argv, index: index) {
+                state.testIsolation = isolation.value
+                index += isolation.width
+                continue
+            }
             let width = arg.contains("=") || !nodeTakesSeparateValue(arg) ? 1 : 2
             index += width
         }
         return state
+    }
+
+    /// The operand of `--experimental-test-isolation`, and how many
+    /// words it occupies. Nil when `arg` is a different option.
+    ///
+    /// `--flag=none` keeps `none` in the word. A separate word is the
+    /// next argv entry. A word that starts with `-` is still a missing
+    /// argument in the walk, so that invocation is not a script. A
+    /// missing word is empty. The last operand, including that empty
+    /// word, is what `nodeRejectedOperand` reads.
+    private static func nodeIsolationOperand(
+        _ arg: String,
+        argv: [String],
+        index: Int
+    ) -> (value: String, width: Int)? {
+        if arg == "--experimental-test-isolation" {
+            let value = index + 1 < argv.count ? argv[index + 1] : ""
+            return (value, 2)
+        }
+        let prefix = "--experimental-test-isolation="
+        guard arg.hasPrefix(prefix) else { return nil }
+        return (String(arg.dropFirst(prefix.count)), 1)
     }
 
     /// `--cpu-prof`, `--cpu-prof=false`, and `--no-cpu-prof=true`.
@@ -2983,6 +3041,7 @@ private enum ShellForeground {
         case "--use-openssl-ca": flag = .openssl
         case "--use-bundled-ca": flag = .bundled
         case "--permission", "--experimental-permission": flag = .permission
+        case "--test": flag = .test
         default: flag = nil
         }
         guard let flag else { return nil }
