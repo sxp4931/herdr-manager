@@ -5211,6 +5211,133 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([helper, profLetta]) == 10)
         #expect(Diagnoser.cpuSamplePid([profLetta, interactive]) == 30)
     }
+
+    @Test("a node percentage the runtime rejects is not the agent script")
+    func nodePercentageRejectIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23 exits on these operands, so the path is not the script
+        // and that node is not the group leader. A separate word that
+        // starts with `-` is missing an argument. `--flag=` is empty.
+        let rejected: [(String, [String])] = [
+            ("nope", ["node", "--max-old-space-size-percentage", "nope", "/usr/local/bin/codex"]),
+            ("nope-eq", ["nodejs", "--max-old-space-size-percentage=nope", "/tmp/codex"]),
+            ("zero", ["node", "--max-old-space-size-percentage", "0", "/usr/local/bin/codex"]),
+            ("zero-dot", ["node.exe", "--max-old-space-size-percentage=0.0", "/tmp/codex"]),
+            ("plus-zero", ["node", "--max-old-space-size-percentage=+0", "/tmp/codex"]),
+            ("over", ["node", "--max-old-space-size-percentage", "101", "/usr/local/bin/codex"]),
+            ("over-eq", ["nodejs", "--max-old-space-size-percentage=100.1", "/tmp/codex"]),
+            ("inf", ["node", "--max-old-space-size-percentage", "inf", "/usr/local/bin/codex"]),
+            ("infinity", ["node.exe", "--max-old-space-size-percentage=Infinity", "/tmp/codex"]),
+            ("percent", ["node", "--max-old-space-size-percentage", "50%", "/usr/local/bin/codex"]),
+            ("tail", ["node", "--max-old-space-size-percentage=1e2x", "/tmp/codex"]),
+            ("hex-bare", ["nodejs", "--max-old-space-size-percentage", "0x", "/usr/local/bin/codex"]),
+            ("hex-over", ["node", "--max-old-space-size-percentage=0x65", "/tmp/codex"]),
+            ("under", ["node", "--max-old-space-size-percentage", "1e-324", "/usr/local/bin/codex"]),
+            ("under-hex", ["node.exe", "--max-old-space-size-percentage=0x1p-1075", "/tmp/codex"]),
+            ("spaces", ["node", "--max-old-space-size-percentage", "   ", "/usr/local/bin/codex"]),
+            ("trail-space", ["node", "--max-old-space-size-percentage=50 ", "/tmp/codex"]),
+            ("nan-tail", ["nodejs", "--max-old-space-size-percentage=nan(a-b)", "/tmp/codex"]),
+            ("nan-space", ["node", "--max-old-space-size-percentage=nan ", "/usr/local/bin/codex"]),
+            ("empty-eq", ["node", "--max-old-space-size-percentage=", "/tmp/codex"]),
+            ("dash", ["node.exe", "--max-old-space-size-percentage", "-1", "/usr/local/bin/codex"]),
+            ("neg", ["node", "--max-old-space-size-percentage=-1", "/tmp/codex"]),
+            ("round-up", ["nodejs", "--max-old-space-size-percentage=100.00000000000001", "/tmp/codex"]),
+            ("round-up-hex", ["node", "--max-old-space-size-percentage=0x1.9000000000001p6", "/usr/local/bin/codex"]),
+        ]
+        for (label, argv) in rejected {
+            let exited = process(4, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(label) ranked the path")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(label) took the sample from the leader slot"
+            )
+        }
+        #expect(
+            Diagnoser.cpuSamplePid([
+                process(4, "node", argv: [
+                    "node", "--max-old-space-size-percentage", "nope", "/tmp/codex",
+                ])
+            ]) == 4
+        )
+
+        // Values Node runs, including hex, an exponent, and NaN. An empty
+        // separate word is the unset field, so the file still runs.
+        // `-nan` as its own word is a missing argument; `=-nan` runs.
+        let kept: [(String, [String])] = [
+            ("fifty", ["node", "--max-old-space-size-percentage", "50", "/usr/local/bin/codex"]),
+            ("tenth", ["node", "--max-old-space-size-percentage", "0.1", "/tmp/codex"]),
+            ("hundred", ["nodejs", "--max-old-space-size-percentage", "100", "/usr/local/bin/codex"]),
+            ("hundred-dot", ["node.exe", "--max-old-space-size-percentage=100.0", "/tmp/codex"]),
+            ("exp", ["node", "--max-old-space-size-percentage=1e2", "/usr/local/bin/codex"]),
+            ("plus", ["node", "--max-old-space-size-percentage", "+0.5", "/tmp/codex"]),
+            ("trail-dot", ["nodejs", "--max-old-space-size-percentage=1.", "/tmp/codex"]),
+            ("lead-dot", ["node", "--max-old-space-size-percentage", ".5", "/usr/local/bin/codex"]),
+            ("hex", ["node.exe", "--max-old-space-size-percentage", "0x10", "/tmp/codex"]),
+            ("hex-p", ["node", "--max-old-space-size-percentage=0x1p4", "/usr/local/bin/codex"]),
+            ("hex-100", ["nodejs", "--max-old-space-size-percentage=0x64", "/tmp/codex"]),
+            ("hex-exact", ["node", "--max-old-space-size-percentage=0x1.9p6", "/usr/local/bin/codex"]),
+            ("hex-dot", ["node", "--max-old-space-size-percentage", "0x.8", "/tmp/codex"]),
+            ("nan", ["node.exe", "--max-old-space-size-percentage", "nan", "/usr/local/bin/codex"]),
+            ("nan-eq", ["node", "--max-old-space-size-percentage=NaN", "/tmp/codex"]),
+            ("nan-plus", ["nodejs", "--max-old-space-size-percentage=+nan", "/tmp/codex"]),
+            ("nan-neg", ["node", "--max-old-space-size-percentage=-nan", "/usr/local/bin/codex"]),
+            ("nan-empty", ["node", "--max-old-space-size-percentage=nan()", "/tmp/codex"]),
+            ("nan-payload", ["node.exe", "--max-old-space-size-percentage", "nan(abc)", "/usr/local/bin/codex"]),
+            ("space", ["node", "--max-old-space-size-percentage", " 50", "/tmp/codex"]),
+            ("tiny", ["nodejs", "--max-old-space-size-percentage=1e-323", "/usr/local/bin/codex"]),
+            ("subnormal", ["node", "--max-old-space-size-percentage", "5e-324", "/tmp/codex"]),
+            ("hex-sub", ["node", "--max-old-space-size-percentage=0x1p-1074", "/usr/local/bin/codex"]),
+            ("round-down", ["node.exe", "--max-old-space-size-percentage=100.000000000000007", "/tmp/codex"]),
+            ("empty", ["node", "--max-old-space-size-percentage", "", "/usr/local/bin/codex"]),
+            ("script-first", ["nodejs", "/usr/local/bin/codex", "--max-old-space-size-percentage", "nope"]),
+        ]
+        for (label, argv) in kept {
+            let running = process(20, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(label) dropped the script")
+        }
+        let leader = process(
+            20,
+            "node",
+            argv: ["node", "--max-old-space-size-percentage", "0x10", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+
+        let badLetta = process(
+            8,
+            "node",
+            argv: ["node", "--max-old-space-size-percentage", "nope", "/tmp/letta"]
+        )
+        let keptLetta = process(
+            40,
+            "node",
+            argv: ["node", "--max-old-space-size-percentage", "50", "/tmp/letta"]
+        )
+        let nanLetta = process(
+            40,
+            "nodejs",
+            argv: [
+                "nodejs", "--max-old-space-size-percentage=nan", "/tmp/letta", "--prompt",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([badLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, keptLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, nanLetta]) == 10)
+        #expect(Diagnoser.cpuSamplePid([nanLetta, interactive]) == 30)
+
+        // Bun does not use the node check. The word after the flag is the
+        // script, and `nope` is not an agent, so the codex path is not.
+        let bun = process(
+            20,
+            "bun",
+            argv: ["bun", "--max-old-space-size-percentage", "nope", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)
+    }
 }
 
 @Suite("Diagnoser finished vs process-gone")

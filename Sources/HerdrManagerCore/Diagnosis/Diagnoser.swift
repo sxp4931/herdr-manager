@@ -1212,6 +1212,8 @@ private enum ShellForeground {
                 // true of every node value flag. A long option Node
                 // 22.23 does not recognize (`--not-a-flag`, `--revision`,
                 // `--port`) exits too, so the path after it is not Letta.
+                // `--max-old-space-size-percentage nope` exits; `50` and
+                // `nan` do not.
                 // Bun rejects `-W`,
                 // `-X`, `-S`, `-L`, and `-o`; the path after one is
                 // not Letta. A bun value that starts with `-` is not
@@ -1573,6 +1575,9 @@ private enum ShellForeground {
     /// `node --not-a-flag` and `node --revision` are not the script.
     /// A boolean Node or V8 accepts (`--watch`, `--use-strict`,
     /// `-harmony`, `--max-old-space-size=4096`) still names the file.
+    /// `--max-old-space-size-percentage` names the file only when Node's
+    /// `strtod` reads a number greater than 0 and at most 100, including
+    /// `0x10` and `nan`. `nope`, `0`, `101`, and `inf` do not.
     /// Deno still skips an unknown short and was not checked for these
     /// long flags. Node and Bun still consume the long flags they accept.
     /// Bun's own value flags are not that node rule. `--title --watch`
@@ -2631,7 +2636,10 @@ private enum ShellForeground {
     /// do not run the file. An enum value Node 22.23 rejects
     /// (`--unhandled-rejections nope`, `--use-largepages OFF`) is the
     /// same exit, and so is a profiler flag whose companion is off
-    /// (`--cpu-prof-name out` without `--cpu-prof`). Bun does not use
+    /// (`--cpu-prof-name out` without `--cpu-prof`).
+    /// `--max-old-space-size-percentage` exits unless `strtod` reads a
+    /// value greater than 0 and at most 100 (`50`, `0x10`, and `nan`
+    /// run; `nope`, `0`, `101`, and `inf` do not). Bun does not use
     /// this check: `--title --watch` runs the file, `--not-a-flag` is
     /// the script, and `--cwd` takes the directory. Python's `-W` and
     /// `-X` still take the next word.
@@ -2796,7 +2804,9 @@ private enum ShellForeground {
     /// parser keeps the leading number and ignores the tail. With the
     /// companion on, `nope` still runs. `--cpu-prof=false` turns
     /// profiling on. `--no-cpu-prof` turns it off, and the later flag
-    /// wins. A script written first is not this check.
+    /// wins. `--max-old-space-size-percentage` is `NodePercentage`:
+    /// the word has to be a `strtod` value greater than 0 and at most
+    /// 100, and `nan` still runs. A script written first is not this check.
     private static func nodeRejectedOperand(
         name: String,
         value: String,
@@ -2807,6 +2817,11 @@ private enum ShellForeground {
         }
         if name == "--inspect-publish-uid" {
             return !nodePublishUID(value)
+        }
+        if name == "--max-old-space-size-percentage" {
+            // `strtod`, not an enum. An empty word is the unset field
+            // and the file still runs. `0x10` and `nan` run. `nope` does not.
+            return NodePercentage.rejects(value)
         }
         let prefix = nodePrefixFlags(argv)
         switch name {
