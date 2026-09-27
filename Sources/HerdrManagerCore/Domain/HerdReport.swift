@@ -1,6 +1,7 @@
 import Foundation
 
-/// Text `herd.overview` and `agent.list` return.
+/// Text `herd.overview` and `agent.list` return, and the JSON array
+/// `herdmgr --json` prints.
 ///
 /// The id in each row is `AgentID.raw` (`w1:p1`). That is the `agent_id`
 /// every other tool matches against `HerdrAgentInfo.paneId`. `AgentID.paneId`
@@ -125,6 +126,46 @@ public enum HerdReport: Sendable {
         lines.append("Total: \(agents.count) agent\(agents.count == 1 ? "" : "s")")
         lines.append("ID is the agent_id other tools accept (workspace:pane, for example w5:p2).")
         return lines.joined(separator: "\n")
+    }
+
+    /// One agent in the `herdmgr --json` array.
+    ///
+    /// `needs_you` is a JSON boolean. The string `"false"` is truthy in
+    /// the languages that read this file, so a quiet agent looked like it
+    /// needed someone. `kind` is the full spelling the row stored. The
+    /// live table still chops that word to its column; this object does
+    /// not, because the chop is not a kind. `state_change_seq` and
+    /// `priority` stay strings: a JSON number cannot hold every `UInt64`,
+    /// and `priority` was already parsed as text. The name is the one the
+    /// table shows. Name, kind, workspace, tab, and directory are
+    /// redacted. The pane id is not, so the caller can still address it.
+    static func jsonObject(for agent: Agent, redactor: SecretRedactor) -> [String: Any] {
+        let name = agent.displayName.isEmpty ? agent.name : agent.displayName
+        return [
+            "attention": AttentionTriage.kind(for: agent).rawValue,
+            "cwd": redactor.redact(agent.cwd).redactedText,
+            "id": agent.id.raw,
+            "kind": redactor.redact(kindText(agent.kind)).redactedText,
+            "name": redactor.redact(name).redactedText,
+            "needs_you": AttentionTriage.needsYou(agent),
+            "priority": String(AttentionTriage.priority(agent)),
+            "state_change_seq": String(agent.stateChangeSeq),
+            "status": agent.status.rawValue,
+            "tab": redactor.redact(agent.tabName).redactedText,
+            "workspace": redactor.redact(agent.workspaceName).redactedText,
+        ] as [String: Any]
+    }
+
+    /// The array `herdmgr --json` prints. Order is the caller's order.
+    /// Pretty-printed and sorted so a second run of the same herd differs
+    /// only when a field changed.
+    public static func jsonData(agents: [Agent]) throws -> Data {
+        let redactor = SecretRedactor()
+        let rows = agents.map { jsonObject(for: $0, redactor: redactor) }
+        return try JSONSerialization.data(
+            withJSONObject: rows,
+            options: [.prettyPrinted, .sortedKeys]
+        )
     }
 
     private static func truncate(_ string: String, _ maxLen: Int) -> String {

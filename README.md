@@ -99,8 +99,8 @@ to reuse an existing `Shepherd.app`.
 
 ```sh
 swift run herdmgr              # live table of attention-worthy agents
-swift run herdmgr --show-all   # all agents, not just attention-worthy ones
-swift run herdmgr --json       # output as JSON
+swift run herdmgr --show-all   # live table: every agent, not just attention-worthy ones
+swift run herdmgr --json       # one JSON array of every agent, then exit
 swift run herdmgr --socket <path>  # explicit herdr socket path
 ```
 

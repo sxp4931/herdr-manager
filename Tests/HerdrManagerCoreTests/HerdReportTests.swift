@@ -430,3 +430,118 @@ struct PaneReadSourceArgumentTests {
         #expect(PaneReadSource.parseArgument("RecentUnwrapped") == .unrecognized("RecentUnwrapped"))
     }
 }
+
+@Suite("herdmgr --json")
+struct HerdCLIJSONTests {
+    private func snapshot(_ agents: [Agent]) throws -> (rows: [[String: Any]], text: String) {
+        let data = try HerdReport.jsonData(agents: agents)
+        let text = String(decoding: data, as: UTF8.self)
+        let object = try JSONSerialization.jsonObject(with: data)
+        guard let rows = object as? [[String: Any]] else {
+            Issue.record("expected an array of objects, got \(type(of: object))")
+            return ([], text)
+        }
+        return (rows, text)
+    }
+
+    /// A JSON boolean, not the integer 0/1 and not the string "false".
+    /// `as? Bool` accepts both a boolean and a number, which is how the
+    /// old string field would have been missed if it had been encoded as 0.
+    private func jsonBool(_ value: Any?) -> Bool? {
+        guard let number = value as? NSNumber else { return nil }
+        guard CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+        return number.boolValue
+    }
+
+    @Test("needs_you is a boolean, the kind is whole, and a title secret is redacted")
+    func snapshotContract() throws {
+        let key = "sk-" + String(repeating: "b", count: 24)
+        let quiet = Agent(
+            id: AgentID("w1:p1"),
+            kind: .custom("github-copilot"),
+            name: "Hidden",
+            displayName: "Review \(key)",
+            status: .working,
+            stateChangeSeq: 9,
+            verdict: .healthy,
+            workspaceName: "Proj",
+            tabName: "main",
+            cwd: "/repo/\(key)"
+        )
+        let blocked = Agent(
+            id: AgentID("w2:p\"1"),
+            kind: .custom("Claude"),
+            name: "say \"hi\"",
+            displayName: "",
+            status: .blocked,
+            stateChangeSeq: 3,
+            verdict: .awaitingInput(BlockClassification(
+                kind: .bashPermission, since: Date(), summary: "bash permission prompt"
+            )),
+            workspaceName: "Other",
+            tabName: "side\nline",
+            cwd: ""
+        )
+        let crashed = Agent(
+            id: AgentID("w3:p1"),
+            kind: .claude,
+            name: "Crash",
+            status: .working,
+            verdict: .processGone(lastLine: "zsh"),
+            workspaceName: "Long",
+            tabName: "t",
+            cwd: ""
+        )
+
+        let (rows, text) = try snapshot([quiet, blocked, crashed])
+        guard rows.count == 3 else {
+            Issue.record("expected 3 rows, got \(rows.count)")
+            return
+        }
+        #expect(!text.contains(key))
+        #expect(!text.contains("\"false\""))
+        #expect(!text.contains("\"true\""))
+        #expect(!text.contains("\"github-copilo\""))
+        #expect(text.contains("\"github-copilot\""))
+
+        let quietRow = rows[0]
+        #expect(jsonBool(quietRow["needs_you"]) == false)
+        #expect(quietRow["attention"] as? String == "working")
+        #expect(quietRow["status"] as? String == "working")
+        #expect(quietRow["kind"] as? String == "github-copilot")
+        #expect(quietRow["name"] as? String == "Review sk-[REDACTED]")
+        #expect(quietRow["cwd"] as? String == "/repo/sk-[REDACTED]")
+        #expect(quietRow["workspace"] as? String == "Proj")
+        #expect(quietRow["tab"] as? String == "main")
+        #expect(quietRow["id"] as? String == "w1:p1")
+        #expect(quietRow["priority"] as? String == "3")
+        #expect(quietRow["state_change_seq"] as? String == "9")
+
+        let blockedRow = rows[1]
+        #expect(jsonBool(blockedRow["needs_you"]) == true)
+        #expect(blockedRow["attention"] as? String == "blocked")
+        #expect(blockedRow["kind"] as? String == "Claude")
+        #expect(blockedRow["name"] as? String == "say \"hi\"")
+        #expect(blockedRow["id"] as? String == "w2:p\"1")
+        #expect(blockedRow["tab"] as? String == "side\nline")
+        #expect(blockedRow["priority"] as? String == "0")
+        #expect(blockedRow["state_change_seq"] as? String == "3")
+        #expect(blockedRow["cwd"] as? String == "")
+
+        let crashedRow = rows[2]
+        #expect(jsonBool(crashedRow["needs_you"]) == true)
+        #expect(crashedRow["attention"] as? String == "gone")
+        #expect(crashedRow["status"] as? String == "working")
+        #expect(crashedRow["kind"] as? String == "claude")
+        #expect(crashedRow["name"] as? String == "Crash")
+        #expect(crashedRow["priority"] as? String == "0")
+    }
+
+    @Test("An empty herd is an empty array")
+    func emptyHerd() throws {
+        let data = try HerdReport.jsonData(agents: [])
+        let object = try JSONSerialization.jsonObject(with: data)
+        let rows = object as? [Any]
+        #expect(rows?.isEmpty == true)
+    }
+}

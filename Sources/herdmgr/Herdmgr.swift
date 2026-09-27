@@ -31,14 +31,15 @@ struct HerdmgrCommand: AsyncParsableCommand {
         discussion: """
             Without --socket, the herdr socket is resolved from HERDR_SOCKET_PATH, \
             then HERDR_SESSION, then $XDG_CONFIG_HOME/herdr/herdr.sock, \
-            then ~/.config/herdr/herdr.sock.
+            then ~/.config/herdr/herdr.sock. \
+            --json prints every agent once and exits. --show-all only widens the live table.
             """
     )
 
-    @Flag(name: .long, help: "Output as JSON")
+    @Flag(name: .long, help: "Print every agent as a JSON array and exit. needs_you is a boolean. Idle agents are included.")
     var json = false
 
-    @Flag(name: .long, help: "Show all agents, not just attention-worthy ones")
+    @Flag(name: .long, help: "In the live table, show every agent instead of only those that need attention")
     var showAll = false
 
     @Option(name: .long, help: "Path to herdr socket")
@@ -100,21 +101,7 @@ struct HerdmgrCommand: AsyncParsableCommand {
         live.applyProcessGone(initialRead)
 
         if json {
-            let output = live.agents.map { agent in
-                [
-                    "id": agent.id.raw,
-                    "status": agent.status.rawValue,
-                    "kind": agentKindString(agent.kind),
-                    "name": agent.name,
-                    "workspace": agent.workspaceName,
-                    "tab": agent.tabName,
-                    "needs_you": AttentionTriage.needsYou(agent) ? "true" : "false",
-                    "attention": AttentionTriage.kind(for: agent).rawValue,
-                    "priority": String(AttentionTriage.priority(agent)),
-                    "state_change_seq": String(agent.stateChangeSeq),
-                ] as [String: String]
-            }
-            let data = try JSONSerialization.data(withJSONObject: output, options: [.prettyPrinted, .sortedKeys])
+            let data = try HerdReport.jsonData(agents: live.agents)
             if let str = String(data: data, encoding: .utf8) {
                 print(str)
             }
@@ -288,7 +275,10 @@ struct HerdmgrCommand: AsyncParsableCommand {
         for agent in list {
             let glyph = AttentionTriage.statusMark(for: agent)
             let dwell = formatDwell(Date().timeIntervalSince(agent.enteredAt))
-            let kind = agentKindString(agent.kind)
+            // The JSON snapshot keeps the full kind. This column is 12
+            // wide, so a longer custom kind shows the cut instead of a
+            // word that looks complete.
+            let kind = truncate(HerdReport.kindText(agent.kind), 12)
             let name = truncate(agent.displayName.isEmpty ? agent.name : agent.displayName, 20)
             let location = "\(agent.workspaceName)/\(agent.tabName)"
 
@@ -309,17 +299,6 @@ struct HerdmgrCommand: AsyncParsableCommand {
         if minutes < 60 { return "\(minutes)m" }
         let hours = minutes / 60
         return "\(hours)h\(minutes % 60)m"
-    }
-
-    private func agentKindString(_ kind: AgentKind) -> String {
-        switch kind {
-        case .claude: return "claude"
-        case .codex: return "codex"
-        case .opencode: return "opencode"
-        case .aider: return "aider"
-        case .gemini: return "gemini"
-        case .custom(let s): return String(s.prefix(12))
-        }
     }
 
     private func truncate(_ s: String, _ maxLen: Int) -> String {
