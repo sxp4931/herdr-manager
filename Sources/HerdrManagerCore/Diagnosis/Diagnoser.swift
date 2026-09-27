@@ -1532,9 +1532,11 @@ private enum ShellForeground {
     /// Python 3.13's only long option that reaches a script is
     /// `--check-hash-based-pycs`. Every other `--` word, including the
     /// shared flags and `--help` / `--version`, exits, so the path after
-    /// it is not a script. `-r`, `-L`, `-o`, `-F`, `-h`, `-V`, and `-?`
-    /// exit too, including a longer word that starts with them. Bun,
-    /// Node, and Deno still consume the long flags they accept.
+    /// it is not a script. A short cluster is Python's own `SHORT_OPTS`
+    /// (`pythonShort`): an unknown letter, `h`, `V`, `?`, `c`, `m`, or a
+    /// lone `-` does not run the path after it, and `-W` / `-X` take a
+    /// value. `-qS`, `-bb`, `-OO`, `-vu`, `-R`, and `-t` still name the
+    /// file. Bun, Node, and Deno still consume the long flags they accept.
     /// Bun's own value flags are not that node rule. `--title --watch`
     /// and `--user-agent --watch` run the file. `--port`, `--shell`,
     /// `--install`, and the other flags in `bunDashRejectedFlags` exit
@@ -1572,10 +1574,11 @@ private enum ShellForeground {
     /// `--inspect-port` (`bunFlagNamesTheScript`); `--config` is
     /// `bunConfigFlagWidth`. Bun's `--loader` is `bunLoader`: a value
     /// with no `:` makes bun exit. Python exits on every long option
-    /// except `--check-hash-based-pycs` (`pythonRejectsSharedFlag`),
-    /// and on the shorts in that check. Deno still consumes this set,
-    /// including `--loader`. `--env-file` as its own word is Deno's
-    /// boolean, not a separate value.
+    /// except `--check-hash-based-pycs` (`pythonRejectsSharedFlag`).
+    /// A Python short cluster is `pythonShort`, so `-S` does not take
+    /// the next word and an unknown letter does not either. Deno still
+    /// consumes this set, including `--loader`. `--env-file` as its own
+    /// word is Deno's boolean, not a separate value.
     /// `-S` is Python's own boolean and Deno's permission flag, handled
     /// before the set. Node rejects `--cwd`, `--filter`, `--preload`,
     /// `--tsconfig-override`, `-W`, `-X`, `-S`, `-L`, `-o`, and `-F`
@@ -1668,11 +1671,24 @@ private enum ShellForeground {
             if configFlagExits(runtime), arg == "--config" || arg.hasPrefix("--config=") {
                 return nil
             }
-            // Python 3.13 exits on every long option except
-            // `--check-hash-based-pycs`, and on the shorts it does not
-            // run. `-W` and `-X` still take the next word below.
-            // Bun, Node, and Deno still consume the long flags they
-            // accept. `--config` already returned.
+            // Python 3.13 walks a short cluster one letter at a time.
+            // An unknown letter, help, version, `-c` / `-m`, or a lone
+            // `-` means this process does not run a file. `-W` and `-X`
+            // take the rest of the cluster or the next word. Bun, Node,
+            // and Deno do not use this set. `--config` already returned.
+            if isPythonRuntime(runtime), let short = pythonShort(arg, following: following) {
+                switch short {
+                case .skip(let width):
+                    index += width
+                case .exits:
+                    return nil
+                }
+                continue
+            }
+            // Every other `--` word exits. `--check-hash-based-pycs`
+            // is the one long option that still reaches a script, and
+            // its mode is `pythonOption` below. Bun, Node, and Deno
+            // still consume the long flags they accept.
             if isPythonRuntime(runtime), pythonRejectsSharedFlag(arg) {
                 return nil
             }
@@ -1688,9 +1704,9 @@ private enum ShellForeground {
                 }
                 continue
             }
-            // Python's `-S` is a boolean. It shares the shared value set
-            // with Deno's permission flag, and that set would swallow the
-            // script. `--check-hash-based-pycs` takes a mode, or exits.
+            // `--check-hash-based-pycs` takes a mode, or exits. `-S` already
+            // advanced in `pythonShort`, so the shared value set cannot
+            // swallow that script. `-W` and `-X` did too.
             if isPythonRuntime(runtime), let option = pythonOption(arg, following: following) {
                 switch option {
                 case .skip(let width):
@@ -2675,8 +2691,8 @@ private enum ShellForeground {
         return genericRuntimeName(runtime)
     }
 
-    /// How a Python option occupies argv. Nil when `arg` is not one of
-    /// these flags, so `-W` and `-X` stay on the shared value set.
+    /// How `--check-hash-based-pycs` occupies argv. Nil when `arg` is
+    /// not that flag. Shorts, including `-W` and `-X`, are `pythonShort`.
     private enum PythonOption {
         /// Words to advance, including the flag.
         case skip(Int)
@@ -2684,21 +2700,18 @@ private enum ShellForeground {
         case exits
     }
 
-    /// Python 3.13's own options that the shared value set gets wrong.
+    /// Python 3.13's `--check-hash-based-pycs`. Short options, including
+    /// `-S`, are `pythonShort`.
     ///
-    /// `-S` does not import site, and the next word is the script:
-    /// `python3 -S /tmp/codex` runs that file. `-SS` is the same flag
-    /// twice and stays one word, so the attached-value check still
-    /// leaves the script. `--check-hash-based-pycs` takes exactly
-    /// `always`, `default`, or `never`. Another word, a missing word,
-    /// or `--check-hash-based-pycs=always` makes Python exit, and the
-    /// path after it is not a program. `-W` and `-X` are not here.
+    /// The mode is exactly `always`, `default`, or `never`. Another
+    /// word, a missing word, or `--check-hash-based-pycs=always` makes
+    /// Python exit, and the path after it is not a program. The `=`
+    /// form is also a long option `pythonRejectsSharedFlag` rejects.
     private static let pythonHashPycModes: Set<String> = [
         "always", "default", "never",
     ]
 
     private static func pythonOption(_ arg: String, following: String?) -> PythonOption? {
-        if arg == "-S" { return .skip(1) }
         if arg == "--check-hash-based-pycs" {
             if let following, pythonHashPycModes.contains(following) {
                 return .skip(2)
@@ -2709,37 +2722,80 @@ private enum ShellForeground {
         return nil
     }
 
-    /// Shorts Python 3.13 does not run a script after. Checked on this
-    /// runtime. `-r`, `-L`, `-o`, and `-F` are unknown. `-h` and `-?`
-    /// are help, and `-V` is the version; a longer word that starts
-    /// with one of them (`-help`, `-VV`, `-V3`) exits too. `-W` and
-    /// `-X` are not here.
-    private static let pythonRejectedShorts: Set<String> = [
-        "-r", "-L", "-o", "-F", "-h", "-V", "-?",
+    /// How one Python argv word that starts with a single `-` occupies
+    /// the vector. Nil for a long option (`--…`), which is not a cluster.
+    private enum PythonShort {
+        /// Words to advance, including the flag.
+        case skip(Int)
+        /// Python does not run a file after this word.
+        case exits
+    }
+
+    /// Booleans in Python 3.13.5's `SHORT_OPTS` (`Python/getopt.c`):
+    /// `bBc:dEhiIJm:OPqRsStuvVW:xX:?`. `c`, `m`, `W`, and `X` take a
+    /// value. `h`, `V`, and `?` exit. `-t` is accepted and ignored.
+    /// `-R` turns the hash seed off. `-J` is rejected before that lookup.
+    private static let pythonBooleanShorts: Set<Character> = [
+        "b", "B", "d", "E", "i", "I", "O", "P", "q", "R", "s", "S", "t", "u", "v", "x",
     ]
 
-    /// Python 3.13 exits before the file after a foreign flag runs.
+    /// Python walks the cluster one letter at a time.
+    ///
+    /// `python3 -qS /tmp/codex`, `-bb`, `-OOO`, `-vu`, `-R`, and `-t`
+    /// run that file. `python3 -qW ignore /tmp/codex` and
+    /// `python3 -bWignore /tmp/codex` do too: `W` and `X` take the rest
+    /// of the cluster, or the next word when nothing is glued on. `c`
+    /// and `m` end the options, so the program is not a file.
+    /// `python3 -z /tmp/codex`, `-qz`, `-qh`, `-J`, `-1`, and a lone `-`
+    /// (the program is stdin) do not run the path. A missing word after
+    /// `-W` or `-X` does not either. Node and bun are not this set:
+    /// `node -q` is a bad option, and `python3 -q` is quiet.
+    private static func pythonShort(_ arg: String, following: String?) -> PythonShort? {
+        guard arg.hasPrefix("-"), !arg.hasPrefix("--") else { return nil }
+        if arg == "-" { return .exits }
+        let body = arg.dropFirst()
+        var index = body.startIndex
+        while index < body.endIndex {
+            let character = body[index]
+            let next = body.index(after: index)
+            if character == "c" || character == "m" {
+                return .exits
+            }
+            if character == "W" || character == "X" {
+                if next == body.endIndex {
+                    guard following != nil else { return .exits }
+                    return .skip(2)
+                }
+                return .skip(1)
+            }
+            if character == "h" || character == "V" || character == "?" {
+                return .exits
+            }
+            if pythonBooleanShorts.contains(character) {
+                index = next
+                continue
+            }
+            return .exits
+        }
+        return .skip(1)
+    }
+
+    /// Python 3.13 exits before the file after a foreign long option runs.
     ///
     /// The only long option that reaches a script is exactly
     /// `--check-hash-based-pycs`. `python3 --require preload.js
     /// /tmp/codex`, `python3 --cwd=/tmp /tmp/codex`, `python3 --help
     /// /tmp/codex`, and `python3 --not-a-flag /tmp/codex` all exit, and
-    /// so does `--check-hash-based-pycs=always`. `-r`, `-L`, `-o`,
-    /// `-F`, `-h`, `-V`, and `-?` exit, including `-rpreload` and
-    /// `-help`. `-W` and `-X` still run the file. `--config` exits in
-    /// `configFlagExits` before this check. Bun still runs the script
-    /// after `--require` and `--cwd`. Node consumes `--require`,
-    /// `--loader`, `--import`, and `--env-file`. Deno still consumes
-    /// those long flags. A script written before the flag is already
-    /// returned. `--` is handled before this check, so the word after
-    /// it stays the script.
+    /// so does `--check-hash-based-pycs=always`. Shorts are `pythonShort`.
+    /// `--config` exits in `configFlagExits` before this check. Bun still
+    /// runs the script after `--require` and `--cwd`. Node consumes
+    /// `--require`, `--loader`, `--import`, and `--env-file`. Deno still
+    /// consumes those long flags. A script written before the flag is
+    /// already returned. `--` is handled before this check, so the word
+    /// after it stays the script.
     private static func pythonRejectsSharedFlag(_ arg: String) -> Bool {
-        if arg.hasPrefix("--") {
-            return arg != "--check-hash-based-pycs"
-        }
-        if pythonRejectedShorts.contains(arg) { return true }
-        guard arg.hasPrefix("-"), arg.count > 2 else { return false }
-        return pythonRejectedShorts.contains(String(arg.prefix(2)))
+        guard arg.hasPrefix("--") else { return false }
+        return arg != "--check-hash-based-pycs"
     }
 
     /// Deno flags whose next word is the script. `-r` is `--reload`.

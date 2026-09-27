@@ -4152,6 +4152,181 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([helper, warningLetta]) == 10)
         #expect(Diagnoser.cpuSamplePid([warningLetta, interactive]) == 30)
     }
+
+    @Test("an unknown Python short is not the agent script")
+    func pythonUnknownShortIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Python 3.13 exits. The path is not the script, and this python
+        // is not the group leader. A lone `-` is stdin. `-c` and `-m`
+        // inside a cluster end the options, so the file is not the program.
+        let unknown = process(
+            4, "python3", argv: ["python3", "-z", "/usr/local/bin/codex"]
+        )
+        let letter = process(
+            4, "python3.11", argv: ["python3.11", "-a", "/tmp/codex"]
+        )
+        let reserved = process(
+            4, "Python.exe", argv: ["Python.exe", "-J", "/usr/local/bin/codex"]
+        )
+        let digit = process(
+            4, "python3", argv: ["python3", "-1", "/tmp/codex"]
+        )
+        let colon = process(
+            4, "python3", argv: ["python3", "-:", "/usr/local/bin/codex"]
+        )
+        let cluster = process(
+            4, "python3", argv: ["python3", "-qz", "/usr/local/bin/codex"]
+        )
+        let clusterLetter = process(
+            4, "python3", argv: ["python3", "-bZ", "/tmp/codex"]
+        )
+        let helpCluster = process(
+            4, "python3", argv: ["python3", "-qh", "/usr/local/bin/codex"]
+        )
+        let versionCluster = process(
+            4, "Python.exe", argv: ["Python.exe", "-qV", "/tmp/codex"]
+        )
+        let questionCluster = process(
+            4, "python3", argv: ["python3", "-q?", "/usr/local/bin/codex"]
+        )
+        let stdin = process(
+            4, "python3", argv: ["python3", "-", "/usr/local/bin/codex"]
+        )
+        let quietStdin = process(
+            4, "python3", argv: ["python3", "-q", "-", "/tmp/codex"]
+        )
+        let command = process(
+            4, "python3", argv: ["python3", "-qc", "/usr/local/bin/codex"]
+        )
+        let module = process(
+            4,
+            "python3.11",
+            argv: ["python3.11", "-qm", "json", "/usr/local/bin/codex"]
+        )
+        let unknownEval = process(
+            4, "python3", argv: ["python3", "-qe", "/tmp/codex"]
+        )
+        let missingWarning = process(
+            4, "python3", argv: ["python3", "-W"]
+        )
+        let rejected = [
+            unknown, letter, reserved, digit, colon, cluster, clusterLetter,
+            helpCluster, versionCluster, questionCluster, stdin, quietStdin,
+            command, module, unknownEval, missingWarning,
+        ]
+        for exited in rejected {
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12)
+        }
+        #expect(Diagnoser.cpuSamplePid([mcp, unknown], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, stdin], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, command], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([unknown]) == 4)
+
+        // A real cluster still names the file, including `-R` and `-t`,
+        // which the runtime accepts and the help text does not list.
+        // `-qW` takes `ignore` and the path after it is the script.
+        let quietSite = process(
+            20, "python3", argv: ["python3", "-qS", "/usr/local/bin/codex"]
+        )
+        let bytes = process(
+            20, "python3", argv: ["python3", "-bb", "/tmp/codex"]
+        )
+        let optimize = process(
+            20, "python3.11", argv: ["python3.11", "-OOO", "/usr/local/bin/codex"]
+        )
+        let unbuffered = process(
+            20, "python3", argv: ["python3", "-vu", "/tmp/codex"]
+        )
+        let hashSeed = process(
+            20, "Python.exe", argv: ["Python.exe", "-R", "/usr/local/bin/codex"]
+        )
+        let tabs = process(
+            20, "python3", argv: ["python3", "-t", "/tmp/codex"]
+        )
+        let tabsTwice = process(
+            20, "python3", argv: ["python3", "-tt", "/usr/local/bin/codex"]
+        )
+        let inspect = process(
+            20, "python3", argv: ["python3", "-qi", "/tmp/codex"]
+        )
+        let skipLine = process(
+            20, "python3", argv: ["python3", "-x", "/usr/local/bin/codex"]
+        )
+        let gluedWarning = process(
+            20, "python3", argv: ["python3", "-bWignore", "/tmp/codex"]
+        )
+        let clusteredWarning = process(
+            20,
+            "python3",
+            argv: ["python3", "-qW", "ignore", "/usr/local/bin/codex"]
+        )
+        let clusteredOption = process(
+            20, "Python.exe", argv: ["Python.exe", "-qX", "dev", "/tmp/codex"]
+        )
+        let warningDash = process(
+            20, "python3", argv: ["python3", "-W", "--", "/usr/local/bin/codex"]
+        )
+        let endOptions = process(
+            20, "python3", argv: ["python3", "-q", "--", "/tmp/codex"]
+        )
+        let scriptFirst = process(
+            20, "python3", argv: ["python3", "/usr/local/bin/codex", "-z"]
+        )
+        let kept = [
+            quietSite, bytes, optimize, unbuffered, hashSeed, tabs, tabsTwice,
+            inspect, skipLine, gluedWarning, clusteredWarning, clusteredOption,
+            warningDash, endOptions, scriptFirst,
+        ]
+        for running in kept {
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20)
+        }
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, quietSite], foregroundProcessGroupId: 20) == 20
+        )
+        #expect(
+            Diagnoser.cpuSamplePid(
+                [mcp, clusteredWarning], foregroundProcessGroupId: 20
+            ) == 20
+        )
+
+        // An unknown short in front of a Letta path is not the TUI.
+        // A real cluster in front of one is the same noninteractive
+        // entry as `-W ignore`, so the helper's lower pid still wins.
+        let falseLetta = process(
+            8,
+            "python3",
+            argv: ["python3", "-z", "/home/user/node_modules/.bin/letta"]
+        )
+        let stdinLetta = process(
+            8,
+            "python3",
+            argv: ["python3", "-", "/home/user/node_modules/.bin/letta"]
+        )
+        let commandLetta = process(
+            8,
+            "python3",
+            argv: ["python3", "-qc", "/home/user/node_modules/.bin/letta"]
+        )
+        let clusteredLetta = process(
+            40,
+            "python3",
+            argv: ["python3", "-qW", "ignore", "/tmp/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([falseLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([falseLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([falseLetta]) == 8)
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, falseLetta], foregroundProcessGroupId: 8) == 10
+        )
+        #expect(Diagnoser.cpuSamplePid([stdinLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([commandLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([helper, clusteredLetta]) == 10)
+        #expect(Diagnoser.cpuSamplePid([clusteredLetta, interactive]) == 30)
+    }
 }
 
 @Suite("Diagnoser finished vs process-gone")
