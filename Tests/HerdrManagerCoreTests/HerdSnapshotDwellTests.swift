@@ -696,7 +696,7 @@ struct HerdLiveTableDwellTests {
             AgentID("wA:p1"): .gone(lastLine: "zsh (pid 4)")
         ], now: started)
         let polledAt = Date(timeIntervalSince1970: 4_000)
-        live.noteStatusRefresh(
+        let opened = live.noteStatusRefresh(
             snapshot([
                 makeDwellAgentInfo(
                     paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5,
@@ -710,6 +710,9 @@ struct HerdLiveTableDwellTests {
             ], workspaces: ["wA": "Renamed"], tabs: ["wA:t1": "suite"]),
             now: polledAt
         )
+        // The title on p1 is the same episode. p2's status and seq opened
+        // one. The pane the list added is not a row, so it is not named.
+        #expect(opened.map(\.raw) == ["wA:p2"])
 
         let blocked = live.agents.first { $0.id.raw == "wA:p1" }
         #expect(blocked?.name == "Needs you")
@@ -731,7 +734,7 @@ struct HerdLiveTableDwellTests {
 
         // The next list leaves the title and directory off. That is not a
         // new name, and it does not open an episode.
-        live.noteStatusRefresh(
+        let heldEpisode = live.noteStatusRefresh(
             snapshot([
                 makeDwellAgentInfo(
                     paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5,
@@ -741,6 +744,7 @@ struct HerdLiveTableDwellTests {
             ], workspaces: [:], tabs: [:]),
             now: Date(timeIntervalSince1970: 5_000)
         )
+        #expect(heldEpisode.isEmpty)
         let held = live.agents.first { $0.id.raw == "wA:p1" }
         #expect(held?.name == "Needs you")
         #expect(held?.cwd == "/tmp")
@@ -750,11 +754,95 @@ struct HerdLiveTableDwellTests {
         #expect(held?.verdict == .processGone(lastLine: "zsh (pid 4)"))
     }
 
+    @Test("A status poll that opens an episode names that row so the crash can be read back")
+    func statusRefreshNamesTheEpisodeACrashHasToBeReadOn() throws {
+        var live = initialTable()
+        live.applyProcessGone([
+            AgentID("wA:p1"): .gone(lastLine: "zsh (pid 1)"),
+            AgentID("wA:p2"): .gone(lastLine: "zsh (pid 2)")
+        ], now: started)
+        let polledAt = Date(timeIntervalSince1970: 4_000)
+        let opened = live.noteStatusRefresh(
+            snapshot([
+                makeDwellAgentInfo(
+                    paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5,
+                    title: "Needs you"
+                ),
+                makeDwellAgentInfo(
+                    paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 4
+                )
+            ]),
+            now: polledAt
+        )
+        // p1's title is the same episode, so its crash stays and it is not
+        // read again. p2's seq opened an episode. The fresh verdict is the
+        // status verdict, and a working row with that verdict is not on
+        // the attention list.
+        #expect(opened.map(\.raw) == ["wA:p2"])
+        #expect(live.agents.first { $0.id.raw == "wA:p1" }?.verdict == .processGone(lastLine: "zsh (pid 1)"))
+        #expect(live.agents.first { $0.id.raw == "wA:p1" }?.name == "Needs you")
+        let bumped = try #require(live.agents.first { $0.id.raw == "wA:p2" })
+        #expect(bumped.status == .working)
+        #expect(bumped.stateChangeSeq == 4)
+        #expect(bumped.enteredAt == polledAt)
+        #expect(bumped.verdict.isProcessGone == false)
+        #expect(AttentionTriage.attentionWorthy(bumped) == false)
+
+        // The caller reads the process list for the returned ids only, then
+        // draws. A bare shell puts the crash on the new episode. The other
+        // row was not in that read.
+        live.applyProcessGone(
+            [AgentID("wA:p2"): .gone(lastLine: "zsh (pid 2)")],
+            now: polledAt
+        )
+        let restored = try #require(live.agents.first { $0.id.raw == "wA:p2" })
+        #expect(restored.verdict == .processGone(lastLine: "zsh (pid 2)"))
+        #expect(restored.enteredAt == polledAt)
+        #expect(restored.stateChangeSeq == 4)
+        #expect(AttentionTriage.kind(for: restored) == .gone)
+        #expect(AttentionTriage.attentionWorthy(restored))
+        #expect(live.agents.first { $0.id.raw == "wA:p1" }?.verdict == .processGone(lastLine: "zsh (pid 1)"))
+
+        let again = live.noteStatusRefresh(
+            snapshot([
+                makeDwellAgentInfo(
+                    paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5,
+                    title: "Needs you"
+                ),
+                makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 4)
+            ]),
+            now: Date(timeIntervalSince1970: 5_000)
+        )
+        #expect(again.isEmpty)
+        #expect(live.agents.first { $0.id.raw == "wA:p2" }?.verdict == .processGone(lastLine: "zsh (pid 2)"))
+        #expect(live.noteStatusRefresh(nil, now: polledAt).isEmpty)
+        #expect(live.agents.first { $0.id.raw == "wA:p2" }?.verdict == .processGone(lastLine: "zsh (pid 2)"))
+
+        // An empty process read is not a crash. The new episode keeps the
+        // status verdict. The crash from the episode it replaced is not
+        // copied onto it.
+        var unread = initialTable()
+        unread.applyProcessGone([
+            AgentID("wA:p2"): .gone(lastLine: "zsh (pid 2)")
+        ], now: started)
+        let unreadIds = unread.noteStatusRefresh(
+            snapshot([
+                makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5),
+                makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 4)
+            ]),
+            now: polledAt
+        )
+        #expect(unreadIds.map(\.raw) == ["wA:p2"])
+        unread.applyProcessGone([AgentID("wA:p2"): .unknown], now: polledAt)
+        #expect(unread.agents.first { $0.id.raw == "wA:p2" }?.verdict.isProcessGone == false)
+        #expect(unread.agents.first { $0.id.raw == "wA:p2" }?.status == .working)
+    }
+
     @Test("A status poll does not adopt a moved id or drop the one it left")
     func statusRefreshDoesNotAdoptAMove() {
         var live = initialTable()
         let polledAt = Date(timeIntervalSince1970: 4_000)
-        live.noteStatusRefresh(
+        let opened = live.noteStatusRefresh(
             snapshot(
                 [
                     makeDwellAgentInfo(
@@ -767,6 +855,9 @@ struct HerdLiveTableDwellTests {
             ),
             now: polledAt
         )
+        // The moved id is not a row yet. The ids the list dropped stay,
+        // and staying is not an episode this poll opened.
+        #expect(opened.isEmpty)
         #expect(live.agents.map(\.id.raw) == ["wA:p1", "wA:p2"])
         #expect(live.agents.first?.enteredAt == started)
         #expect(live.agents.first?.status == .blocked)
@@ -841,17 +932,18 @@ struct HerdLiveTableDwellTests {
         rows[blockedIndex].verdict = .processGone(lastLine: "zsh (pid 1)")
         var live = HerdLiveTable(herd: first, agents: rows)
 
-        live.noteStatusRefresh(
+        let omitted = live.noteStatusRefresh(
             snapshot([
                 makeDwellAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5),
                 makeDwellAgentInfo(paneId: "wA:p2", agentStatus: "working", stateChangeSeq: 3, session: same)
             ]),
             now: refreshedAt
         )
+        #expect(omitted.isEmpty)
         #expect(live.agents.first { $0.id.raw == "wA:p1" }?.enteredAt == started)
         #expect(live.agents.first { $0.id.raw == "wA:p1" }?.verdict == .processGone(lastLine: "zsh (pid 1)"))
 
-        live.noteStatusRefresh(
+        let replacedIds = live.noteStatusRefresh(
             snapshot([
                 makeDwellAgentInfo(
                     paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: other
@@ -860,6 +952,7 @@ struct HerdLiveTableDwellTests {
             ]),
             now: moveAt
         )
+        #expect(replacedIds.map(\.raw) == ["wA:p1"])
         let replaced = live.agents.first { $0.id.raw == "wA:p1" }
         #expect(replaced?.enteredAt == moveAt)
         #expect(replaced?.verdict.isProcessGone == false)

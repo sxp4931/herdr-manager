@@ -121,8 +121,19 @@ public struct HerdLiveTable: Sendable {
     /// a failed read. An open layout burst is left in place, including
     /// its remembered dwell. A rename that arrives while this read is in
     /// flight is applied by the caller after this returns.
-    public mutating func noteStatusRefresh(_ refreshed: HerdSnapshot?, now: Date = Date()) {
-        guard let refreshed else { return }
+    ///
+    /// The returned ids are the rows whose status, seq, or session opened
+    /// a new episode. The fresh verdict on those rows is the status
+    /// verdict, so a crash the last process read stamped is gone until
+    /// the caller reads those panes. A row that keeps the episode — same
+    /// status and seq, including a list that only changes the title or
+    /// leaves the session off — is not included, and neither is a pane
+    /// this list does not contain. A failed read returns an empty array.
+    /// Rows left off the result keep the crash they had. Reading them
+    /// on this poll would scan a table whose episode did not change.
+    @discardableResult
+    public mutating func noteStatusRefresh(_ refreshed: HerdSnapshot?, now: Date = Date()) -> [AgentID] {
+        guard let refreshed else { return [] }
         let previousSessions = sessionByPane
         let previousTabs = tabIdByPane
         let previousAliases = aliasByPane
@@ -132,6 +143,7 @@ public struct HerdLiveTable: Sendable {
         }
         var next: [Agent] = []
         next.reserveCapacity(agents.count)
+        var openedEpisodes: [AgentID] = []
         for old in agents {
             guard let info = listed[old.id.raw],
                   var updated = refreshed.displayAgent(for: info, now: now) else {
@@ -141,15 +153,19 @@ public struct HerdLiveTable: Sendable {
             // Same episode, including a list that leaves the session off.
             // The fresh row's verdict is stamped at `now`; the one already
             // on the table is the episode the process scan and the dwell
-            // are about.
-            if old.status == updated.status,
-               old.stateChangeSeq == updated.stateChangeSeq,
-               !SessionIdentity.replaced(
-                   stored: previousSessions[old.id.raw],
-                   incoming: info.sessionIdentity
-               ) {
+            // are about. A new episode is named so the caller can read
+            // the process list for that row before it draws.
+            let sameEpisode = old.status == updated.status
+                && old.stateChangeSeq == updated.stateChangeSeq
+                && !SessionIdentity.replaced(
+                    stored: previousSessions[old.id.raw],
+                    incoming: info.sessionIdentity
+                )
+            if sameEpisode {
                 updated.enteredAt = old.enteredAt
                 updated.verdict = old.verdict
+            } else {
+                openedEpisodes.append(updated.id)
             }
             // A list that leaves every name source off is not a rename.
             // `displayAgent` would otherwise fall through to the kind. A
@@ -193,6 +209,7 @@ public struct HerdLiveTable: Sendable {
         adoptSessions(from: refreshed, previous: previousSessions)
         adoptTabIds(from: refreshed, previous: previousTabs)
         adoptAliases(from: refreshed, previous: previousAliases)
+        return openedEpisodes
     }
 
     /// Nil and "" are both "the list did not name this".

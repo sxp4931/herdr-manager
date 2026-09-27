@@ -150,6 +150,14 @@ struct HerdmgrCommand: AsyncParsableCommand {
     /// a layout event keeps the previous status until the user creates,
     /// closes, or focuses a container.
     ///
+    /// A poll that opens an episode reads the process list for those rows
+    /// before the table is drawn. The fresh verdict is the status verdict,
+    /// and a dead process whose status string stayed `working` would
+    /// otherwise leave the attention list until the next event or the 15s
+    /// tick. A poll that keeps the episode does not read. That read is
+    /// what would paint a status verdict over a crash the last scan
+    /// stamped, and it would run for the whole table at the herd cadence.
+    ///
     /// Silence is not classified here. A full diagnose would time it from
     /// `enteredAt`, and this table has no output clock, so a busy agent
     /// would read as quiet once the episode outlasted the threshold.
@@ -203,7 +211,15 @@ struct HerdmgrCommand: AsyncParsableCommand {
             case .herd:
                 let before = live.agents
                 let refreshed = try? await adapter.herdSnapshot()
-                live.noteStatusRefresh(refreshed)
+                let opened = live.noteStatusRefresh(refreshed)
+                if !opened.isEmpty {
+                    let openedIds = Set(opened)
+                    let targets = live.agents.filter { openedIds.contains($0.id) }
+                    let observations = await processGoneObservations(
+                        for: targets, adapter: adapter, diagnoser: diagnoser
+                    )
+                    live.applyProcessGone(observations)
+                }
                 scanProcesses = false
                 guard live.agents != before else { continue }
             case .tick:
