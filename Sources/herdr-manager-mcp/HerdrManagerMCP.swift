@@ -1742,12 +1742,14 @@ actor MCPServer {
                 outcome: "executed",
                 keepForever: true
             ))
-            var result = "{\"agentId\":\"\(paneId)\",\"space\":\"\(finalWorkspaceId)\",\"placement\":\"\(placement)\""
-            if let tabId { result += ",\"tab\":\"\(tabId)\"" }
-            result += ",\"started\":true,\"actionId\":\"\(actionId)\""
-            result += SpawnBrief.resultFields(for: briefOutcome)
-            result += "}"
-            return makeToolResult(result)
+            return makeToolResult(SpawnBrief.startedResult(
+                agentId: paneId,
+                space: finalWorkspaceId,
+                placement: placement,
+                tab: tabId,
+                actionId: actionId,
+                brief: briefOutcome
+            ))
         } catch {
             let detail = String(describing: error)
             try? await sharedActionStore.markFailed(actionId, detail: detail)

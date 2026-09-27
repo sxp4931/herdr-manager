@@ -259,6 +259,38 @@ public enum SpawnBrief: Sendable {
         }
     }
 
+    /// The tool result after `agent.start` has returned.
+    ///
+    /// `agentId`, `space`, and `tab` are herdr ids. The object is built by
+    /// hand, and a quote, backslash, or control character in one of them
+    /// ended it. The caller then had no pane id for an agent that was
+    /// already running. `placement` and `actionId` are escaped the same
+    /// way. A nil `tab` omits the field. An empty tab is still a value.
+    /// Brief fields are appended unchanged: those phrases are fixed
+    /// and contain no quote.
+    public static func startedResult(
+        agentId: String,
+        space: String,
+        placement: String,
+        tab: String?,
+        actionId: String,
+        brief: Outcome
+    ) -> String {
+        var result = "{\"agentId\":\(quoted(agentId)),\"space\":\(quoted(space)),\"placement\":\(quoted(placement))"
+        if let tab {
+            result += ",\"tab\":\(quoted(tab))"
+        }
+        result += ",\"started\":true,\"actionId\":\(quoted(actionId))"
+        result += resultFields(for: brief)
+        result += "}"
+        return result
+    }
+
+    /// A JSON string literal, including the surrounding quotes.
+    private static func quoted(_ value: String) -> String {
+        "\"\(ConfirmedPaneFollow.jsonEscaped(value))\""
+    }
+
     /// A journal token for a withheld status. Only a real `AgentStatus`
     /// raw value is copied. Anything else, including a quote, is `other`.
     public static func journalStatusToken(_ status: String) -> String {

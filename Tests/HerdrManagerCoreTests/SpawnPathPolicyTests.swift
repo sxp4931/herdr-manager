@@ -290,4 +290,66 @@ struct SpawnBriefTests {
         #expect(!reported.contains("inserted"))
         #expect(!reported.contains("/tmp/herdr.sock"))
     }
+
+    @Test("A quote in a herdr id stays inside the spawn result")
+    func startedResultStaysJSON() throws {
+        let plain = SpawnBrief.startedResult(
+            agentId: "w1:p1",
+            space: "w1",
+            placement: "new_tab",
+            tab: "t2",
+            actionId: "A1",
+            brief: .none
+        )
+        #expect(
+            plain
+                == "{\"agentId\":\"w1:p1\",\"space\":\"w1\",\"placement\":\"new_tab\",\"tab\":\"t2\",\"started\":true,\"actionId\":\"A1\"}"
+        )
+        #expect(!plain.contains("\\"))
+
+        let split = SpawnBrief.startedResult(
+            agentId: "w1:p1",
+            space: "w1",
+            placement: "split",
+            tab: nil,
+            actionId: "A1",
+            brief: .send
+        )
+        #expect(
+            split
+                == "{\"agentId\":\"w1:p1\",\"space\":\"w1\",\"placement\":\"split\",\"started\":true,\"actionId\":\"A1\",\"briefSent\":true}"
+        )
+        #expect(!split.contains("\"tab\""))
+
+        let emptyTab = SpawnBrief.startedResult(
+            agentId: "w1:p1",
+            space: "w1",
+            placement: "new_workspace",
+            tab: "",
+            actionId: "A1",
+            brief: .none
+        )
+        #expect(emptyTab.contains(",\"tab\":\"\""))
+
+        let hostile = SpawnBrief.startedResult(
+            agentId: "w\"1",
+            space: "a\\b",
+            placement: "new_tab\";\"started\":false",
+            tab: "t\n2\t\u{0001}",
+            actionId: "A\"1",
+            brief: .withhold(status: "blocked\";\"started\":false")
+        )
+        let object = try JSONSerialization.jsonObject(with: Data(hostile.utf8)) as? [String: Any]
+        #expect(object?["agentId"] as? String == "w\"1")
+        #expect(object?["space"] as? String == "a\\b")
+        #expect(object?["placement"] as? String == "new_tab\";\"started\":false")
+        #expect(object?["tab"] as? String == "t\n2\t\u{0001}")
+        #expect(object?["started"] as? Bool == true)
+        #expect(object?["actionId"] as? String == "A\"1")
+        #expect(object?["briefSent"] as? Bool == false)
+        #expect(
+            object?["briefNotSent"] as? String
+                == "agent is blocked; a brief submits Enter and was not sent"
+        )
+    }
 }
