@@ -344,28 +344,30 @@ public actor Diagnoser {
 /// herdr starts a pane with `$SHELL`, or with `[terminal] default_shell`.
 /// The documented example of that setting is `nu`. PowerShell is `pwsh`
 /// or `powershell`, including the `.exe` a remote pane reports. `csh` is
-/// the shell beside `tcsh`. A login shell's argv0 is `-nu` or a path, and
-/// the comm name can be the other spelling of the same binary, so either
-/// field counts. A runtime (`node`, `tmux`) does not: the agent may still
-/// be the program that name is running.
+/// the shell beside `tcsh`. herdr's login-shell list also names `ash` and
+/// `mksh`, beside `dash` and `ksh`. A login shell's argv0 is `-nu` or a
+/// path, and the comm name can be the other spelling of the same binary,
+/// so either field counts. A runtime (`node`, `tmux`) does not: the agent
+/// may still be the program that name is running.
 ///
 /// A shell is not bare when its argument vector is launching an agent.
 /// herdr identifies `sh /path/to/pi` as Pi and `powershell -File claude.ps1`
 /// as Claude. The comm on both is the shell, so a name-only check marked
 /// a live agent gone. `argv` is that vector. `cmdline` is used only when
-/// `argv` was not sent. `dash`, `ksh`, `csh`, and `tcsh` run a script the
-/// same way `sh` does, and they are already the shells a dead agent can
-/// leave, so a path after the flags is the program. `bash -o` and `bash
-/// -O` take the next word as the option name; `bash --rcfile` takes a
-/// file. Treating that word as the program marked `bash -o errexit
-/// claude` gone, and treated the rcfile as the program when claude was
-/// the next word. `sh -c` stays bare, including when a later argument
-/// names an agent: that flag's operand is a script, not a program path,
-/// and herdr does not treat it as the agent either. `nu` is not unwrapped.
-/// `cmd` is a shell only when an argument vector is present, so a payload
-/// that omits `argv` and `cmdline` does not start calling every `cmd.exe`
-/// a crash. One non-shell in the group keeps the row alive; the caller
-/// applies that.
+/// `argv` was not sent. `dash`, `ksh`, `csh`, `tcsh`, `ash`, and `mksh`
+/// run a script the same way `sh` does. `bash -o` and `bash -O` take the
+/// next word as the option name, including inside `-euo pipefail`, and
+/// `bash --rcfile` takes a file. Treating that word as the program marked
+/// `bash -euo pipefail claude` gone. fish's `-d`, `-p`, and `--profile`
+/// take a value the same way. `sh -c` stays bare, including a cluster
+/// that starts with `-c`, even when a later argument names an agent:
+/// that flag's operand is a script, not a program path, and herdr does
+/// not treat it as the agent either. A `c` later in the cluster does
+/// not hide the program (`-xco pipefail claude` is still claude). `nu`
+/// is not unwrapped. `cmd` is a shell only when an
+/// argument vector is present, so a payload that omits `argv` and
+/// `cmdline` does not start calling every `cmd.exe` a crash. One
+/// non-shell in the group keeps the row alive; the caller applies that.
 private enum ShellForeground {
     private enum Kind {
         case posix
@@ -389,7 +391,7 @@ private enum ShellForeground {
     private static func isNamedShell(_ name: String?) -> Bool {
         guard let name else { return false }
         return [
-            "zsh", "bash", "sh", "fish", "tcsh", "ksh", "dash", "csh",
+            "zsh", "bash", "sh", "fish", "tcsh", "ksh", "dash", "ash", "mksh", "csh",
             "nu", "pwsh", "powershell", "login",
         ].contains(shellBase(name))
     }
@@ -430,16 +432,16 @@ private enum ShellForeground {
 
     /// The shell whose rules apply. `argv[0]` wins over the comm name,
     /// because a login argv0 can be `-zsh` while the comm is `MainThread`.
-    /// `dash`, `ksh`, `csh`, and `tcsh` use the same script rule as `sh`:
-    /// the first word that is not a flag is the program. `nu` is not here.
-    /// A later path is not how that pane is still an agent.
+    /// `dash`, `ksh`, `csh`, `tcsh`, `ash`, and `mksh` use the same script
+    /// rule as `sh`: the first word that is not a flag is the program.
+    /// `nu` is not here. A later path is not how that pane is still an agent.
     private static func unwrappingKind(_ process: ForegroundProcess) -> Kind? {
         let args = launchArguments(process)
         let candidates = [args?.first, process.argv0, process.name]
         for candidate in candidates {
             guard let candidate else { continue }
             switch shellBase(candidate) {
-            case "sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh":
+            case "sh", "bash", "zsh", "fish", "dash", "ksh", "ash", "mksh", "csh", "tcsh":
                 return .posix
             case "powershell", "pwsh":
                 return .powershell
@@ -470,13 +472,22 @@ private enum ShellForeground {
 
     /// Skip the shell itself. `-c` (and a short cluster that starts with
     /// it, such as `-cl`) is an eval, so the next word is not a program.
-    /// `--` ends the flags. `-o` and `-O` on bash, zsh, ksh, and sh take
-    /// the next word as an option name; dash and fish do the same for
-    /// `-o`. `--rcfile` and `--init-file` on bash and sh take a file.
-    /// Any other flag is skipped and does not consume the following word.
-    /// The first word that is not a flag is the program. csh and tcsh
-    /// have no option flag that takes a value, so `-o` there is only a
-    /// flag and the next word can still be the program.
+    /// A `c` that is not the first letter (`-lc`, `-xco`) does not do
+    /// that: `-lc claude` runs claude, and `-xco pipefail claude` uses
+    /// `pipefail` as the `-o` name. `--` ends the flags. `-o` and `-O`
+    /// take the next word on the shells that have that flag, even when
+    /// more letters follow (`-euo pipefail`, `-oeu pipefail`). bash's
+    /// `-oerrexit` is those letters plus the next word, not a glued name,
+    /// and that next word is not the program. fish keeps an attached
+    /// value in the cluster (`-d3`) and takes the next word only when
+    /// the letter ends it.
+    /// `--rcfile` and `--init-file` on bash and sh take a file. fish's
+    /// debug, profile, and init-command flags take a value; `--debug=3`
+    /// keeps its value in the same word. Any other flag is skipped. The
+    /// first word that is not a flag is the program. csh and tcsh have
+    /// no option flag that takes a value, so `-o` there is only a flag
+    /// and the next word can still be the program. `ash` and `mksh` take
+    /// `-o` and `+o`, and not `-O`.
     private static func posixLaunchesAgent(_ args: [String]) -> Bool {
         let shell = args.first.map { shellBase($0) } ?? ""
         var index = 1
@@ -491,6 +502,10 @@ private enum ShellForeground {
                 index += 2
                 continue
             }
+            if isOptionCluster(arg, shell: shell) {
+                index += shortClusterConsumesNext(arg, shell: shell) ? 2 : 1
+                continue
+            }
             if arg.hasPrefix("-") {
                 index += 1
                 continue
@@ -502,19 +517,117 @@ private enum ShellForeground {
 
     /// A flag whose next word is not the program. The set is the shell
     /// that is actually in `argv[0]`, so `csh -o` does not swallow a path
-    /// and `dash` does not treat `-O` as an option name.
+    /// and `dash` does not treat `-O` as an option name. `+o` turns the
+    /// same option off on the POSIX shells. fish's `-o` is a debug file,
+    /// not `+o`.
     private static func posixOptionTakesValue(_ arg: String, shell: String) -> Bool {
         switch arg {
         case "-o":
-            return shell == "sh" || shell == "bash" || shell == "zsh"
-                || shell == "ksh" || shell == "dash" || shell == "fish"
-        case "-O":
-            return shell == "sh" || shell == "bash" || shell == "zsh" || shell == "ksh"
+            return shellTakesMinusO(shell)
+        case "+o":
+            return shellTakesPlusO(shell)
+        case "-O", "+O":
+            return shellTakesCapitalO(shell)
         case "--rcfile", "--init-file":
             return shell == "sh" || shell == "bash"
         default:
+            break
+        }
+        if shell == "fish" {
+            switch arg {
+            case "-C", "-p", "-d", "-f", "-D",
+                 "--init-command", "--profile", "--profile-startup",
+                 "--debug", "--debug-output", "--features", "--debug-stack-frames":
+                return true
+            default:
+                break
+            }
+        }
+        return false
+    }
+
+    /// `-o` / fish's debug-output file. `ash` and `mksh` are the POSIX
+    /// shells beside `dash`: they take `-o` and do not take bash's `-O`.
+    private static func shellTakesMinusO(_ shell: String) -> Bool {
+        shell == "sh" || shell == "bash" || shell == "zsh"
+            || shell == "ksh" || shell == "dash" || shell == "ash"
+            || shell == "mksh" || shell == "fish"
+    }
+
+    /// `set +o` on the same shells, except fish. fish's `-o` is not that flag.
+    private static func shellTakesPlusO(_ shell: String) -> Bool {
+        shell == "sh" || shell == "bash" || shell == "zsh"
+            || shell == "ksh" || shell == "dash" || shell == "ash"
+            || shell == "mksh"
+    }
+
+    /// bash `-O` / `+O` shopt. dash, ash, mksh, fish, csh, and tcsh do not.
+    private static func shellTakesCapitalO(_ shell: String) -> Bool {
+        shell == "sh" || shell == "bash" || shell == "zsh" || shell == "ksh"
+    }
+
+    /// A short cluster of more than one letter: `-euo`, `+euo`, `-oerrexit`.
+    /// A single `-o` is `posixOptionTakesValue`. A `+` cluster is only
+    /// recognized on a shell that has `+o` or `+O`, so `csh +o` stays a
+    /// plain word.
+    private static func isOptionCluster(_ arg: String, shell: String) -> Bool {
+        if arg.hasPrefix("-"), !arg.hasPrefix("--"), arg.count > 2 {
+            return true
+        }
+        guard shellTakesPlusO(shell) || shellTakesCapitalO(shell) else { return false }
+        guard arg.count > 2, arg.first == "+" else { return false }
+        return arg.dropFirst().allSatisfy { isASCIILetter($0) }
+    }
+
+    /// True when the next argv is an option value.
+    ///
+    /// bash, dash, and the other `-o` shells take that value from the
+    /// next word even when flag letters follow (`-oeu pipefail`, and
+    /// `-oerrexit` does not glue the name on). fish's getopt keeps an
+    /// attached value in the cluster (`-d3`), and takes the next word
+    /// only when the letter ends it (`-d 3`, `-io file`).
+    private static func shortClusterConsumesNext(_ arg: String, shell: String) -> Bool {
+        guard let prefix = arg.first else { return false }
+        let letters = arg.dropFirst()
+        var index = letters.startIndex
+        var consume = false
+        while index < letters.endIndex {
+            let letter = letters[index]
+            let next = letters.index(after: index)
+            if clusterLetterTakesValue(letter, prefix: prefix, shell: shell) {
+                if shell == "fish" {
+                    return next == letters.endIndex
+                }
+                consume = true
+            }
+            index = next
+        }
+        return consume
+    }
+
+    private static func clusterLetterTakesValue(
+        _ letter: Character,
+        prefix: Character,
+        shell: String
+    ) -> Bool {
+        switch letter {
+        case "o":
+            return prefix == "-" ? shellTakesMinusO(shell) : shellTakesPlusO(shell)
+        case "O":
+            return shellTakesCapitalO(shell)
+        case "C", "p", "d", "f", "D":
+            return prefix == "-" && shell == "fish"
+        default:
             return false
         }
+    }
+
+    private static func isASCIILetter(_ character: Character) -> Bool {
+        guard character.unicodeScalars.count == 1,
+              let value = character.unicodeScalars.first?.value else {
+            return false
+        }
+        return (value >= 65 && value <= 90) || (value >= 97 && value <= 122)
     }
 
     private static func isPosixEval(_ arg: String) -> Bool {

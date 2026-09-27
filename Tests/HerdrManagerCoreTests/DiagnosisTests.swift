@@ -1709,6 +1709,260 @@ struct DiagnoserFinishedClassificationTests {
         #expect(fishCapital == .gone(lastLine: "fish (pid 56)"))
     }
 
+    @Test("A clustered shell option is not the program, and ash and mksh still launch one")
+    func clusteredShellOptionIsNotTheProgram() async {
+        let working = Agent(id: AgentID("w1:p1"), kind: .claude, status: .working)
+        let diagnoser = Diagnoser()
+
+        func observe(_ processes: [ForegroundProcess]) async -> ProcessGoneObservation {
+            await diagnoser.observeProcessGone(
+                agent: working,
+                adapter: MockHerdrAdapter(processInfoResult: ProcessInfoResult(
+                    shellPid: 10,
+                    foregroundProcesses: processes
+                ))
+            )
+        }
+
+        // `-euo pipefail` is one cluster. The option name is not the program.
+        let bashCluster = await observe([
+            ForegroundProcess(
+                pid: 60, name: "bash", argv0: "/bin/bash", cmdline: nil, cwd: nil,
+                argv: ["/bin/bash", "-euo", "pipefail", "/usr/local/bin/claude"]
+            )
+        ])
+        #expect(bashCluster == .running)
+        let cmdlineCluster = await observe([
+            ForegroundProcess(
+                pid: 61, name: "sh", argv0: nil,
+                cmdline: "sh -euo pipefail /usr/bin/claude", cwd: nil
+            )
+        ])
+        #expect(cmdlineCluster == .running)
+        // No program after the option name. The shell is bare.
+        let clusterOnly = await observe([
+            ForegroundProcess(
+                pid: 62, name: "bash", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["bash", "-euo", "pipefail"]
+            )
+        ])
+        #expect(clusterOnly == .gone(lastLine: "bash (pid 62)"))
+        // The option can sit in front of an eval. The eval is still not a program.
+        let clusterThenEval = await observe([
+            ForegroundProcess(
+                pid: 63, name: "bash", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["bash", "-euo", "pipefail", "-c", "claude"]
+            )
+        ])
+        #expect(clusterThenEval == .gone(lastLine: "bash (pid 63)"))
+        // Flag letters may follow `-o`. The next word is still the name.
+        let optionBeforeFlags = await observe([
+            ForegroundProcess(
+                pid: 64, name: "bash", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["bash", "-oeu", "pipefail", "/usr/bin/claude"]
+            )
+        ])
+        #expect(optionBeforeFlags == .running)
+        // `-oerrexit` is not a glued option name. The next word is that name.
+        let gluedName = await observe([
+            ForegroundProcess(
+                pid: 164, name: "bash", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["bash", "-oerrexit", "/usr/bin/claude"]
+            )
+        ])
+        #expect(gluedName == .gone(lastLine: "bash (pid 164)"))
+        // fish keeps an attached value in the cluster, so the next word is the program.
+        let fishAttached = await observe([
+            ForegroundProcess(
+                pid: 165, name: "fish", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["fish", "-d3", "/usr/bin/claude"]
+            )
+        ])
+        #expect(fishAttached == .running)
+        // `+o` turns the option off. The next word is still the name, not the program.
+        let plus = await observe([
+            ForegroundProcess(
+                pid: 65, name: "zsh", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["zsh", "+o", "nomatch", "/usr/bin/codex"]
+            )
+        ])
+        #expect(plus == .running)
+        let plusCluster = await observe([
+            ForegroundProcess(
+                pid: 66, name: "zsh", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["zsh", "+euo", "pipefail", "/usr/bin/codex"]
+            )
+        ])
+        #expect(plusCluster == .running)
+        let plusShopt = await observe([
+            ForegroundProcess(
+                pid: 67, name: "bash", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["bash", "+O", "extglob", "/usr/bin/claude"]
+            )
+        ])
+        #expect(plusShopt == .running)
+        // A trailing `c` leaves the next word as the program. A `c` before
+        // a final `-o` does not: `pipefail` is the option name, and claude
+        // is still the program. With no name in between, `-o` takes the path.
+        let trailingEval = await observe([
+            ForegroundProcess(
+                pid: 68, name: "bash", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["bash", "-lc", "/usr/bin/claude"]
+            )
+        ])
+        #expect(trailingEval == .running)
+        let optionAfterEvalFlag = await observe([
+            ForegroundProcess(
+                pid: 69, name: "bash", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["bash", "-xco", "pipefail", "/usr/bin/claude"]
+            )
+        ])
+        #expect(optionAfterEvalFlag == .running)
+        let optionTakesPath = await observe([
+            ForegroundProcess(
+                pid: 69, name: "bash", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["bash", "-xco", "/usr/bin/claude"]
+            )
+        ])
+        #expect(optionTakesPath == .gone(lastLine: "bash (pid 69)"))
+
+        // dash takes `-o` inside a cluster and does not take `-O`.
+        let dashCluster = await observe([
+            ForegroundProcess(
+                pid: 70, name: "dash", argv0: "/bin/dash", cmdline: nil, cwd: nil,
+                argv: ["/bin/dash", "-euo", "pipefail", "/tmp/pi"]
+            )
+        ])
+        #expect(dashCluster == .running)
+        let dashCapitalCluster = await observe([
+            ForegroundProcess(
+                pid: 71, name: "dash", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["dash", "-eO", "extglob", "/tmp/claude"]
+            )
+        ])
+        #expect(dashCapitalCluster == .gone(lastLine: "dash (pid 71)"))
+        // ksh takes `-O` at the end of a cluster.
+        let kshCapitalCluster = await observe([
+            ForegroundProcess(
+                pid: 72, name: "ksh", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["ksh", "-eO", "shwordsplit", "/usr/bin/codex"]
+            )
+        ])
+        #expect(kshCapitalCluster == .running)
+        // csh has no option value, so the word after the cluster is the program.
+        let cshCluster = await observe([
+            ForegroundProcess(
+                pid: 73, name: "csh", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["csh", "-euo", "pipefail", "/usr/bin/claude"]
+            )
+        ])
+        #expect(cshCluster == .gone(lastLine: "csh (pid 73)"))
+
+        // fish's debug and profile flags take a value. `=` keeps it in the word.
+        let fishDebug = await observe([
+            ForegroundProcess(
+                pid: 74, name: "fish", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["fish", "-d", "3", "/usr/bin/claude"]
+            )
+        ])
+        #expect(fishDebug == .running)
+        let fishProfile = await observe([
+            ForegroundProcess(
+                pid: 75, name: "fish", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["fish", "--profile", "/tmp/start.prof", "/usr/bin/claude"]
+            )
+        ])
+        #expect(fishProfile == .running)
+        let fishInit = await observe([
+            ForegroundProcess(
+                pid: 76, name: "fish", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["fish", "--init-command", "set -x FOO 1", "/usr/bin/claude"]
+            )
+        ])
+        #expect(fishInit == .running)
+        let fishDebugEquals = await observe([
+            ForegroundProcess(
+                pid: 77, name: "fish", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["fish", "--debug=3", "/usr/bin/claude"]
+            )
+        ])
+        #expect(fishDebugEquals == .running)
+        // fish's `-o` is not `+o`. The word is not a program, and it is not an option value.
+        let fishPlus = await observe([
+            ForegroundProcess(
+                pid: 78, name: "fish", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["fish", "+o", "/usr/bin/claude"]
+            )
+        ])
+        #expect(fishPlus == .gone(lastLine: "fish (pid 78)"))
+
+        // herdr launches ash and mksh as login shells. A bare one is the crash.
+        // A script path is the agent. mksh does not take bash's `-O`.
+        let ash = await observe([
+            ForegroundProcess(pid: 80, name: "ash", argv0: nil, cmdline: nil, cwd: nil)
+        ])
+        #expect(ash == .gone(lastLine: "ash (pid 80)"))
+        let ashPath = await observe([
+            ForegroundProcess(
+                pid: 81, name: "MainThread", argv0: "/bin/ash", cmdline: nil, cwd: nil
+            )
+        ])
+        #expect(ashPath == .gone(lastLine: "MainThread (pid 81)"))
+        let mkshLogin = await observe([
+            ForegroundProcess(pid: 82, name: "MainThread", argv0: "-mksh", cmdline: nil, cwd: nil)
+        ])
+        #expect(mkshLogin == .gone(lastLine: "MainThread (pid 82)"))
+        let mkshExe = await observe([
+            ForegroundProcess(pid: 83, name: "Mksh.EXE", argv0: nil, cmdline: nil, cwd: nil)
+        ])
+        #expect(mkshExe == .gone(lastLine: "Mksh.EXE (pid 83)"))
+        let ashScript = await observe([
+            ForegroundProcess(
+                pid: 84, name: "ash", argv0: "/bin/ash", cmdline: nil, cwd: nil,
+                argv: ["/bin/ash", "/tmp/test-bin/pi"]
+            )
+        ])
+        #expect(ashScript == .running)
+        let mkshOption = await observe([
+            ForegroundProcess(
+                pid: 85, name: "mksh", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["mksh", "-o", "errexit", "/usr/local/bin/codex"]
+            )
+        ])
+        #expect(mkshOption == .running)
+        let ashCluster = await observe([
+            ForegroundProcess(
+                pid: 86, name: "ash", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["ash", "-euo", "pipefail", "/tmp/pi"]
+            )
+        ])
+        #expect(ashCluster == .running)
+        let mkshCapital = await observe([
+            ForegroundProcess(
+                pid: 87, name: "mksh", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["mksh", "-O", "extglob", "/usr/bin/claude"]
+            )
+        ])
+        #expect(mkshCapital == .gone(lastLine: "mksh (pid 87)"))
+        let ashEval = await observe([
+            ForegroundProcess(
+                pid: 88, name: "ash", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["ash", "-c", "/tmp/codex"]
+            )
+        ])
+        #expect(ashEval == .gone(lastLine: "ash (pid 88)"))
+        // A name that only begins with the shell, and a runtime beside it, stay.
+        let ashley = await observe([
+            ForegroundProcess(pid: 89, name: "ashley", argv0: nil, cmdline: nil, cwd: nil)
+        ])
+        #expect(ashley == .running)
+        let mixed = await observe([
+            ForegroundProcess(pid: 80, name: "ash", argv0: nil, cmdline: nil, cwd: nil),
+            ForegroundProcess(pid: 90, name: "node", argv0: "/usr/local/bin/node", cmdline: nil, cwd: nil),
+        ])
+        #expect(mixed == .running)
+    }
+
     @Test("Blocked with a bare shell is process-gone, not awaiting input")
     func blockedBareShellIsGone() async {
         let agent = Agent(id: AgentID("w1:p1"), kind: .claude, status: .blocked)
