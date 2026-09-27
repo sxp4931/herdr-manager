@@ -681,6 +681,198 @@ struct HeartbeatPollerHashTests {
         let carried = await poller.retarget(from: origin.id, to: AgentID("wB:p4"))
         #expect(carried == nil)
     }
+
+    @Test("A replace after the hop already moved does not swallow the landed screen")
+    func replaceAfterVacantKeepsTheLandedScreen() async {
+        let script = ReadScript(["one", "two"])
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = script
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let moved = Agent(id: AgentID("wB:p4"), status: .working)
+
+        let baseline = await poller.poll(agents: [origin], adapter: adapter)
+        #expect(baseline.isEmpty)
+        let vacant = await poller.retargetVacant(from: origin.id, to: moved.id)
+        #expect(vacant == nil)
+        let replace = await poller.retarget(from: origin.id, to: moved.id)
+        #expect(replace == nil)
+
+        // "one" is the screen the hop stored. A replace that cleared it
+        // would treat "two" as the first look and report nothing.
+        let landed = await poller.poll(agents: [moved], adapter: adapter)
+        #expect(landed[moved.id] != nil)
+        #expect(landed[origin.id] == nil)
+    }
+
+    @Test("A replace after a vacant retarget keeps a hash the new id already stored")
+    func replaceAfterVacantKeepsTheDestinationHash() async {
+        let script = ReadScript(["alpha", "alpha", "beta"])
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = script
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let moved = Agent(id: AgentID("wB:p4"), status: .working)
+
+        let originBaseline = await poller.poll(agents: [origin], adapter: adapter)
+        #expect(originBaseline.isEmpty)
+        let destinationBaseline = await poller.poll(agents: [moved], adapter: adapter)
+        #expect(destinationBaseline.isEmpty)
+        let vacant = await poller.retargetVacant(from: origin.id, to: moved.id)
+        #expect(vacant == nil)
+        let replace = await poller.retarget(from: origin.id, to: moved.id)
+        #expect(replace == nil)
+
+        let changed = await poller.poll(agents: [moved], adapter: adapter)
+        #expect(changed[moved.id] != nil)
+        #expect(await poller.lastOutputDate(for: origin.id) == nil)
+    }
+
+    @Test("A vacant retarget then a replace still carries the compared change")
+    func replaceAfterVacantKeepsTheCarriedChange() async {
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = ReadScript(["one", "two"])
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let moved = Agent(id: AgentID("wB:p4"), status: .working)
+        let again = AgentID("wC:p8")
+
+        _ = await poller.poll(agents: [origin], adapter: adapter)
+        let changed = await poller.poll(agents: [origin], adapter: adapter)
+        let when = changed[origin.id]
+        #expect(when != nil)
+
+        let vacant = await poller.retargetVacant(from: origin.id, to: moved.id)
+        #expect(vacant == when)
+        let replace = await poller.retarget(from: origin.id, to: moved.id)
+        #expect(replace == nil)
+        let hopped = await poller.retarget(from: moved.id, to: again)
+        #expect(hopped == when)
+        #expect(await poller.lastOutputDate(for: moved.id) == nil)
+        #expect(await poller.lastOutputDate(for: again) != nil)
+    }
+
+    @Test("A second replace does not install a screen recorded on the old id afterwards")
+    func secondReplaceLeavesALaterHashOnTheOldId() async {
+        let script = ReadScript(["one", "shell", "shell"])
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = script
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let moved = Agent(id: AgentID("wB:p4"), status: .working)
+
+        let baseline = await poller.poll(agents: [origin], adapter: adapter)
+        #expect(baseline.isEmpty)
+        let carried = await poller.retarget(from: origin.id, to: moved.id)
+        #expect(carried == nil)
+        // The read was in flight against the old id. It finishes after the
+        // hash has moved, so it stores a first look there.
+        let stale = await poller.poll(agents: [origin], adapter: adapter)
+        #expect(stale.isEmpty)
+        let again = await poller.retarget(from: origin.id, to: moved.id)
+        #expect(again == nil)
+
+        // The destination still holds "one". "shell" is a change. Installing
+        // the stale first look, or clearing the hash, would report nothing.
+        let landed = await poller.poll(agents: [moved], adapter: adapter)
+        #expect(landed[moved.id] != nil)
+        #expect(await poller.lastOutputDate(for: origin.id) != nil)
+    }
+
+    @Test("A second replace of the same hop leaves the change a later hop carries")
+    func secondReplaceKeepsTheCarriedChange() async {
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = ReadScript(["one", "two"])
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let moved = Agent(id: AgentID("wB:p4"), status: .working)
+        let again = AgentID("wC:p8")
+
+        _ = await poller.poll(agents: [origin], adapter: adapter)
+        let changed = await poller.poll(agents: [origin], adapter: adapter)
+        let when = changed[origin.id]
+        #expect(when != nil)
+
+        let first = await poller.retarget(from: origin.id, to: moved.id)
+        #expect(first == when)
+        let second = await poller.retarget(from: origin.id, to: moved.id)
+        #expect(second == nil)
+        let hopped = await poller.retarget(from: moved.id, to: again)
+        #expect(hopped == when)
+    }
+
+    @Test("Prune of the old id does not let a later replace drop the moved screen")
+    func pruneAfterVacantKeepsTheMovedScreen() async {
+        let script = ReadScript(["one", "two"])
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = script
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let moved = Agent(id: AgentID("wB:p4"), status: .working)
+
+        _ = await poller.poll(agents: [origin], adapter: adapter)
+        _ = await poller.retargetVacant(from: origin.id, to: moved.id)
+        await poller.prune(keeping: [moved.id])
+        let replace = await poller.retarget(from: origin.id, to: moved.id)
+        #expect(replace == nil)
+
+        let landed = await poller.poll(agents: [moved], adapter: adapter)
+        #expect(landed[moved.id] != nil)
+        #expect(await poller.lastOutputDate(for: origin.id) == nil)
+    }
+
+    @Test("One replace of a whole poll moves every pane, and a never-polled origin still clears")
+    func retargetReplacingMovesEveryPane() async {
+        let script = ReadScript(["one", "three", "other", "two", "four", "different"])
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = script
+        let poller = HeartbeatPoller()
+        let originA = Agent(id: AgentID("wA:p1"), status: .working)
+        let originB = Agent(id: AgentID("wB:p2"), status: .working)
+        let staleDest = Agent(id: AgentID("wE:p5"), status: .working)
+        let movedA = Agent(id: AgentID("wC:p3"), status: .working)
+        let movedB = Agent(id: AgentID("wD:p4"), status: .working)
+        let neverPolled = AgentID("wF:p6")
+
+        let baseline = await poller.poll(agents: [originA, originB, staleDest], adapter: adapter)
+        #expect(baseline.isEmpty)
+        let carried = await poller.retarget(replacing: [
+            originA.id: movedA.id,
+            originB.id: movedB.id,
+            neverPolled: staleDest.id,
+        ])
+        #expect(carried.isEmpty)
+
+        let landedA = await poller.poll(agents: [movedA], adapter: adapter)
+        #expect(landedA[movedA.id] != nil)
+        let landedB = await poller.poll(agents: [movedB], adapter: adapter)
+        #expect(landedB[movedB.id] != nil)
+        // The origin was never polled, so "different" is a first look
+        // against the hash this call cleared, not a change from "other".
+        let cleared = await poller.poll(agents: [staleDest], adapter: adapter)
+        #expect(cleared.isEmpty)
+    }
+
+    @Test("A vacant retarget of a never-polled origin still lets the replace clear")
+    func replaceAfterVacantWithoutAHashClearsTheDestination() async {
+        let script = ReadScript(["other", "different"])
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = script
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let destination = Agent(id: AgentID("wB:p9"), status: .working)
+
+        let baseline = await poller.poll(agents: [destination], adapter: adapter)
+        #expect(baseline.isEmpty)
+        let vacant = await poller.retargetVacant(from: origin.id, to: destination.id)
+        #expect(vacant == nil)
+        let replace = await poller.retarget(from: origin.id, to: destination.id)
+        #expect(replace == nil)
+
+        let firstLook = await poller.poll(agents: [destination], adapter: adapter)
+        #expect(firstLook.isEmpty)
+        #expect(await poller.lastOutputDate(for: destination.id) != nil)
+    }
 }
 
 // MARK: - Diagnoser silentThreshold Tests

@@ -253,12 +253,13 @@ final class AppModel {
         for transition in transitions {
             notifyAndDiagnoseIfNeeded(transition)
         }
-        for (from, to) in moves {
-            // The poll that adopted this id may also be the poll that saw
-            // the screen change, under `from`. That result cannot find the
-            // row. The carried time is the one the comparison already made.
-            let observed = await poller.retarget(from: from, to: to)
-            if let observed {
+        // One call for the whole poll. Awaiting each replace lets
+        // `pane.moved` vacant-retarget a later pane, and lets the heartbeat
+        // prune that pane's old id, before its replace is queued. The
+        // replace then finds nothing to carry and deletes the screen.
+        if !moves.isEmpty {
+            let carried = await poller.retarget(replacing: moves)
+            for (to, observed) in carried {
                 store.applyObservedOutput([to: observed])
             }
         }

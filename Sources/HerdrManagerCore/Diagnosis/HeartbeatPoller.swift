@@ -33,6 +33,17 @@ public actor HeartbeatPoller {
     /// not recorded here.
     private var outputChanges: [AgentID: Date] = [:]
 
+    /// Origins whose screen was already carried to a pane id.
+    ///
+    /// The poll and `pane.moved` both retarget the same hop. Whichever
+    /// runs second used to find the origin empty and delete the hash the
+    /// first one stored, so the next poll of the new id was a first look
+    /// and swallowed the screen the pane landed on. A recorded hop does
+    /// nothing the second time, and a hash the old id records after the
+    /// move stays on the old id. An origin that has never been polled is
+    /// absent, so its replace still drops the previous occupant's hash.
+    private var relocatedTo: [AgentID: AgentID] = [:]
+
     public init() {}
 
     /// Poll a set of agents for output changes.
@@ -95,12 +106,20 @@ public actor HeartbeatPoller {
     ///   includes a screen that has only been seen once. The caller
     ///   writes it onto the row: `poll`'s dictionary still names
     ///   `previous`. A first-look time is not returned; treating it as
-    ///   output would end a silence the screen never moved.
+    ///   output would end a silence the screen never moved. Nil again
+    ///   when this hop already carried the screen: the first caller got
+    ///   the time, and a hash recorded on the old id since then stays there.
     @discardableResult
     public func retarget(from previous: AgentID, to newID: AgentID) -> Date? {
         guard previous != newID else { return nil }
+        if relocatedTo[previous] == newID {
+            return nil
+        }
         let hash = hashes.removeValue(forKey: previous)
         let date = lastOutputDates.removeValue(forKey: previous)
+        if hash != nil || date != nil || outputChanges[previous] != nil {
+            relocatedTo[previous] = newID
+        }
         if let hash {
             hashes[newID] = hash
         } else {
@@ -112,6 +131,22 @@ public actor HeartbeatPoller {
             lastOutputDates.removeValue(forKey: newID)
         }
         return parkOutputChange(from: previous, onto: newID, replacingDestination: true)
+    }
+
+    /// Replace every moved pane's hash before returning.
+    ///
+    /// One call is one turn of this actor, so a vacant retarget or a
+    /// prune cannot run between the panes of a single poll. Each hop
+    /// still follows `retarget(from:to:)`, including a hop that already
+    /// moved and an origin that was never polled.
+    public func retarget(replacing moves: [AgentID: AgentID]) -> [AgentID: Date] {
+        var carried: [AgentID: Date] = [:]
+        for (from, to) in moves {
+            if let date = retarget(from: from, to: to) {
+                carried[to] = date
+            }
+        }
+        return carried
     }
 
     /// Move the origin's hash onto `newID` only when that id has none.
@@ -132,6 +167,12 @@ public actor HeartbeatPoller {
         guard previous != newID else { return nil }
         let hash = hashes.removeValue(forKey: previous)
         let date = lastOutputDates.removeValue(forKey: previous)
+        // The poll's replace of this same hop may still be waiting. Remember
+        // the move before that replace sees an empty origin and clears
+        // `newID`. A never-polled origin records nothing.
+        if hash != nil || date != nil || outputChanges[previous] != nil {
+            relocatedTo[previous] = newID
+        }
         if hashes[newID] == nil, let hash {
             hashes[newID] = hash
         }
@@ -170,13 +211,23 @@ public actor HeartbeatPoller {
         hashes.removeValue(forKey: agentId)
         lastOutputDates.removeValue(forKey: agentId)
         outputChanges.removeValue(forKey: agentId)
+        // The origin has already left. A tombstone keyed by it still stops
+        // a late replace from clearing the id the screen moved to. Drop
+        // only the ones that pointed at the row that just left.
+        relocatedTo = relocatedTo.filter { $0.value != agentId }
     }
 
     /// Drop hashes for panes that left the herd.
+    ///
+    /// A tombstone stays while its destination is still in the herd. The
+    /// origin is the id that left, and the replace that needs the tombstone
+    /// has not necessarily run yet. Dropping it here is what lets that
+    /// replace delete the moved screen.
     public func prune(keeping ids: Set<AgentID>) {
         hashes = hashes.filter { ids.contains($0.key) }
         lastOutputDates = lastOutputDates.filter { ids.contains($0.key) }
         outputChanges = outputChanges.filter { ids.contains($0.key) }
+        relocatedTo = relocatedTo.filter { ids.contains($0.value) }
     }
 
     /// Clear all tracking state.
@@ -184,6 +235,7 @@ public actor HeartbeatPoller {
         hashes.removeAll()
         lastOutputDates.removeAll()
         outputChanges.removeAll()
+        relocatedTo.removeAll()
     }
 
     /// Get the last known output date for an agent.
