@@ -1218,9 +1218,13 @@ private enum ShellForeground {
                 // with `none` or `process`, the path is still Letta.
                 // `--test` with `--interactive`, `-i`, or `--watch-path`
                 // exits before the file, so that path is not Letta.
-                // `--interactive` alone, and `--watch-path` without
-                // `--test`, still are. `--watch` without a path still
-                // runs beside `--test`.
+                // `--watch`, and `--watch-path` because it implies
+                // `--watch`, with `--interactive`, `-i`, or
+                // `--test-force-exit` exits too. `--interactive` alone,
+                // and `--watch-path` without those flags or `--test`,
+                // still are. `--watch` without a path still runs
+                // beside `--test`. A later `--no-watch`,
+                // `--no-interactive`, or `--no-test-force-exit` wins.
                 // Bun rejects `-W`,
                 // `-X`, `-S`, `-L`, and `-o`; the path after one is
                 // not Letta. A bun value that starts with `-` is not
@@ -1580,9 +1584,13 @@ private enum ShellForeground {
     /// `--bun`, and `bun --not-a-flag` still run the file.
     /// `node --test` with `--interactive`, `-i`, or `--watch-path`
     /// does not: Node 22.23 exits, and the path is not the script.
-    /// `--watch` without `--watch-path` still runs beside `--test`.
-    /// `--interactive` and `--watch-path` without `--test` still name
-    /// the file. `--test-only` is not `--test`.
+    /// `--watch`, and `--watch-path` because it implies `--watch`,
+    /// with `--interactive`, `-i`, or `--test-force-exit` does not
+    /// either. `--watch` without `--watch-path` still runs beside
+    /// `--test`. `--interactive` without `--watch`, and `--watch-path`
+    /// without `--test`, `--interactive`, or `--test-force-exit`, still
+    /// name the file. A later `--no-` wins. `--test-only` is not
+    /// `--test`. `--watch-preserve-output` does not imply `--watch`.
     /// Node 22.23 exits on a long option it does not recognize, so
     /// `node --not-a-flag` and `node --revision` are not the script.
     /// A boolean Node or V8 accepts (`--watch`, `--use-strict`,
@@ -1666,11 +1674,14 @@ private enum ShellForeground {
     private static func runtimeScript(_ argv: [String]) -> String? {
         let runtime = argv.first.map { shellBase($0) } ?? ""
         // Node exits before the file when two booleans cannot be set
-        // together, and when `--test` is combined with `--interactive`
-        // (`-i` is the same flag) or with `--watch-path`. A script
-        // written first is already the program: options after it are
-        // arguments, and that prefix has no conflict. `--watch` without
-        // a path still runs beside `--test`.
+        // together, when `--test` is combined with `--interactive`
+        // (`-i` is the same flag) or with `--watch-path`, and when
+        // `--watch` is combined with `--interactive` or
+        // `--test-force-exit`. `--watch-path` implies `--watch`. A
+        // script written first is already the program: options after
+        // it are arguments, and that prefix has no conflict. `--watch`
+        // without a path still runs beside `--test`. A later `--no-`
+        // wins.
         if isNodeRuntime(runtime), nodePrefixFlags(argv).conflicts {
             return nil
         }
@@ -2956,6 +2967,15 @@ private enum ShellForeground {
         /// `--interactive=false` is still on: the parser ignores the
         /// attached word. `-i` is the alias and is set by the scan.
         var interactive = false
+        /// Final `--watch` / `--no-watch` state. `--watch=false` is
+        /// still on. `--watch-path` implies `--watch` at the moment
+        /// the path is seen, including after `--no-watch`. A later
+        /// `--no-watch` clears this and leaves the path list.
+        /// `--watch-preserve-output` does not imply `--watch`.
+        var watch = false
+        /// Final `--test-force-exit` / `--no-test-force-exit` state.
+        /// `--test-force-exit=false` is still on.
+        var testForceExit = false
         /// `--watch-path` appeared before the script. The path may be
         /// attached (`--watch-path=/tmp`) or the next word. `--watch`
         /// without this flag is not a conflict with `--test`.
@@ -2965,15 +2985,19 @@ private enum ShellForeground {
         /// one, including an empty word.
         var testIsolation: String?
 
-        /// TLS pair, CA pair, or `--test` with `--interactive` / `-i`
-        /// or with `--watch-path`. `CheckOptions` rejects each of those
-        /// before the file runs. `--watch` alone is not here: it still
-        /// runs beside `--test`. A later `--no-` wins for the booleans.
-        /// `--watch-path` is not a boolean, so it stays set.
+        /// TLS pair, CA pair, `--test` with `--interactive` / `-i` or
+        /// with `--watch-path`, or `--watch` with `--interactive` /
+        /// `-i` or with `--test-force-exit`. `CheckOptions` rejects
+        /// each of those before the file runs. `--watch` beside
+        /// `--test`, with no path list, still runs. A later `--no-`
+        /// wins for the booleans. `--watch-path` is not a boolean, so
+        /// the path list stays set after `--no-watch`.
         var conflicts: Bool {
             (tlsMin13 && tlsMax12) || (opensslCA && bundledCA)
                 || (testRunner && interactive)
                 || (testRunner && watchPath)
+                || (watch && interactive)
+                || (watch && testForceExit)
         }
 
         mutating func set(_ flag: NodeBoolFlag, on: Bool) {
@@ -2987,6 +3011,8 @@ private enum ShellForeground {
             case .permission: permission = on
             case .test: testRunner = on
             case .interactive: interactive = on
+            case .watch: watch = on
+            case .testForceExit: testForceExit = on
             }
         }
     }
@@ -3001,6 +3027,8 @@ private enum ShellForeground {
         case permission
         case test
         case interactive
+        case watch
+        case testForceExit
     }
 
     private static func nodePrefixFlags(_ argv: [String]) -> NodePrefix {
@@ -3027,12 +3055,17 @@ private enum ShellForeground {
                 index += isolation.width
                 continue
             }
-            // Implies `--watch`, but the `--test` conflict is the path
-            // list, not watch mode. `--watch` without this flag still
-            // runs the file. A dash word in the value slot still exits
-            // in the walk; counting the flag here does not name a script.
+            // Implies `--watch` at this word, which is what makes
+            // `--watch-path` conflict with `--interactive` and
+            // `--test-force-exit`. The `--test` conflict is the path
+            // list, so `--no-watch` afterwards clears watch mode and
+            // leaves the list. `--watch` without this flag still runs
+            // beside `--test`. A dash word in the value slot still
+            // exits in the walk; counting the flag here does not name
+            // a script.
             if arg == "--watch-path" || arg.hasPrefix("--watch-path=") {
                 state.watchPath = true
+                state.watch = true
                 index += arg.hasPrefix("--watch-path=") ? 1 : 2
                 continue
             }
@@ -3088,7 +3121,9 @@ private enum ShellForeground {
         case "--use-bundled-ca": flag = .bundled
         case "--permission", "--experimental-permission": flag = .permission
         case "--test": flag = .test
+        case "--test-force-exit": flag = .testForceExit
         case "--interactive": flag = .interactive
+        case "--watch": flag = .watch
         default: flag = nil
         }
         guard let flag else { return nil }
