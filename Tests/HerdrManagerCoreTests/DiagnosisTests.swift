@@ -1632,6 +1632,90 @@ struct DiagnoserFinishedClassificationTests {
         #expect(argvWins == .gone(lastLine: "sh (pid 30)"))
     }
 
+    @Test("A package entrypoint herdr names is not a crashed agent")
+    func packageEntrypointIsNotProcessGone() async {
+        let working = Agent(id: AgentID("w1:p1"), kind: .claude, status: .working)
+        let diagnoser = Diagnoser()
+
+        func observe(
+            _ argv: [String],
+            pid: Int32 = 40,
+            name: String = "sh"
+        ) async -> ProcessGoneObservation {
+            await diagnoser.observeProcessGone(
+                agent: working,
+                adapter: MockHerdrAdapter(processInfoResult: ProcessInfoResult(
+                    shellPid: 10,
+                    foregroundProcesses: [
+                        ForegroundProcess(
+                            pid: pid, name: name, argv0: nil, cmdline: nil, cwd: nil,
+                            argv: argv
+                        )
+                    ]
+                ))
+            )
+        }
+
+        let pi = "/usr/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
+        let piBundle = "C:\\Users\\herdr\\AppData\\Local\\pi-node\\current/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"
+        let omp = "C:\\Users\\herdr\\AppData\\Roaming\\npm\\node_modules\\@oh-my-pi\\pi-coding-agent\\dist\\cli.js"
+        let kimi = "C:\\repro\\node_modules\\@moonshot-ai\\kimi-code\\dist\\main.mjs"
+        let qwen = "/home/user/.npm/lib/node_modules/@qwen-code/qwen-code/dist/index.js"
+        let mastracode = "C:\\npm\\node_modules\\mastracode\\dist\\cli.js"
+        let letta = "/usr/lib/node_modules/@letta-ai/letta-code/letta.js"
+
+        let piLaunch = await observe(["/bin/sh", pi])
+        #expect(piLaunch == .running)
+        let bundled = await observe(["bash", "-euo", "pipefail", piBundle], name: "bash")
+        #expect(bundled == .running)
+        let ompLaunch = await observe(["dash", omp], name: "dash")
+        #expect(ompLaunch == .running)
+        let kimiLaunch = await observe(["pwsh", "-File", kimi], name: "pwsh")
+        #expect(kimiLaunch == .running)
+        let kimiColon = await observe(
+            ["powershell.exe", "-File:C:\\repro\\node_modules\\@moonshot-ai\\kimi-code\\dist\\Main.MJS"],
+            name: "powershell.exe"
+        )
+        #expect(kimiColon == .running)
+        let qwenLaunch = await observe(["/bin/bash", qwen], name: "bash")
+        #expect(qwenLaunch == .running)
+        let mastraLaunch = await observe(["cmd.exe", "/C", mastracode], name: "cmd.exe")
+        #expect(mastraLaunch == .running)
+        let lettaLaunch = await observe(["zsh", letta], name: "zsh")
+        #expect(lettaLaunch == .running)
+
+        // The basename alone is not the agent. A sibling script in the
+        // same package is not either, and neither is `cli.exe` or a path
+        // that only continues past `cli.js`. `-c` is still an eval.
+        let bareCli = await observe(["sh", "/tmp/cli.js"], pid: 41)
+        #expect(bareCli == .gone(lastLine: "sh (pid 41)"))
+        let setup = await observe(
+            ["sh", "C:\\workspace\\node_modules\\@oh-my-pi\\pi-coding-agent\\dist\\setup.js"],
+            pid: 42
+        )
+        #expect(setup == .gone(lastLine: "sh (pid 42)"))
+        let cliExe = await observe(
+            ["sh", "C:\\workspace\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.exe"],
+            pid: 43
+        )
+        #expect(cliExe == .gone(lastLine: "sh (pid 43)"))
+        let continued = await observe(
+            ["sh", "C:\\workspace\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js\\other.js"],
+            pid: 44
+        )
+        #expect(continued == .gone(lastLine: "sh (pid 44)"))
+        let shortBundle = await observe(["sh", "C:\\workspace\\dist\\bundle\\cli.js"], pid: 45)
+        #expect(shortBundle == .gone(lastLine: "sh (pid 45)"))
+        let evalScript = await observe(["sh", "-c", pi], pid: 46)
+        #expect(evalScript == .gone(lastLine: "sh (pid 46)"))
+        let nuScript = await observe(["nu", pi], pid: 47, name: "nu")
+        #expect(nuScript == .gone(lastLine: "nu (pid 47)"))
+        let bareMjs = await observe(["sh", "/tmp/main.mjs"], pid: 48)
+        #expect(bareMjs == .gone(lastLine: "sh (pid 48)"))
+        let bareIndex = await observe(["sh", "/tmp/index.js"], pid: 49)
+        #expect(bareIndex == .gone(lastLine: "sh (pid 49)"))
+    }
+
     @Test("A shell option is not the program, and dash, ksh, and csh still launch one")
     func shellOptionAndSiblingShellsLaunchAgents() async {
         let working = Agent(id: AgentID("w1:p1"), kind: .claude, status: .working)

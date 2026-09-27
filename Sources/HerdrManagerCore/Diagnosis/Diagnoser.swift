@@ -369,7 +369,10 @@ public actor Diagnoser {
 /// not treat it as the agent either. A `c` later in the cluster does
 /// not hide the program (`-xco pipefail claude` is still claude). `nu`,
 /// `elvish`, and `xonsh` are not unwrapped: herdr does not read a script
-/// path on those shells, so a later argument stays the prompt. `cmd` is
+/// path on those shells, so a later argument stays the prompt. A shell
+/// whose program is an npm entrypoint herdr names (`dist/cli.js` for Pi,
+/// omp, and Mastracode, `dist/index.js` for Qwen, `dist/main.mjs` for
+/// Kimi) is that agent. Any other `cli.js` stays the prompt. `cmd` is
 /// a shell only when an argument vector is present, so a payload that
 /// omits `argv` and `cmdline` does not start calling every `cmd.exe` a
 /// crash. One
@@ -410,7 +413,8 @@ private enum ShellForeground {
     /// and one of `.exe`, `.cmd`, `.bat`, `.ps1`, `.js`. A leading `-` is
     /// a login shell's argv0, not a program. `muse-bin-<version>` is the
     /// launcher herdr matches separately. Names with a space are not a
-    /// basename.
+    /// basename. `cli.js` is not one of these names. The npm entrypoints
+    /// herdr still calls an agent are `isKnownPackageEntrypoint`.
     private static let knownAgentPrograms: Set<String> = [
         "pi", "claude", "claude-code", "codex", "gemini", "cursor", "cursor-agent",
         "devin", "devin-cli", "agy", "antigravity", "antigravity-cli",
@@ -812,10 +816,90 @@ private enum ShellForeground {
         guard !trimmed.isEmpty, !trimmed.hasPrefix("-") else { return false }
         let base = agentBase(trimmed)
         if knownAgentPrograms.contains(base) { return true }
-        guard base.hasPrefix("muse-bin-") else { return false }
-        let rest = base.dropFirst("muse-bin-".count)
-        guard let scalar = rest.unicodeScalars.first else { return false }
-        return scalar.value >= 48 && scalar.value <= 57
+        if base.hasPrefix("muse-bin-") {
+            let rest = base.dropFirst("muse-bin-".count)
+            if let scalar = rest.unicodeScalars.first,
+               scalar.value >= 48 && scalar.value <= 57 {
+                return true
+            }
+        }
+        return isKnownPackageEntrypoint(trimmed)
+    }
+
+    /// npm entrypoints whose basename is not the agent name.
+    ///
+    /// herdr's package-path check names these and no other `cli.js`:
+    /// Pi is `@earendil-works/pi-coding-agent` `dist/cli.js` and
+    /// `dist/bundle/cli.js`. omp is `@oh-my-pi/pi-coding-agent`
+    /// `dist/cli.js`. Kimi is `@moonshot-ai/kimi-code` `dist/main.mjs`.
+    /// Those four have to end the path. Qwen
+    /// (`@qwen-code/qwen-code/dist/index.js`), Mastracode
+    /// (`mastracode/dist/cli.js`), and Letta
+    /// (`@letta-ai/letta-code/letta`) match anywhere in the path, after
+    /// one of `.exe`, `.cmd`, `.bat`, `.ps1`, `.js` is removed from each
+    /// component. `sh /tmp/cli.js` and `dist/cli.exe` are not any of them.
+    private static func isKnownPackageEntrypoint(_ token: String) -> Bool {
+        let components = token.split(whereSeparator: { $0 == "/" || $0 == "\\" }).map(String.init)
+        guard !components.isEmpty else { return false }
+        let suffixes: [[String]] = [
+            ["node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js"],
+            ["node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js"],
+            ["node_modules", "@oh-my-pi", "pi-coding-agent", "dist", "cli.js"],
+            ["node_modules", "@moonshot-ai", "kimi-code", "dist", "main.mjs"],
+        ]
+        if suffixes.contains(where: { packageSuffix(components, $0) }) {
+            return true
+        }
+        let normalized = components.map { normalizedPathComponent($0) }
+        let windows: [[String]] = [
+            ["node_modules", "@qwen-code", "qwen-code", "dist", "index"],
+            ["node_modules", "mastracode", "dist", "cli"],
+            ["node_modules", "@letta-ai", "letta-code", "letta"],
+        ]
+        return windows.contains { packageWindow(normalized, $0) }
+    }
+
+    /// The path ends with these components. Comparison is case-insensitive,
+    /// and the components are not rewritten: `cli.js` is not `cli.exe`.
+    private static func packageSuffix(_ components: [String], _ suffix: [String]) -> Bool {
+        guard components.count >= suffix.count else { return false }
+        let start = components.count - suffix.count
+        for offset in 0..<suffix.count {
+            if components[start + offset].caseInsensitiveCompare(suffix[offset]) != .orderedSame {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// A run of components equal to `window`. The caller already folded
+    /// case and stripped one executable suffix.
+    private static func packageWindow(_ components: [String], _ window: [String]) -> Bool {
+        guard components.count >= window.count else { return false }
+        let last = components.count - window.count
+        for start in 0...last {
+            var matches = true
+            for offset in 0..<window.count where components[start + offset] != window[offset] {
+                matches = false
+                break
+            }
+            if matches { return true }
+        }
+        return false
+    }
+
+    /// One path component, folded and with one suffix removed. The suffix
+    /// list is the one `agentBase` uses, so `index.js` is `index` and
+    /// `main.mjs` stays `main.mjs`.
+    private static func normalizedPathComponent(_ component: String) -> String {
+        var base = component.lowercased()
+        for suffix in [".exe", ".cmd", ".bat", ".ps1", ".js"] {
+            if base.hasSuffix(suffix), base.count > suffix.count {
+                base.removeLast(suffix.count)
+                break
+            }
+        }
+        return base
     }
 
     private static func trimQuotes(_ token: String) -> String {
