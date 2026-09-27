@@ -1737,6 +1737,129 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([helper, pythonScriptFirst]) == 20)
     }
 
+    @Test("python -S is the script, and hash-based pycs takes a mode")
+    func pythonSiteFlagIsNotAValue() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+
+        // Python 3.13 runs the next word. `-S` is not a value.
+        let site = process(20, "python3", argv: ["python3", "-S", "/usr/local/bin/codex"])
+        let versioned = process(
+            20, "python3.11", argv: ["python3.11", "-S", "/tmp/codex"]
+        )
+        let exe = process(20, "Python.exe", argv: ["Python.exe", "-S", "/tmp/codex"])
+        let twice = process(20, "python3", argv: ["python3", "-SS", "/tmp/codex"])
+        let verbose = process(
+            20, "python3", argv: ["python3", "-v", "-S", "/tmp/codex"]
+        )
+        let warning = process(
+            20, "python3", argv: ["python3", "-S", "-W", "ignore", "/tmp/codex"]
+        )
+        let option = process(
+            20, "python3", argv: ["python3", "-X", "dev", "/tmp/codex"]
+        )
+        let gluedOption = process(
+            20, "python3", argv: ["python3", "-Xdev", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, site]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, versioned]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, exe]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, twice]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, verbose]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, warning]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, option]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, gluedOption]) == 20)
+        #expect(Diagnoser.cpuSamplePid([mcp, site]) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, site], foregroundProcessGroupId: 20) == 20)
+
+        // The flag word is not an agent, and neither is a script that is not one.
+        let notAgent = process(4, "python3", argv: ["python3", "-S", "server.js"])
+        let namedOption = process(
+            4, "python3", argv: ["python3", "-X", "codex", "server.js"]
+        )
+        #expect(Diagnoser.cpuSamplePid([notAgent, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([namedOption, claude]) == 12)
+
+        // The mode is not the script. The file after a real mode is.
+        let mode = process(
+            4,
+            "python3",
+            argv: ["python3", "--check-hash-based-pycs", "always", "server.js"]
+        )
+        let never = process(
+            20,
+            "python3",
+            argv: ["python3", "--check-hash-based-pycs", "never", "/tmp/codex"]
+        )
+        let thenSite = process(
+            20,
+            "python3",
+            argv: [
+                "python3", "--check-hash-based-pycs", "default", "-S",
+                "/usr/local/bin/codex",
+            ]
+        )
+        let scriptFirst = process(
+            20,
+            "python3",
+            argv: ["python3", "/tmp/codex", "--check-hash-based-pycs", "always"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mode, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, never]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, thenSite]) == 20)
+        #expect(Diagnoser.cpuSamplePid([mcp, never]) == 10)
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, never], foregroundProcessGroupId: 20) == 20
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, scriptFirst]) == 20)
+
+        // A mode Python does not accept, or the `=` form, exits. The path
+        // is not the script. Node and bun reject `-S` and exit the same way.
+        let badMode = process(
+            4,
+            "python3",
+            argv: ["python3", "--check-hash-based-pycs", "codex", "/tmp/codex"]
+        )
+        let upperMode = process(
+            4,
+            "python3",
+            argv: ["python3", "--check-hash-based-pycs", "ALWAYS", "/tmp/codex"]
+        )
+        let equalsMode = process(
+            4,
+            "python3.11",
+            argv: ["python3.11", "--check-hash-based-pycs=always", "/tmp/codex"]
+        )
+        let missingMode = process(
+            4, "python3", argv: ["python3", "--check-hash-based-pycs"]
+        )
+        let nodeSite = process(4, "node", argv: ["node", "-S", "/usr/local/bin/codex"])
+        let nodejsSite = process(4, "nodejs", argv: ["nodejs", "-S", "/tmp/codex"])
+        let bunSite = process(4, "bun", argv: ["bun", "-S", "/usr/local/bin/codex"])
+        #expect(Diagnoser.cpuSamplePid([badMode, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([upperMode, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([equalsMode, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([missingMode, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([nodeSite, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([nodejsSite, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([bunSite, claude]) == 12)
+
+        // Deno's `-S` is still the permission flag. The path is the script.
+        let denoSite = process(
+            20, "deno", argv: ["deno", "run", "-S", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, denoSite]) == 20)
+
+        // A file named letta under python stays a plain runtime.
+        let pythonLetta = process(
+            40, "python3", argv: ["python3", "-S", "/tmp/letta"]
+        )
+        let interactive = process(30, "letta", argv: ["letta"])
+        #expect(Diagnoser.cpuSamplePid([helper, pythonLetta]) == 10)
+        #expect(Diagnoser.cpuSamplePid([pythonLetta, interactive]) == 30)
+    }
+
     @Test("a node flag value is not the agent script")
     func nodeFlagValueIsNotTheScript() {
         let helper = process(10, "node", argv: ["node", "server.js"])

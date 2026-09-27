@@ -1428,11 +1428,14 @@ private enum ShellForeground {
     /// `--config` does not: `bun run --config /tmp/codex` is that script,
     /// and `--config=file` keeps the file in the flag word. Node and
     /// Python reject `--config` and `--config=file` and exit, so a path
-    /// after either is not a script. `--inspect`, `--inspect-wait`, and
-    /// `--inspect-brk` take the next word only when it is a port or
-    /// host:port, and only on bun. `bun --inspect ./codex` keeps the path.
-    /// Node's and Deno's `--inspect` do not take that word:
-    /// `deno run --inspect ./codex` is the script.
+    /// after either is not a script. Python's `-S` does not take a value
+    /// either: `python3 -S /tmp/codex` runs that file. `--check-hash-based-pycs`
+    /// takes `always`, `default`, or `never`, and any other word makes
+    /// Python exit. `--inspect`, `--inspect-wait`, and `--inspect-brk`
+    /// take the next word only when it is a port or host:port, and only
+    /// on bun. `bun --inspect ./codex` keeps the path. Node's and Deno's
+    /// `--inspect` do not take that word: `deno run --inspect ./codex`
+    /// is the script.
     private static func runtimeScriptIsAgent(_ process: ForegroundProcess) -> Bool {
         guard let argv = launchArguments(process), let script = runtimeScript(argv) else {
             return false
@@ -1501,11 +1504,24 @@ private enum ShellForeground {
             if configFlagExits(runtime), arg == "--config" || arg.hasPrefix("--config=") {
                 return nil
             }
+            // Python's `-S` is a boolean. It shares the shared value set
+            // with Deno's permission flag, and that set would swallow the
+            // script. `--check-hash-based-pycs` takes a mode, or exits.
+            if isPythonRuntime(runtime), let option = pythonOption(arg, following: following) {
+                switch option {
+                case .skip(let width):
+                    index += width
+                case .exits:
+                    return nil
+                }
+                continue
+            }
             if runtimeValueFlags.contains(arg) {
                 // Deno's `-r` is `--reload` with no separate value, and
                 // `-W` / `-S` / `--env-file` are the same shape. Node's
-                // `-r` and `--env-file`, and Python's `-W`, still take
-                // the next word.
+                // `-r` and `--env-file`, and Python's `-W` and `-X`, still
+                // take the next word. Node and bun reject `-S` and exit,
+                // so they still consume it here and the path is not a script.
                 if runtime == "deno", denoBooleanFlags.contains(arg) {
                     index += 1
                     continue
@@ -1746,8 +1762,48 @@ private enum ShellForeground {
     /// the config file; neither runtime is this check.
     private static func configFlagExits(_ runtime: String) -> Bool {
         if runtime == "node" || runtime == "nodejs" { return true }
+        return isPythonRuntime(runtime)
+    }
+
+    /// `python`, `python3`, `python3.11`, and `python.exe`. Not `python3.`
+    /// and not a name that only starts with those letters.
+    private static func isPythonRuntime(_ runtime: String) -> Bool {
         guard runtime.hasPrefix("python") else { return false }
         return genericRuntimeName(runtime)
+    }
+
+    /// How a Python option occupies argv. Nil when `arg` is not one of
+    /// these flags, so `-W` and `-X` stay on the shared value set.
+    private enum PythonOption {
+        /// Words to advance, including the flag.
+        case skip(Int)
+        /// Python rejects the invocation and does not run a script.
+        case exits
+    }
+
+    /// Python 3.13's own options that the shared value set gets wrong.
+    ///
+    /// `-S` does not import site, and the next word is the script:
+    /// `python3 -S /tmp/codex` runs that file. `-SS` is the same flag
+    /// twice and stays one word, so the attached-value check still
+    /// leaves the script. `--check-hash-based-pycs` takes exactly
+    /// `always`, `default`, or `never`. Another word, a missing word,
+    /// or `--check-hash-based-pycs=always` makes Python exit, and the
+    /// path after it is not a program. `-W` and `-X` are not here.
+    private static let pythonHashPycModes: Set<String> = [
+        "always", "default", "never",
+    ]
+
+    private static func pythonOption(_ arg: String, following: String?) -> PythonOption? {
+        if arg == "-S" { return .skip(1) }
+        if arg == "--check-hash-based-pycs" {
+            if let following, pythonHashPycModes.contains(following) {
+                return .skip(2)
+            }
+            return .exits
+        }
+        if arg.hasPrefix("--check-hash-based-pycs=") { return .exits }
+        return nil
     }
 
     /// Deno flags whose next word is the script. `-r` is `--reload`.
