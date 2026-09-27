@@ -3193,6 +3193,111 @@ struct SecretRedactorTests {
             #expect(result.redactedText == line)
         }
     }
+
+    @Test("A SendGrid API key is redacted once and keeps its prefix")
+    func redactsSendGridKey() {
+        let redactor = SecretRedactor()
+        let id = String(repeating: "A", count: 22)
+        let secret = String(repeating: "b", count: 43)
+        let key = "SG.\(id).\(secret)"
+        let kept = "SG.[REDACTED]"
+        // `-` and `_` are in the body. Both segments are the lengths
+        // that make the key 69 characters.
+        let mixedId = String(repeating: "A", count: 10) + "-" + String(repeating: "B", count: 11)
+        let mixedSecret = String(repeating: "c", count: 20) + "_" + String(repeating: "d", count: 22)
+        let sample = "SG.\(mixedId).\(mixedSecret)"
+        #expect(sample.count == 69)
+        #expect(mixedId.count == 22)
+        #expect(mixedSecret.count == 43)
+
+        let bare = redactor.redact("sendgrid printed \(key)")
+        #expect(bare.redactedText == "sendgrid printed \(kept)")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains(id))
+        #expect(!bare.redactedText.contains(secret))
+        let again = redactor.redact(bare.redactedText)
+        #expect(again.redactedText == bare.redactedText)
+        #expect(again.redactionCount == 0)
+
+        let sampled = redactor.redact("key \(sample)")
+        #expect(sampled.redactedText == "key \(kept)")
+        #expect(sampled.redactionCount == 1)
+        #expect(!sampled.redactedText.contains(mixedId))
+        #expect(!sampled.redactedText.contains(mixedSecret))
+
+        let assigned = redactor.redact("SENDGRID_API_KEY=\(key)")
+        #expect(assigned.redactedText == "SENDGRID_API_KEY=\(kept)")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        // The name already ends in api_key, so a shorter value is still
+        // an assignment. Seven characters stays.
+        let shortName = redactor.redact("SENDGRID_API_KEY=12345678")
+        #expect(shortName.redactedText == "SENDGRID_API_KEY=[REDACTED]")
+        #expect(shortName.redactionCount == 1)
+        let tooShort = redactor.redact("SENDGRID_API_KEY=1234567")
+        #expect(tooShort.redactedText == "SENDGRID_API_KEY=1234567")
+        #expect(tooShort.redactionCount == 0)
+        let quoted = redactor.redact(#"{"token": "\#(key)"}"#)
+        #expect(quoted.redactedText == #"{"token": "\#(kept)"}"#)
+        #expect(quoted.redactionCount == 1)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        let header = redactor.redact("Authorization: Bearer \(key)")
+        #expect(header.redactedText == "Authorization: Bearer \(kept)")
+        #expect(header.redactionCount == 1)
+        let headerAgain = redactor.redact(header.redactedText)
+        #expect(headerAgain.redactionCount == 0)
+        let lower = redactor.redact("authorization: bearer \(sample)")
+        #expect(lower.redactedText == "authorization: bearer \(kept)")
+        #expect(lower.redactionCount == 1)
+
+        let remote = redactor.redact("https://mail:\(key)@api.sendgrid.com/v3/mail/send")
+        #expect(remote.redactedText == "https://mail:\(kept)@api.sendgrid.com/v3/mail/send")
+        #expect(remote.redactionCount == 1)
+        #expect(remote.redactedText.contains("api.sendgrid.com/v3/mail/send"))
+        let remoteAgain = redactor.redact(remote.redactedText)
+        #expect(remoteAgain.redactionCount == 0)
+
+        let sentence = redactor.redact("saw \(key). next")
+        #expect(sentence.redactedText == "saw \(kept). next")
+        #expect(sentence.redactionCount == 1)
+        let hyphen = redactor.redact("my-\(key)")
+        #expect(hyphen.redactedText == "my-\(kept)")
+        #expect(hyphen.redactionCount == 1)
+
+        let pair = redactor.redact("\(key) \(sample)")
+        #expect(pair.redactedText == "\(kept) \(kept)")
+        #expect(pair.redactionCount == 2)
+
+        let leftover = redactor.redact("token=\(key)@leftoversecret")
+        #expect(leftover.redactedText == "token=[REDACTED]")
+        #expect(leftover.redactionCount == 2)
+        #expect(!leftover.redactedText.contains("leftoversecret"))
+        #expect(!leftover.redactedText.contains(secret))
+
+        let keptLines = [
+            "keys start with SG.",
+            "SG." + String(repeating: "A", count: 21) + "." + secret,
+            "SG." + String(repeating: "A", count: 23) + "." + secret,
+            "SG." + id + "." + String(repeating: "b", count: 42),
+            "SG." + id + "." + String(repeating: "b", count: 44),
+            "sg." + id + "." + secret,
+            "x" + key,
+            "_" + key,
+            key + "-note",
+            "SG." + String(repeating: "A", count: 21) + "+." + secret,
+            "SG." + id + "." + String(repeating: "b", count: 42) + "+",
+            "SG." + id + "." + String(repeating: "b", count: 42) + "/",
+            "SG." + id + "." + String(repeating: "b", count: 42) + "=",
+        ]
+        for line in keptLines {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line.prefix(80))")
+            #expect(result.redactedText == line)
+        }
+    }
 }
 
 // MARK: - DwellTracker Tests

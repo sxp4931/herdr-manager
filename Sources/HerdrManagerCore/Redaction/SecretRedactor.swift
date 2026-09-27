@@ -507,6 +507,23 @@ public final class SecretRedactor: Sendable {
                 "(?<![A-Za-z0-9_])GOCSPX-[0-9A-Za-z_-]{28}(?![A-Za-z0-9_-])",
                 "GOCSPX-[REDACTED]"
             ),
+            // SendGrid API keys. The key is exactly 69 characters:
+            // `SG.`, 22 characters, `.`, and 43 characters. That is the
+            // only length SendGrid issues, and the body can send mail
+            // for the account. `SENDGRID_API_KEY` already ends in
+            // `api_key`, so an assignment is hidden. A pane log, a curl
+            // line, and a pasted key have no keyword. A shorter segment
+            // stays, and a longer run stays whole, so a tail is not left
+            // behind. `-` and `_` are in the alphabet; `+`, `/`, and `=`
+            // are not, and a string that contains one stays whole. A
+            // letter, digit, or underscore glued to the front is not the
+            // prefix. The prefix is the uppercase form SendGrid prints.
+            // A hyphenated note stays whole because `-` continues the
+            // segment.
+            (
+                "(?<![A-Za-z0-9_])SG\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])",
+                "SG.[REDACTED]"
+            ),
         ]
         // Compact JWS or JWE, then a PEM block. Both stay after bearer:
         // a JWT written after the scheme has to be one redaction, and
