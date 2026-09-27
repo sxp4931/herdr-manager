@@ -1206,7 +1206,9 @@ private enum ShellForeground {
                 // word, or no word, makes that node exit. The same is
                 // true of every node value flag. Bun rejects `-W`,
                 // `-X`, `-S`, `-L`, and `-o`; the path after one is
-                // not Letta.
+                // not Letta. A bun value that starts with `-` is not
+                // Letta either when that flag rejects it, and neither
+                // is a `--define` value with no `:` or `=`.
                 if runtimeName == "bun", bunRejectedShort(arg) {
                     return nil
                 }
@@ -1253,6 +1255,13 @@ private enum ShellForeground {
                         return nil
                     }
                     continue
+                }
+                if runtimeName == "bun",
+                   bunValueExits(
+                    arg,
+                    following: index + 1 < argv.count ? argv[index + 1] : nil
+                   ) {
+                    return nil
                 }
                 if let width = valueFlagWidth(arg, runtime: runtimeName) {
                     index += width
@@ -1520,6 +1529,13 @@ private enum ShellForeground {
     /// including a glued short. Bun still runs `--cwd` and
     /// `--title --watch`. Bun rejects `-W`, `-X`, `-S`, `-L`, and
     /// `-o`. Python's `-W` and `-X` still take the next word.
+    /// Bun's own value flags are not that node rule. `--title --watch`
+    /// and `--user-agent --watch` run the file. `--port`, `--shell`,
+    /// `--install`, and the other flags in `bunDashRejectedFlags` exit
+    /// when the next word starts with `-`, and so does an attached
+    /// `--port=--watch` or an empty `--port=`. `--define` exits unless
+    /// the value contains `:` or `=`, so `KEY` and `--watch` are not a
+    /// value and `KEY:1` is. `--elide-lines=` and `--install=` still run.
     private static func runtimeScriptIsAgent(_ process: ForegroundProcess) -> Bool {
         guard let argv = launchArguments(process), let script = runtimeScript(argv) else {
             return false
@@ -1677,6 +1693,12 @@ private enum ShellForeground {
                 index += 1
                 continue
             }
+            // Bun exits before the path after a rejected value runs.
+            // Node's dash-word rule is `nodeOption`, above. A value bun
+            // accepts still falls through to `valueFlagWidth`.
+            if runtime == "bun", bunValueExits(arg, following: following) {
+                return nil
+            }
             if let width = valueFlagWidth(arg, runtime: runtime) {
                 index += width
                 continue
@@ -1743,6 +1765,10 @@ private enum ShellForeground {
     /// are not bun, so `node --define` and `python -d` do not use this set.
     /// Node's own value flags are `nodeRequiredValueFlags`. Deno's are
     /// `denoRequiredValueFlags`, and Deno does not use this set.
+    /// A dash word is not a value for `bunDashRejectedFlags`. `--define`
+    /// needs a `:` or `=` in the value (`bunValueExits`); `KEY` exits
+    /// and `KEY:1` does not. `--title` and `--user-agent` still take a
+    /// dash word, and the script is the word after it.
     private static let bunRequiredValueFlags: Set<String> = [
         "--define", "-d",
         "--drop",
@@ -1894,9 +1920,11 @@ private enum ShellForeground {
     /// Words this flag occupies, including itself. Nil when `arg` is not
     /// one of bun's or node's value flags. A required value takes the
     /// next word. Node's dash word, empty `--flag=`, and rejected flags
-    /// exit in `nodeOption` before this width is used. Bun's `--inspect`
-    /// is `bunInspect`: an address-shaped word makes bun exit, and a
-    /// path is the script.
+    /// exit in `nodeOption` before this width is used. Bun's rejected
+    /// value exits in `bunValueExits` before this width is used, so a
+    /// dash word here is one bun still accepts (`--title --watch`).
+    /// Bun's `--inspect` is `bunInspect`: an address-shaped word makes
+    /// bun exit, and a path is the script.
     private static func valueFlagWidth(_ arg: String, runtime: String) -> Int? {
         if let width = bunFlagWidth(arg, runtime: runtime) {
             return width
@@ -1908,6 +1936,96 @@ private enum ShellForeground {
         guard runtime == "bun" else { return nil }
         guard bunRequiredValueFlags.contains(arg) else { return nil }
         return 2
+    }
+
+    /// Bun 1.4.2 exits when the next word starts with `-`. Checked on
+    /// that binary: each one reports the dash word as an invalid value
+    /// and does not run the file. `--title`, `--user-agent`, `--drop`,
+    /// and the profiler names are not here. With `--cpu-prof` set,
+    /// `--cpu-prof-name --watch script.js` runs that file, so a dash
+    /// word is the name. `--elide-lines=` and `--install=` are empty
+    /// and still run; the other flags exit on an empty `=`.
+    private static let bunDashRejectedFlags: Set<String> = [
+        "--shell",
+        "--unhandled-rejections",
+        "--console-depth",
+        "--elide-lines",
+        "--install",
+        "--jsx-runtime",
+        "--port",
+        "--fetch-preconnect",
+        "--max-http-header-size",
+        "--dns-result-order",
+    ]
+
+    /// An empty `--flag=` exits. `--elide-lines=` and `--install=` do
+    /// not, so they stay off this list. `--define=` is `bunDefineOperand`.
+    private static let bunEmptyAttachedExits: Set<String> = [
+        "--shell",
+        "--unhandled-rejections",
+        "--console-depth",
+        "--jsx-runtime",
+        "--port",
+        "--fetch-preconnect",
+        "--max-http-header-size",
+        "--dns-result-order",
+    ]
+
+    /// True when Bun 1.4.2 rejects this argv word and does not run a
+    /// script after it.
+    ///
+    /// `--port --watch /tmp/codex`, `--port=--watch`, `--port=`, and
+    /// `--shell --watch` exit. `--port 3000` and `--port=3000` do not:
+    /// the word that does not start with `-` is still the value.
+    /// `--define KEY` and `--define --watch` exit because the value has
+    /// no `:` or `=`. `--define KEY:1`, `--define --watch=1`, and
+    /// `--define=KEY:1` run the file. `-d=A` is the same missing
+    /// separator (`=` only attaches the short flag). `-dKEY:1` and
+    /// `-d--watch=1` keep the separator in the value and run. `--title
+    /// --watch` is not this check.
+    private static func bunValueExits(_ arg: String, following: String?) -> Bool {
+        if let define = bunDefineOperand(arg, following: following) {
+            return !define.contains(":") && !define.contains("=")
+        }
+        if bunDashRejectedFlags.contains(arg) {
+            guard let following else { return false }
+            return following.hasPrefix("-")
+        }
+        return bunAttachedDashExits(arg)
+    }
+
+    /// The `--define` / `-d` value. Nil when `arg` is not that flag, so
+    /// a missing word stays on `bunFlagWidth` and names no script. The
+    /// `=` in `--define=` and `-d=` attaches the value; it is not the
+    /// separator bun requires inside the value.
+    private static func bunDefineOperand(_ arg: String, following: String?) -> String? {
+        if arg == "--define" || arg == "-d" {
+            return following
+        }
+        let longFlag = "--define="
+        if arg.hasPrefix(longFlag) {
+            return String(arg.dropFirst(longFlag.count))
+        }
+        guard arg.hasPrefix("-d"), !arg.hasPrefix("--"), arg.count > 2 else { return nil }
+        var rest = arg.dropFirst(2)
+        if rest.first == "=" {
+            rest = rest.dropFirst()
+        }
+        return String(rest)
+    }
+
+    /// `--port=--watch` and `--port=`. A value that does not start with
+    /// `-` and is not empty stays one flag word, and the next word is
+    /// the script. `--title=--watch` is not one of these flags.
+    private static func bunAttachedDashExits(_ arg: String) -> Bool {
+        for flag in bunDashRejectedFlags where flag.hasPrefix("--") {
+            let prefix = flag + "="
+            guard arg.hasPrefix(prefix) else { continue }
+            let value = arg.dropFirst(prefix.count)
+            if value.hasPrefix("-") { return true }
+            return value.isEmpty && bunEmptyAttachedExits.contains(flag)
+        }
+        return false
     }
 
     private static func nodeFlagWidth(_ arg: String, runtime: String) -> Int? {

@@ -1476,10 +1476,19 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([port, claude]) == 12)
         #expect(Diagnoser.cpuSamplePid([install, claude]) == 12)
 
-        let afterRun = process(
+        // `KEY` has no `:` or `=`. Bun 1.4.2 exits, so `--watch` and the
+        // path do not run. `KEY:1` is a define, and the path is the script.
+        let bareDefine = process(
             20,
             "bun",
             argv: ["bun", "run", "--define", "KEY", "--watch", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, bareDefine]) == 10)
+        #expect(Diagnoser.cpuSamplePid([bareDefine]) == 20)
+        let afterRun = process(
+            20,
+            "bun",
+            argv: ["bun", "run", "--define", "KEY:1", "--watch", "/tmp/codex"]
         )
         #expect(Diagnoser.cpuSamplePid([helper, afterRun]) == 20)
 
@@ -1526,11 +1535,22 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([mcp, leader]) == 10)
         #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 10)
 
-        let letta = process(
+        // `KEY` is not a define, so the path is not the TUI. `KEY:1` is.
+        let bareLetta = process(
             30,
             "bun",
             argv: [
                 "bun", "--define", "KEY",
+                "/home/user/node_modules/.bin/letta", "--conversation", "id",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, bareLetta]) == 10)
+        #expect(Diagnoser.cpuSamplePid([bareLetta]) == 30)
+        let letta = process(
+            30,
+            "bun",
+            argv: [
+                "bun", "--define", "KEY:1",
                 "/home/user/node_modules/.bin/letta", "--conversation", "id",
             ]
         )
@@ -1614,6 +1634,193 @@ struct DiagnoserCpuSamplePidTests {
             ]
         )
         #expect(Diagnoser.cpuSamplePid([helper, featureLetta]) == 30)
+    }
+
+    @Test("a dash word bun rejects is not the agent script")
+    func bunDashValueIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Bun 1.4.2 exits. The path after the dash word does not run, so
+        // this bun is not the group leader.
+        let port = process(
+            4, "bun", argv: ["bun", "--port", "--watch", "/usr/local/bin/codex"]
+        )
+        let define = process(
+            4, "bun", argv: ["bun", "--define", "--watch", "/tmp/codex"]
+        )
+        let shortDefine = process(
+            4, "bun.exe", argv: ["bun.exe", "-d", "--watch", "/tmp/codex"]
+        )
+        let shell = process(
+            4, "bun", argv: ["bun", "run", "--shell", "--watch", "/usr/local/bin/codex"]
+        )
+        let install = process(
+            4, "bun", argv: ["bun", "--install", "--watch", "/tmp/codex"]
+        )
+        let depth = process(
+            4, "bun", argv: ["bun", "--console-depth", "-1", "/tmp/codex"]
+        )
+        let elide = process(
+            4, "bun", argv: ["bun", "--elide-lines", "--watch", "/tmp/codex"]
+        )
+        let jsx = process(
+            4, "bun", argv: ["bun", "--jsx-runtime", "--watch", "/usr/local/bin/codex"]
+        )
+        let preconnect = process(
+            4, "bun", argv: ["bun", "--fetch-preconnect", "--watch", "/tmp/codex"]
+        )
+        let header = process(
+            4, "bun", argv: ["bun", "--max-http-header-size", "--watch", "/tmp/codex"]
+        )
+        let dns = process(
+            4, "bun", argv: ["bun", "--dns-result-order", "--watch", "/tmp/codex"]
+        )
+        let rejections = process(
+            4, "bun", argv: ["bun", "--unhandled-rejections", "--watch", "/tmp/codex"]
+        )
+        let bareKey = process(
+            4, "bun", argv: ["bun", "--define", "KEY", "/usr/local/bin/codex"]
+        )
+        let gluedDebug = process(4, "bun", argv: ["bun", "-debug", "/tmp/codex"])
+        let attachedPort = process(
+            4, "bun", argv: ["bun", "--port=--watch", "/usr/local/bin/codex"]
+        )
+        let emptyPort = process(4, "bun", argv: ["bun", "--port=", "/tmp/codex"])
+        let attachedDefine = process(
+            4, "bun", argv: ["bun", "--define=--watch", "/tmp/codex"]
+        )
+        let shortAttached = process(4, "bun", argv: ["bun", "-d=A", "/tmp/codex"])
+        let gluedDash = process(4, "bun.exe", argv: ["bun.exe", "-d--watch", "/tmp/codex"])
+        #expect(Diagnoser.cpuSamplePid([port, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([define, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([shortDefine, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([shell, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([install, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([depth, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([elide, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([jsx, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([preconnect, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([header, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([dns, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([rejections, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([bareKey, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([gluedDebug, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([attachedPort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([emptyPort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([attachedDefine, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([shortAttached, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([gluedDash, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([mcp, port], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([port]) == 4)
+
+        // A real value, including one glued with `=`, still names the script.
+        // A dash word on `--title` and `--user-agent` is that value.
+        let portScript = process(
+            20, "bun", argv: ["bun", "--port", "3000", "/usr/local/bin/codex"]
+        )
+        let portEquals = process(20, "bun", argv: ["bun", "--port=3000", "/tmp/codex"])
+        let defined = process(
+            20, "bun", argv: ["bun", "--define", "KEY:1", "/usr/local/bin/codex"]
+        )
+        let definedEquals = process(
+            20, "bun", argv: ["bun", "--define=KEY:1", "/tmp/codex"]
+        )
+        let definedDash = process(
+            20, "bun", argv: ["bun", "--define", "--watch=1", "/tmp/codex"]
+        )
+        let shortEquals = process(20, "bun", argv: ["bun", "-d=KEY:1", "/tmp/codex"])
+        let gluedWatch = process(20, "bun.exe", argv: ["bun.exe", "-d--watch=1", "/tmp/codex"])
+        let emptyEquals = process(20, "bun", argv: ["bun", "--define==", "/tmp/codex"])
+        let shellSystem = process(
+            20, "bun", argv: ["bun", "--shell", "system", "/usr/local/bin/codex"]
+        )
+        let shellEquals = process(
+            20, "bun", argv: ["bun", "--shell=system", "/tmp/codex"]
+        )
+        let emptyInstall = process(20, "bun", argv: ["bun", "--install=", "/tmp/codex"])
+        let emptyElide = process(20, "bun", argv: ["bun", "--elide-lines=", "/tmp/codex"])
+        let title = process(
+            20, "bun", argv: ["bun", "--title", "--watch", "/usr/local/bin/codex"]
+        )
+        let userAgent = process(
+            20, "bun", argv: ["bun", "--user-agent", "--watch", "/tmp/codex"]
+        )
+        let scriptFirst = process(
+            20, "bun", argv: ["bun", "/usr/local/bin/codex", "--port", "--watch"]
+        )
+        let profName = process(
+            20,
+            "bun",
+            argv: ["bun", "--cpu-prof", "--cpu-prof-name", "--watch", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, portScript]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, portEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, defined]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, definedEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, definedDash]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, shortEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, gluedWatch]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, emptyEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, shellSystem]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, shellEquals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, emptyInstall]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, emptyElide]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, title]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, userAgent]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, scriptFirst]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, profName]) == 20)
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, title], foregroundProcessGroupId: 20) == 20
+        )
+
+        // Node still skips an unknown long option. The path is the script.
+        let nodePort = process(
+            20, "node", argv: ["node", "--port", "--watch", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, nodePort]) == 20)
+
+        // A rejected value in front of Letta is not the TUI. `--title
+        // --watch` still is, and so is a define that has a separator.
+        let falseLetta = process(
+            8,
+            "bun",
+            argv: ["bun", "--port", "--watch", "/home/user/node_modules/.bin/letta"]
+        )
+        let defineLetta = process(
+            8,
+            "bun",
+            argv: [
+                "bun", "--define", "KEY",
+                "/home/user/node_modules/.bin/letta", "--prompt", "hi",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([falseLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([falseLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([falseLetta]) == 8)
+        #expect(Diagnoser.cpuSamplePid([mcp, falseLetta], foregroundProcessGroupId: 8) == 10)
+        #expect(Diagnoser.cpuSamplePid([defineLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([defineLetta]) == 8)
+        let titleLetta = process(
+            30,
+            "bun",
+            argv: [
+                "bun", "--title", "--watch",
+                "/home/user/node_modules/.bin/letta", "--conversation", "id",
+            ]
+        )
+        let definedLetta = process(
+            30,
+            "bun",
+            argv: [
+                "bun", "--define", "KEY:1",
+                "/home/user/node_modules/.bin/letta", "--conversation", "id",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, titleLetta]) == 30)
+        #expect(Diagnoser.cpuSamplePid([helper, definedLetta]) == 30)
     }
 
     @Test("bun's --config word is the script, and the other runtimes keep theirs")
