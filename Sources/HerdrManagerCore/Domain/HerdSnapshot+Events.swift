@@ -47,10 +47,18 @@ extension HerdSnapshot {
     /// `tabIds` maps a pane id to the tab it is in. A tab rename has no
     /// other way to find the row: `Agent` stores the tab's label, not its
     /// id. Omit the map and a tab rename changes nothing.
+    ///
+    /// `aliases` is the `name` from the last `agent.list` (`herdr agent
+    /// rename` / `agent start`). `pane_updated` and `pane_moved` do not
+    /// carry that field. Omit the map and a terminal title is the name.
+    /// `preservingExistingName` is false when the occupant changed: the
+    /// previous person's name is not this row's.
     public func applying(
         _ event: HerdrEvent,
         to agents: [Agent],
         tabIds: [String: String] = [:],
+        aliases: [String: String] = [:],
+        preservingExistingName: Bool = true,
         now: Date = Date()
     ) -> [Agent] {
         var agents = agents
@@ -77,7 +85,19 @@ extension HerdSnapshot {
             }
             guard let idx else {
                 // First word of this agent (a plain shell yields nil).
-                if let agent = displayAgent(for: info, now: now) {
+                if var agent = displayAgent(for: info, now: now) {
+                    // `displayAgent` cannot see a rename stored for an id
+                    // this table has not drawn yet. The list already did.
+                    if let alias = aliases[info.paneId],
+                       let named = AgentLabel.preferred(
+                           title: info.title,
+                           displayAgent: info.displayAgent,
+                           name: alias,
+                           terminalTitleStripped: info.terminalTitleStripped
+                       ) {
+                        agent.name = named
+                        agent.displayName = named
+                    }
                     agents.append(agent)
                 }
                 break
@@ -95,13 +115,18 @@ extension HerdSnapshot {
             agents[idx].status = newStatus
             if info.stateChangeSeq != 0 { agents[idx].stateChangeSeq = info.stateChangeSeq }
             agents[idx].verdict = Self.verdict(replacing: previous, with: newStatus, now: now)
-            // herdmgr has no poll. This event is the only copy of a title,
-            // kind, directory, or tab change, and none of those open an
-            // episode. A missing title or an unknown container keeps the
-            // row's current value: a seq-less payload leaves fields off,
-            // and a workspace this snapshot has not labelled yet may still
-            // be wearing the name the move created.
-            applyPresentation(of: info, to: &agents[idx])
+            // A title, kind, directory, or tab change is not a new episode.
+            // A missing title keeps the row's current value: a seq-less
+            // payload leaves fields off, and a workspace this snapshot has
+            // not labelled yet may still be wearing the name the move created.
+            // The rename from the last list outranks the terminal title on
+            // this event, which does not carry `name`.
+            applyPresentation(
+                of: info,
+                to: &agents[idx],
+                alias: aliases[info.paneId],
+                preservingExistingName: preservingExistingName
+            )
 
         case .paneClosed(let paneId), .paneExited(let paneId):
             agents.removeAll { $0.id.raw == paneId }
@@ -112,6 +137,8 @@ extension HerdSnapshot {
                 info: info,
                 createdWorkspaceLabel: createdWorkspaceLabel,
                 createdTabLabel: createdTabLabel,
+                aliases: aliases,
+                preservingExistingName: preservingExistingName,
                 to: agents,
                 now: now
             )
@@ -144,6 +171,8 @@ extension HerdSnapshot {
         info: HerdrAgentInfo,
         createdWorkspaceLabel: String?,
         createdTabLabel: String?,
+        aliases: [String: String],
+        preservingExistingName: Bool,
         to agents: [Agent],
         now: Date
     ) -> [Agent] {
@@ -155,7 +184,8 @@ extension HerdSnapshot {
         // Same rule as `AgentStore.applyPaneMove`. The wire event has no
         // seq. Re-key a row we already show; do not invent one, and do not
         // open a new dwell from the status riding along on the move.
-        // herdmgr has no poll, so a replayed move would otherwise stick.
+        // The status poll does not insert a pane, so a replayed move would
+        // otherwise stick.
         if info.stateChangeSeq == 0 && existing == nil {
             return agents
         }
@@ -191,7 +221,28 @@ extension HerdSnapshot {
         } else {
             kind = .custom(agentKind)
         }
-        let name = info.title ?? info.terminalTitleStripped ?? existing?.name ?? agentKind
+        // A list that already contains the destination is the authority for
+        // `name`. The id the row is leaving still has the old rename, and
+        // carrying it would undo `agent rename --clear` on the refetch that
+        // ran ahead of this move. A move that lands before any list has the
+        // new id still uses the rename stored for the id it left.
+        let listed = self.agents.first { $0.paneId == info.paneId }
+        let alias: String?
+        if !preservingExistingName {
+            // The occupant changed. herdr clears the rename, and the name
+            // on the last list is the person who left.
+            alias = nil
+        } else if listed != nil {
+            alias = listed.flatMap { AgentLabel.nonempty($0.name) }
+        } else {
+            alias = aliases[previousRaw] ?? (previousRaw == info.paneId ? nil : aliases[info.paneId])
+        }
+        let name = AgentLabel.preferred(
+            title: info.title,
+            displayAgent: info.displayAgent,
+            name: alias,
+            terminalTitleStripped: info.terminalTitleStripped
+        ) ?? (preservingExistingName ? existing?.name : nil) ?? agentKind
         let wsName = labeled(info.workspaceId, in: workspaceNames, created: createdWorkspaceLabel)
             ?? existing?.workspaceName
             ?? ""
@@ -210,7 +261,10 @@ extension HerdSnapshot {
             verdict: (existing == nil || statusChanged) ? Self.displayVerdict(for: status, now: now) : existing!.verdict,
             workspaceName: wsName,
             tabName: tabName,
-            cwd: info.foregroundCwd ?? info.cwd ?? existing?.cwd ?? ""
+            cwd: AgentLabel.nonempty(info.foregroundCwd)
+                ?? AgentLabel.nonempty(info.cwd)
+                ?? existing?.cwd
+                ?? ""
         )
 
         var kept = agents.filter { row in
@@ -225,22 +279,37 @@ extension HerdSnapshot {
 
     /// Fields on `pane_updated` that are not the status episode.
     ///
-    /// `title` wins over the stripped terminal title, matching
-    /// `displayAgent`. An empty string is absent. Kind prefers the session's
+    /// The name uses `AgentLabel`: a metadata title, then `display_agent`,
+    /// then `alias` (the rename from the last list), then the stripped
+    /// terminal title. An empty string is absent. Kind prefers the session's
     /// agent when that string is non-empty, then the detected `agent`.
     /// Directory prefers `foreground_cwd`. Workspace and tab update only
     /// when this snapshot already has a label for the id, so a raw id cannot
-    /// replace a name the move just created.
-    private func applyPresentation(of info: HerdrAgentInfo, to agent: inout Agent) {
+    /// replace a name the move just created. When every name source is
+    /// absent the row keeps its name, unless the occupant changed.
+    private func applyPresentation(
+        of info: HerdrAgentInfo,
+        to agent: inout Agent,
+        alias: String?,
+        preservingExistingName: Bool
+    ) {
         guard let agentKind = info.agent, !agentKind.isEmpty else { return }
         if let session = info.agentSession, !session.agent.isEmpty {
             agent.kind = .custom(session.agent)
         } else {
             agent.kind = .custom(agentKind)
         }
-        if let name = Self.nonempty(info.title) ?? Self.nonempty(info.terminalTitleStripped) {
+        if let name = AgentLabel.preferred(
+            title: info.title,
+            displayAgent: info.displayAgent,
+            name: alias,
+            terminalTitleStripped: info.terminalTitleStripped
+        ) {
             agent.name = name
             agent.displayName = name
+        } else if !preservingExistingName {
+            agent.name = agentKind
+            agent.displayName = agentKind
         }
         if let directory = Self.nonempty(info.foregroundCwd) ?? Self.nonempty(info.cwd) {
             agent.cwd = directory

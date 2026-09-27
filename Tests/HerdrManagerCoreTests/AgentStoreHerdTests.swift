@@ -12,23 +12,28 @@ private func makeAgentInfo(
     agentStatus: String = "working",
     stateChangeSeq: UInt64 = 1,
     title: String? = "Claude",
-    session: HerdrSnapshot.AgentSession? = nil
+    displayAgent: String? = nil,
+    name: String? = nil,
+    terminalTitleStripped: String? = nil,
+    session: HerdrSnapshot.AgentSession? = nil,
+    cwd: String? = "/tmp",
+    foregroundCwd: String? = "/tmp"
 ) -> HerdrAgentInfo {
     HerdrAgentInfo(
         paneId: paneId,
         workspaceId: workspaceId,
         tabId: tabId,
         agent: agent,
-        displayAgent: agent,
-        name: nil,
+        displayAgent: displayAgent,
+        name: name,
         title: title,
-        terminalTitleStripped: title,
+        terminalTitleStripped: terminalTitleStripped ?? title,
         agentStatus: agentStatus,
         agentSession: session,
         focused: false,
         stateChangeSeq: stateChangeSeq,
-        cwd: "/tmp",
-        foregroundCwd: "/tmp",
+        cwd: cwd,
+        foregroundCwd: foregroundCwd,
         revision: 1,
         tokens: [:],
         stateLabels: [:],
@@ -3220,5 +3225,113 @@ struct ContainerRenameTests {
         #expect(store.applyEvent(.tabRenamed(tabId: "wA:t1", label: "")) == nil)
         #expect(store.agents[AgentID("wA:p1")]?.workspaceName == "Alpha")
         #expect(store.agents[AgentID("wA:p1")]?.tabName == "main")
+    }
+}
+
+@Suite("Agent rename")
+struct AgentRenameTests {
+    private func herd(_ infos: [HerdrAgentInfo]) -> HerdSnapshot {
+        labeledHerd(infos)
+    }
+
+    @Test("A rename outranks the terminal title and follows the pane")
+    @MainActor
+    func renameSurvivesTerminalTitleAndMoves() throws {
+        let store = AgentStore()
+        let stamp = store.captureHerdRequest()
+        store.applyHerdSnapshot(herd([
+            makeAgentInfo(
+                paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5,
+                title: nil, name: "reviewer", terminalTitleStripped: "Action Required",
+                foregroundCwd: "/work"
+            )
+        ]), requestedAtEpoch: stamp.epoch, requestedAtSerial: stamp.serial)
+        let id = AgentID("wA:p1")
+        #expect(store.agents[id]?.name == "reviewer")
+        #expect(store.agents[id]?.displayName == "reviewer")
+        #expect(store.agents[id]?.cwd == "/work")
+
+        let entered = store.agents[id]?.enteredAt
+        #expect(store.applyEvent(.paneUpdated(makeAgentInfo(
+            paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0,
+            title: "", terminalTitleStripped: "Bash",
+            cwd: nil, foregroundCwd: nil
+        ))) == nil)
+        #expect(store.agents[id]?.name == "reviewer")
+        #expect(store.agents[id]?.enteredAt == entered)
+
+        // display_agent is on this event only. The rename stays stored,
+        // so a later payload that omits display_agent still uses it.
+        #expect(store.applyEvent(.paneUpdated(makeAgentInfo(
+            paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0,
+            title: nil, displayAgent: "Claude: auth", terminalTitleStripped: "Bash",
+            cwd: nil, foregroundCwd: nil
+        ))) == nil)
+        #expect(store.agents[id]?.name == "Claude: auth")
+
+        #expect(store.applyEvent(.paneMoved(
+            previousPaneId: "wA:p1",
+            pane: makeAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2",
+                agentStatus: "blocked", stateChangeSeq: 0,
+                title: nil, terminalTitleStripped: "Action Required",
+                cwd: nil, foregroundCwd: nil
+            ),
+            createdWorkspaceLabel: nil,
+            createdTabLabel: nil
+        )) == nil)
+        #expect(store.agents[id] == nil)
+        #expect(store.agents[AgentID("wB:p4")]?.name == "reviewer")
+        #expect(store.agents[AgentID("wB:p4")]?.cwd == "/work")
+
+        let cleared = store.captureHerdRequest()
+        store.applyHerdSnapshot(herd([
+            makeAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2",
+                agentStatus: "blocked", stateChangeSeq: 5,
+                title: nil, terminalTitleStripped: "Action Required",
+                foregroundCwd: "", cwd: nil
+            )
+        ]), requestedAtEpoch: cleared.epoch, requestedAtSerial: cleared.serial)
+        #expect(store.agents[AgentID("wB:p4")]?.name == "Action Required")
+        #expect(store.agents[AgentID("wB:p4")]?.cwd == "/work")
+    }
+
+    @Test("A list that names no label keeps the row's name, and a new session does not keep the rename")
+    @MainActor
+    func omittedNameKeepsTheRowUntilTheSessionChanges() throws {
+        let store = AgentStore()
+        let stamp = store.captureHerdRequest()
+        let same = HerdrSnapshot.AgentSession(
+            source: "agent", agent: "claude", kind: "session", value: "abc"
+        )
+        store.applyHerdSnapshot(herd([
+            makeAgentInfo(
+                paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5,
+                title: nil, name: "reviewer", terminalTitleStripped: nil, session: same
+            )
+        ]), requestedAtEpoch: stamp.epoch, requestedAtSerial: stamp.serial)
+        let id = AgentID("wA:p1")
+        #expect(store.agents[id]?.name == "reviewer")
+
+        let quiet = store.captureHerdRequest()
+        store.applyHerdSnapshot(herd([
+            makeAgentInfo(
+                paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5,
+                title: nil, terminalTitleStripped: nil, session: same
+            )
+        ]), requestedAtEpoch: quiet.epoch, requestedAtSerial: quiet.serial)
+        #expect(store.agents[id]?.name == "reviewer")
+        #expect(store.agents[id]?.cwd == "/tmp")
+
+        let other = HerdrSnapshot.AgentSession(
+            source: "agent", agent: "claude", kind: "session", value: "other"
+        )
+        let replaced = store.applyEvent(.paneUpdated(makeAgentInfo(
+            paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0,
+            title: nil, terminalTitleStripped: "New task", session: other
+        )))
+        #expect(replaced != nil)
+        #expect(store.agents[id]?.name == "New task")
     }
 }

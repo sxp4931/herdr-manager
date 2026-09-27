@@ -11,6 +11,8 @@ private func makeDwellAgentInfo(
     stateChangeSeq: UInt64 = 1,
     session: HerdrSnapshot.AgentSession? = nil,
     title: String? = "Claude",
+    displayAgent: String? = nil,
+    name: String? = nil,
     terminalTitleStripped: String? = "Claude",
     cwd: String? = "/tmp",
     foregroundCwd: String? = "/tmp"
@@ -20,8 +22,8 @@ private func makeDwellAgentInfo(
         workspaceId: workspaceId,
         tabId: tabId,
         agent: agent,
-        displayAgent: "claude",
-        name: nil,
+        displayAgent: displayAgent,
+        name: name,
         title: title,
         terminalTitleStripped: terminalTitleStripped,
         agentStatus: agentStatus,
@@ -883,5 +885,162 @@ struct HerdLiveTableDwellTests {
         )
         #expect(live.agents.first { $0.id.raw == "wA:p1" }?.workspaceName == "After")
         #expect(live.agents.first { $0.id.raw == "wA:p1" }?.enteredAt == started)
+    }
+
+    @Test("A rename beats the terminal title until the list clears it")
+    func renameSurvivesPaneUpdatedUntilTheListClearsIt() {
+        let herd = snapshot([
+            makeDwellAgentInfo(
+                paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5,
+                title: nil, name: "reviewer", terminalTitleStripped: "Action Required"
+            )
+        ])
+        var live = HerdLiveTable(herd: herd, agents: herd.displayAgents(now: started))
+        #expect(live.agents.first?.name == "reviewer")
+
+        live.apply(
+            .paneUpdated(makeDwellAgentInfo(
+                paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 0,
+                title: "", terminalTitleStripped: "Bash"
+            )),
+            now: refreshedAt
+        )
+        #expect(live.agents.first?.name == "reviewer")
+        #expect(live.agents.first?.displayName == "reviewer")
+        #expect(live.agents.first?.enteredAt == started)
+
+        // The poll saw the pane before it had a row. The insert still uses
+        // the rename, not the terminal title on pane_updated.
+        live.noteStatusRefresh(
+            snapshot([
+                makeDwellAgentInfo(
+                    paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5,
+                    title: nil, name: "reviewer", terminalTitleStripped: "Action Required"
+                ),
+                makeDwellAgentInfo(
+                    paneId: "wA:p9", agentStatus: "working", stateChangeSeq: 1,
+                    title: nil, name: "indexer", terminalTitleStripped: "Action Required"
+                )
+            ]),
+            now: refreshedAt
+        )
+        #expect(live.agents.contains { $0.id.raw == "wA:p9" } == false)
+        live.apply(
+            .paneUpdated(makeDwellAgentInfo(
+                paneId: "wA:p9", agentStatus: "working", stateChangeSeq: 0,
+                title: nil, terminalTitleStripped: "Action Required"
+            )),
+            now: refreshedAt
+        )
+        #expect(live.agents.first { $0.id.raw == "wA:p9" }?.name == "indexer")
+
+        live.noteStatusRefresh(
+            snapshot([
+                makeDwellAgentInfo(
+                    paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5,
+                    title: nil, terminalTitleStripped: "Action Required"
+                )
+            ]),
+            now: moveAt
+        )
+        #expect(live.agents.first { $0.id.raw == "wA:p1" }?.name == "Action Required")
+        #expect(live.agents.first { $0.id.raw == "wA:p1" }?.enteredAt == started)
+    }
+
+    @Test("A move keeps the rename, and a new session does not")
+    func moveKeepsTheRename() {
+        let same = HerdrSnapshot.AgentSession(
+            source: "agent", agent: "claude", kind: "session", value: "abc"
+        )
+        let herd = snapshot([
+            makeDwellAgentInfo(
+                paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5,
+                session: same,
+                title: nil, name: "reviewer", terminalTitleStripped: "Action Required"
+            )
+        ])
+        var live = HerdLiveTable(herd: herd, agents: herd.displayAgents(now: started))
+        live.apply(
+            .paneMoved(
+                previousPaneId: "wA:p1",
+                pane: makeDwellAgentInfo(
+                    paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                    agentStatus: "blocked", stateChangeSeq: 0,
+                    title: nil, terminalTitleStripped: "Action Required"
+                ),
+                createdWorkspaceLabel: "proj",
+                createdTabLabel: "scratch"
+            ),
+            now: moveAt
+        )
+        #expect(live.agents.first?.id.raw == "wB:p4")
+        #expect(live.agents.first?.name == "reviewer")
+        #expect(live.agents.first?.enteredAt == started)
+
+        live.apply(
+            .paneUpdated(makeDwellAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                agentStatus: "blocked", stateChangeSeq: 0,
+                title: nil, terminalTitleStripped: "Bash"
+            )),
+            now: moveAt
+        )
+        #expect(live.agents.first?.name == "reviewer")
+
+        let other = HerdrSnapshot.AgentSession(
+            source: "agent", agent: "claude", kind: "session", value: "other"
+        )
+        live.apply(
+            .paneUpdated(makeDwellAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                agentStatus: "blocked", stateChangeSeq: 0,
+                session: other, title: nil, terminalTitleStripped: "New task"
+            )),
+            now: moveAt
+        )
+        #expect(live.agents.first?.name == "New task")
+        #expect(live.agents.first?.enteredAt == moveAt)
+    }
+
+    @Test("A refetch that cleared the rename is not undone by the move")
+    func clearedRenameStaysClearedAcrossTheMove() {
+        let herd = snapshot([
+            makeDwellAgentInfo(
+                paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5,
+                title: nil, name: "reviewer", terminalTitleStripped: "Action Required"
+            )
+        ])
+        var live = HerdLiveTable(herd: herd, agents: herd.displayAgents(now: started))
+        live.noteLayoutRefresh(
+            snapshot(
+                [
+                    makeDwellAgentInfo(
+                        paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                        agentStatus: "blocked", stateChangeSeq: 5,
+                        title: nil, terminalTitleStripped: "Action Required"
+                    )
+                ],
+                workspaces: ["wA": "Cuedora", "wB": "proj"],
+                tabs: ["wA:t1": "main", "wB:t1": "scratch"]
+            ),
+            now: refreshedAt
+        )
+        #expect(live.agents.first?.name == "Action Required")
+        live.apply(
+            .paneMoved(
+                previousPaneId: "wA:p1",
+                pane: makeDwellAgentInfo(
+                    paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t1",
+                    agentStatus: "blocked", stateChangeSeq: 0,
+                    title: nil, terminalTitleStripped: "Bash"
+                ),
+                createdWorkspaceLabel: "proj",
+                createdTabLabel: "scratch"
+            ),
+            now: moveAt
+        )
+        #expect(live.agents.first?.id.raw == "wB:p4")
+        #expect(live.agents.first?.name == "Bash")
+        #expect(live.agents.first?.enteredAt == started)
     }
 }

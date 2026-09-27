@@ -136,6 +136,14 @@ public final class AgentStore {
     @ObservationIgnored
     private var sessionByPane: [AgentID: String] = [:]
 
+    /// `name` from the last `agent.list` that was allowed to update this
+    /// pane. That is the `herdr agent rename` / `agent start` label.
+    /// `pane_updated` does not carry it, and the terminal title on that
+    /// event is not a reason to forget it. Empty values are not stored.
+    /// A list that includes the pane and omits the field clears it.
+    @ObservationIgnored
+    private var aliasByPane: [AgentID: String] = [:]
+
     /// Old id → new id for occupants the last *adopted* snapshot carried
     /// onto a pane id the store had not seen. Empty when that snapshot
     /// matched no session. A snapshot rejected for an older serial leaves
@@ -418,7 +426,12 @@ public final class AgentStore {
                 kind = .custom(agentKind)
             }
 
-            let name = info.title ?? info.terminalTitleStripped ?? agentKind
+            let name = AgentLabel.preferred(
+                title: info.title,
+                displayAgent: info.displayAgent,
+                name: info.name,
+                terminalTitleStripped: info.terminalTitleStripped
+            ) ?? (occupantReplaced ? nil : existing?.name) ?? agentKind
 
             let verdict: Verdict
             if sameEpisode {
@@ -439,7 +452,10 @@ public final class AgentStore {
                 verdict: verdict,
                 workspaceName: wsName,
                 tabName: tabName,
-                cwd: info.foregroundCwd ?? info.cwd ?? ""
+                cwd: AgentLabel.nonempty(info.foregroundCwd)
+                    ?? AgentLabel.nonempty(info.cwd)
+                    ?? (occupantReplaced ? nil : existing?.cwd)
+                    ?? ""
             )
             newAgents[agentId] = agent
             consumeEpisodeContinuation(agentId)
@@ -497,6 +513,7 @@ public final class AgentStore {
         }
         rememberSessions(from: snapshot, keptIds: newAgents.keys, holding: heldRows)
         rememberTabIds(from: snapshot, keptIds: newAgents.keys, holding: heldRows)
+        rememberAliases(from: snapshot, keptIds: newAgents.keys, holding: heldRows)
         // After the rows are built. A stamp the snapshot is allowed to
         // replace is dropped here, and what remains is written over the
         // snapshot's maps so the next pane_updated does not restore it.
@@ -672,6 +689,41 @@ public final class AgentStore {
         tabIdByPane = next
     }
 
+    /// Renames for the panes this snapshot kept. A pane the list contains
+    /// and does not name has been cleared (`agent rename --clear`). A pane
+    /// the list does not contain keeps the rename it had. `holding` is a
+    /// row this snapshot was not allowed to paint over: its rename stays,
+    /// so the next event does not pick up the rejected list's name.
+    private func rememberAliases(
+        from snapshot: HerdSnapshot,
+        keptIds: some Sequence<AgentID>,
+        holding: Set<AgentID>
+    ) {
+        var listed: Set<AgentID> = []
+        var incoming: [AgentID: String] = [:]
+        for info in snapshot.agents {
+            guard !info.paneId.isEmpty else { continue }
+            let id = AgentID(info.paneId)
+            listed.insert(id)
+            if let name = AgentLabel.nonempty(info.name) {
+                incoming[id] = name
+            }
+        }
+        var next: [AgentID: String] = [:]
+        for id in keptIds {
+            if holding.contains(id), let kept = aliasByPane[id] {
+                next[id] = kept
+            } else if listed.contains(id) {
+                if let name = incoming[id] {
+                    next[id] = name
+                }
+            } else if let kept = aliasByPane[id] {
+                next[id] = kept
+            }
+        }
+        aliasByPane = next
+    }
+
     /// Session identity last stored for `id`, without the pane id.
     ///
     /// The menu bar copies this before awaiting the herd re-read that
@@ -719,6 +771,36 @@ public final class AgentStore {
             tabIdByPane[newId] = info.tabId
         } else if previousId != newId, let carried = tabIdByPane.removeValue(forKey: previousId) {
             tabIdByPane[newId] = carried
+        }
+    }
+
+    /// The rename moves with the row. A payload that names one wins. A
+    /// move that leaves `name` off keeps the one the last list stored.
+    /// `replacing` is a new occupant: herdr clears the rename, and the
+    /// event has no `name` to put in its place.
+    private func carryAlias(
+        of info: HerdrAgentInfo,
+        from previousId: AgentID,
+        to newId: AgentID,
+        replacing: Bool
+    ) {
+        if replacing {
+            aliasByPane.removeValue(forKey: previousId)
+            if previousId != newId {
+                aliasByPane.removeValue(forKey: newId)
+            }
+            if let incoming = AgentLabel.nonempty(info.name) {
+                aliasByPane[newId] = incoming
+            }
+            return
+        }
+        if let incoming = AgentLabel.nonempty(info.name) {
+            if previousId != newId {
+                aliasByPane.removeValue(forKey: previousId)
+            }
+            aliasByPane[newId] = incoming
+        } else if previousId != newId, let carried = aliasByPane.removeValue(forKey: previousId) {
+            aliasByPane[newId] = carried
         }
     }
 
@@ -870,7 +952,16 @@ public final class AgentStore {
             } else {
                 kind = .custom(agentKind)
             }
-            let name = info.title ?? info.terminalTitleStripped ?? agentKind
+            let storedAlias = occupantReplaced ? nil : aliasByPane[agentId]
+            if occupantReplaced {
+                aliasByPane.removeValue(forKey: agentId)
+            }
+            let name = AgentLabel.preferred(
+                title: info.title,
+                displayAgent: info.displayAgent,
+                name: storedAlias,
+                terminalTitleStripped: info.terminalTitleStripped
+            ) ?? (occupantReplaced ? nil : existing?.name) ?? agentKind
             let wsName = workspaceNameCache[info.workspaceId] ?? existing?.workspaceName ?? info.workspaceId
             let tabName = tabNameCache[info.tabId] ?? existing?.tabName ?? info.tabId
             // A real (non-zero) seq replaces the stored one; otherwise keep
@@ -891,11 +982,15 @@ public final class AgentStore {
                 verdict: verdict,
                 workspaceName: wsName,
                 tabName: tabName,
-                cwd: info.foregroundCwd ?? info.cwd ?? existing?.cwd ?? ""
+                cwd: AgentLabel.nonempty(info.foregroundCwd)
+                    ?? AgentLabel.nonempty(info.cwd)
+                    ?? existing?.cwd
+                    ?? ""
             )
             agents[agentId] = updated
             carrySession(of: info, from: agentId, to: agentId)
             carryTab(of: info, from: agentId, to: agentId)
+            carryAlias(of: info, from: agentId, to: agentId, replacing: occupantReplaced)
             return Self.transition(
                 from: existing?.status,
                 to: updated,
@@ -1023,7 +1118,21 @@ public final class AgentStore {
         } else {
             kind = .custom(agentKind)
         }
-        let name = info.title ?? info.terminalTitleStripped ?? existing?.name ?? agentKind
+        let storedAlias = occupantReplaced
+            ? nil
+            : (aliasByPane[previousId] ?? (previousId == newId ? nil : aliasByPane[newId]))
+        if occupantReplaced {
+            aliasByPane.removeValue(forKey: previousId)
+            if previousId != newId {
+                aliasByPane.removeValue(forKey: newId)
+            }
+        }
+        let name = AgentLabel.preferred(
+            title: info.title,
+            displayAgent: info.displayAgent,
+            name: storedAlias,
+            terminalTitleStripped: info.terminalTitleStripped
+        ) ?? (occupantReplaced ? nil : existing?.name) ?? agentKind
         let wsName = info.workspaceId.isEmpty
             ? (existing?.workspaceName ?? "")
             : (workspaceNameCache[info.workspaceId] ?? info.workspaceId)
@@ -1042,7 +1151,10 @@ public final class AgentStore {
             verdict: verdict,
             workspaceName: wsName,
             tabName: tabName,
-            cwd: info.foregroundCwd ?? info.cwd ?? existing?.cwd ?? ""
+            cwd: AgentLabel.nonempty(info.foregroundCwd)
+                ?? AgentLabel.nonempty(info.cwd)
+                ?? existing?.cwd
+                ?? ""
         )
 
         let carriedEpisode: Bool
@@ -1063,6 +1175,7 @@ public final class AgentStore {
         }
         carrySession(of: info, from: previousId, to: newId)
         carryTab(of: info, from: previousId, to: newId)
+        carryAlias(of: info, from: previousId, to: newId, replacing: occupantReplaced)
         notePaneMove(
             from: previousId,
             to: newId,
@@ -1106,6 +1219,7 @@ public final class AgentStore {
         guard let removed = agents.removeValue(forKey: agentId) else { return }
         sessionByPane.removeValue(forKey: agentId)
         tabIdByPane.removeValue(forKey: agentId)
+        aliasByPane.removeValue(forKey: agentId)
         noteEventChange(for: agentId, seqFloor: seq ?? Self.seq(after: removed.stateChangeSeq))
     }
 

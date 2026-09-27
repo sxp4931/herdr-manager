@@ -688,7 +688,8 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// The store and herdmgr already re-key on that event; without it in
     /// this list the event never arrives. Shepherd then keeps the old id
     /// until the next poll and alerts again for the same block. herdmgr's
-    /// live table has no poll, so the row stays on the old id.
+    /// status poll does not adopt a new id, so the row stays on the old one
+    /// until this event.
     internal static let globalSubscriptionTypes: [String] = [
         "pane.updated", "pane.created", "pane.closed", "pane.moved",
         "pane.exited", "pane.focused", "pane.agent_detected",

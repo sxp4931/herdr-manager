@@ -404,11 +404,12 @@ actor MCPServer {
                 kind = AgentKind.custom(agentKind)
             }
 
-            let name = info.title
-                ?? info.name
-                ?? info.terminalTitleStripped
-                ?? info.displayAgent
-                ?? agentKind
+            let name = AgentLabel.preferred(
+                title: info.title,
+                displayAgent: info.displayAgent,
+                name: info.name,
+                terminalTitleStripped: info.terminalTitleStripped
+            ) ?? agentKind
 
             let agent = Agent(
                 id: agentId,
@@ -422,7 +423,7 @@ actor MCPServer {
                 verdict: Self.initialVerdict(for: status),
                 workspaceName: wsName,
                 tabName: tabName,
-                cwd: info.foregroundCwd ?? info.cwd ?? ""
+                cwd: AgentLabel.nonempty(info.foregroundCwd) ?? AgentLabel.nonempty(info.cwd) ?? ""
             )
             agents[agentId] = agent
         }
@@ -477,11 +478,12 @@ actor MCPServer {
         }
 
         let candidates = matches.prefix(8).map { info in
-            let title = info.title
-                ?? info.name
-                ?? info.terminalTitleStripped
-                ?? info.agent
-                ?? "unknown"
+            let title = AgentLabel.preferred(
+                title: info.title,
+                displayAgent: info.displayAgent,
+                name: info.name,
+                terminalTitleStripped: info.terminalTitleStripped
+            ) ?? info.agent ?? "unknown"
             let workspace = herd.workspaceNames[info.workspaceId] ?? info.workspaceId
             let tab = herd.tabNames[info.tabId] ?? info.tabId
             return "\(info.paneId) (\(title), \(workspace) / \(tab))"
@@ -2145,12 +2147,12 @@ actor MCPServer {
         let agentId = AgentID(info.paneId)
         let wsName = workspaceNames[info.workspaceId] ?? info.workspaceId
         let tabName = tabNames[info.tabId] ?? info.tabId
-        let title = info.title
-            ?? info.name
-            ?? info.terminalTitleStripped
-            ?? info.displayAgent
-            ?? info.agent
-            ?? "unknown"
+        let title = AgentLabel.preferred(
+            title: info.title,
+            displayAgent: info.displayAgent,
+            name: info.name,
+            terminalTitleStripped: info.terminalTitleStripped
+        ) ?? info.agent ?? "unknown"
 
         lines.append("Agent: \(title) (\(agentId.raw))")
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

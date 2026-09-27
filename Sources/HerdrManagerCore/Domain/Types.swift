@@ -640,6 +640,36 @@ public struct HerdrAgentInfo: Sendable, Equatable {
     }
 }
 
+// MARK: - AgentLabel
+
+/// The one line the menu bar, herdmgr, and MCP use as an agent's name.
+///
+/// herdr's agents panel labels a row with the metadata `display_agent`,
+/// then the name from `herdr agent rename` or `agent start`, then the
+/// detected kind. The metadata `title` is a separate presentation string
+/// (the pane border). This row has one line, so that title still leads
+/// when a hook set it. The stripped terminal title is what an agent
+/// nobody has named is called. An empty string is not a name: a cleared
+/// field arrives as `""`, and treating it as present blanked the row.
+public enum AgentLabel: Sendable {
+    public static func preferred(
+        title: String?,
+        displayAgent: String?,
+        name: String?,
+        terminalTitleStripped: String?
+    ) -> String? {
+        nonempty(title)
+            ?? nonempty(displayAgent)
+            ?? nonempty(name)
+            ?? nonempty(terminalTitleStripped)
+    }
+
+    public static func nonempty(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        return value
+    }
+}
+
 // MARK: - SessionIdentity
 
 /// Whether two observations name different occupants.
@@ -710,7 +740,12 @@ public struct HerdSnapshot: Sendable {
         } else {
             kind = .custom(agentKind)
         }
-        let name = info.title ?? info.terminalTitleStripped ?? agentKind
+        let name = AgentLabel.preferred(
+            title: info.title,
+            displayAgent: info.displayAgent,
+            name: info.name,
+            terminalTitleStripped: info.terminalTitleStripped
+        ) ?? agentKind
         let status = AgentStatus(rawValue: info.agentStatus) ?? .unknown
         return Agent(
             id: AgentID(info.paneId),
@@ -724,7 +759,7 @@ public struct HerdSnapshot: Sendable {
             verdict: Self.displayVerdict(for: status, now: now),
             workspaceName: workspaceNames[info.workspaceId] ?? info.workspaceId,
             tabName: tabNames[info.tabId] ?? info.tabId,
-            cwd: info.foregroundCwd ?? info.cwd ?? ""
+            cwd: AgentLabel.nonempty(info.foregroundCwd) ?? AgentLabel.nonempty(info.cwd) ?? ""
         )
     }
 

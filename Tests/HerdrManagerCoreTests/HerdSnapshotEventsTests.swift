@@ -10,6 +10,8 @@ private func makeEventAgentInfo(
     agentStatus: String = "working",
     stateChangeSeq: UInt64 = 0,
     title: String? = nil,
+    displayAgent: String? = nil,
+    name: String? = nil,
     terminalTitleStripped: String? = nil,
     cwd: String? = "/tmp",
     foregroundCwd: String? = "/tmp",
@@ -20,8 +22,8 @@ private func makeEventAgentInfo(
         workspaceId: workspaceId,
         tabId: tabId,
         agent: agent,
-        displayAgent: agent,
-        name: nil,
+        displayAgent: displayAgent,
+        name: name,
         title: title,
         terminalTitleStripped: terminalTitleStripped,
         agentStatus: agentStatus,
@@ -535,5 +537,116 @@ struct HerdSnapshotEventsTests {
         let next = labels.renamingTab("wA:t1", to: "suite")
         #expect(next.tabNames["wA:t1"] == "suite")
         #expect(next.workspaceNames == labels.workspaceNames)
+    }
+
+    @Test("A stored rename beats the terminal title, and a metadata title beats the rename")
+    func renameBeatsTheTerminalTitle() {
+        let entered = Date(timeIntervalSince1970: 1_000)
+        let row = Agent(
+            id: AgentID("wA:p1"),
+            kind: .custom("claude"),
+            name: "reviewer",
+            displayName: "reviewer",
+            status: .blocked,
+            stateChangeSeq: 5,
+            enteredAt: entered,
+            workspaceName: "Cuedora",
+            tabName: "main"
+        )
+        let retitled = labels.applying(
+            .paneUpdated(makeEventAgentInfo(
+                paneId: "wA:p1",
+                agentStatus: "blocked",
+                title: "",
+                terminalTitleStripped: "Bash"
+            )),
+            to: [row],
+            aliases: ["wA:p1": "reviewer"],
+            now: now
+        )
+        #expect(retitled.first?.name == "reviewer")
+        #expect(retitled.first?.displayName == "reviewer")
+        #expect(retitled.first?.enteredAt == entered)
+
+        let displayed = labels.applying(
+            .paneUpdated(makeEventAgentInfo(
+                paneId: "wA:p1",
+                agentStatus: "blocked",
+                displayAgent: "Claude: auth",
+                terminalTitleStripped: "Bash"
+            )),
+            to: retitled,
+            aliases: ["wA:p1": "reviewer"],
+            now: now
+        )
+        #expect(displayed.first?.name == "Claude: auth")
+
+        let titled = labels.applying(
+            .paneUpdated(makeEventAgentInfo(
+                paneId: "wA:p1",
+                agentStatus: "blocked",
+                title: "Metadata",
+                displayAgent: "Claude: auth",
+                terminalTitleStripped: "Bash"
+            )),
+            to: displayed,
+            aliases: ["wA:p1": "reviewer"],
+            now: now
+        )
+        #expect(titled.first?.name == "Metadata")
+        #expect(titled.first?.enteredAt == entered)
+    }
+
+    @Test("An empty title does not blank the name, and an empty foreground directory does not blank the cwd")
+    func emptyStringsAreAbsent() {
+        let info = HerdrAgentInfo(
+            paneId: "wA:p1",
+            workspaceId: "wA",
+            tabId: "wA:t1",
+            agent: "claude",
+            displayAgent: "",
+            name: "",
+            title: "",
+            terminalTitleStripped: "Action Required",
+            agentStatus: "working",
+            agentSession: nil,
+            focused: false,
+            stateChangeSeq: 1,
+            cwd: "/tmp",
+            foregroundCwd: "",
+            revision: 1,
+            tokens: [:],
+            stateLabels: [:],
+            interactiveReady: true,
+            launchPending: false
+        )
+        let snap = HerdSnapshot(
+            version: "0.7.5", protocol: 17,
+            agents: [info],
+            workspaceNames: [:], tabNames: [:],
+            focusedWorkspaceId: nil, focusedTabId: nil, focusedPaneId: nil
+        )
+        let row = snap.displayAgent(for: info)
+        #expect(row?.name == "Action Required")
+        #expect(row?.cwd == "/tmp")
+
+        let renamed = HerdrAgentInfo(
+            paneId: "wA:p1", workspaceId: "wA", tabId: "wA:t1",
+            agent: "claude", displayAgent: "Claude: auth", name: "reviewer",
+            title: nil, terminalTitleStripped: "Action Required",
+            agentStatus: "working", agentSession: nil, focused: false,
+            stateChangeSeq: 1, cwd: nil, foregroundCwd: nil, revision: 1,
+            tokens: [:], stateLabels: [:], interactiveReady: true, launchPending: false
+        )
+        #expect(snap.displayAgent(for: renamed)?.name == "Claude: auth")
+        let aliasOnly = HerdrAgentInfo(
+            paneId: "wA:p1", workspaceId: "wA", tabId: "wA:t1",
+            agent: "claude", displayAgent: nil, name: "reviewer",
+            title: nil, terminalTitleStripped: "Action Required",
+            agentStatus: "working", agentSession: nil, focused: false,
+            stateChangeSeq: 1, cwd: nil, foregroundCwd: nil, revision: 1,
+            tokens: [:], stateLabels: [:], interactiveReady: true, launchPending: false
+        )
+        #expect(snap.displayAgent(for: aliasOnly)?.name == "reviewer")
     }
 }

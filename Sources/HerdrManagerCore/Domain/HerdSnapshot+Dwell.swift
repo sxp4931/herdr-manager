@@ -91,12 +91,17 @@ public struct HerdLiveTable: Sendable {
     /// Tab id last stored for a pane id. `Agent` keeps the label, and a
     /// `tab.renamed` event names the id. Empty values are not stored.
     private var tabIdByPane: [String: String]
+    /// `name` from the last `agent.list` that mentioned the pane. That is
+    /// `herdr agent rename` / `agent start`. Pane events do not carry it,
+    /// and a terminal title on those events is not a new name.
+    private var aliasByPane: [String: String]
 
     public init(herd: HerdSnapshot, agents: [Agent]) {
         self.herd = herd
         self.agents = agents
         self.sessionByPane = Self.sessions(in: herd)
         self.tabIdByPane = Self.tabIds(in: herd)
+        self.aliasByPane = Self.aliases(in: herd)
     }
 
     /// Apply one `agent.list` taken so a status change reaches the table.
@@ -120,6 +125,7 @@ public struct HerdLiveTable: Sendable {
         guard let refreshed else { return }
         let previousSessions = sessionByPane
         let previousTabs = tabIdByPane
+        let previousAliases = aliasByPane
         var listed: [String: HerdrAgentInfo] = [:]
         for info in refreshed.agents where !info.paneId.isEmpty {
             listed[info.paneId] = info
@@ -145,10 +151,20 @@ public struct HerdLiveTable: Sendable {
                 updated.enteredAt = old.enteredAt
                 updated.verdict = old.verdict
             }
-            // A list that leaves the title or directory off is not a
-            // rename. `displayAgent` would otherwise fall through to the
-            // kind or to an empty path and the next poll would put it back.
-            if Self.absent(info.title), Self.absent(info.terminalTitleStripped) {
+            // A list that leaves every name source off is not a rename.
+            // `displayAgent` would otherwise fall through to the kind. A
+            // list that names a rename, a display agent, or a title does
+            // change the row: that string is the name herdr's panel shows.
+            if AgentLabel.preferred(
+                title: info.title,
+                displayAgent: info.displayAgent,
+                name: info.name,
+                terminalTitleStripped: info.terminalTitleStripped
+            ) == nil,
+               !SessionIdentity.replaced(
+                   stored: previousSessions[old.id.raw],
+                   incoming: info.sessionIdentity
+               ) {
                 updated.name = old.name
                 updated.displayName = old.displayName
             }
@@ -176,6 +192,7 @@ public struct HerdLiveTable: Sendable {
         agents = next
         adoptSessions(from: refreshed, previous: previousSessions)
         adoptTabIds(from: refreshed, previous: previousTabs)
+        adoptAliases(from: refreshed, previous: previousAliases)
     }
 
     /// Nil and "" are both "the list did not name this".
@@ -190,6 +207,7 @@ public struct HerdLiveTable: Sendable {
         guard let refreshed else { return }
         let previousSessions = sessionByPane
         let previousTabs = tabIdByPane
+        let previousAliases = aliasByPane
         let armingBurst = rowsBeforeLayout == nil || restoredMoveSinceRefresh
         if armingBurst {
             rowsBeforeLayout = agents
@@ -214,6 +232,7 @@ public struct HerdLiveTable: Sendable {
         }
         adoptSessions(from: refreshed, previous: previousSessions)
         adoptTabIds(from: refreshed, previous: previousTabs)
+        adoptAliases(from: refreshed, previous: previousAliases)
     }
 
     /// Stamp process-list reads onto the rows. See `ProcessGoneObservation.apply`.
@@ -245,20 +264,38 @@ public struct HerdLiveTable: Sendable {
             break
         }
         let replaced = sessionReplaced(by: event)
+        // herdr drops the rename when the session owner changes. Clear it
+        // before the row is labelled, or the new occupant keeps the old name.
+        if replaced {
+            clearAlias(for: event)
+        }
         if case .paneMoved = event, let saved = rowsBeforeLayout, !replaced {
             agents = applyingMove(event, savedRows: saved, now: now)
             noteSession(from: event)
             noteTab(from: event)
+            noteAlias(from: event)
             restoredMoveSinceRefresh = true
             return
         }
         let before = episodeIdentity(of: agents)
-        agents = herd.applying(event, to: agents, tabIds: tabIdByPane, now: now)
+        agents = herd.applying(
+            event,
+            to: agents,
+            tabIds: tabIdByPane,
+            aliases: aliasByPane,
+            preservingExistingName: !replaced,
+            now: now
+        )
         if replaced, let paneId = Self.addressedPaneId(of: event) {
             openFreshEpisode(paneId: paneId, now: now)
         }
         noteSession(from: event)
         noteTab(from: event)
+        // A new occupant already cleared the rename. The last list still
+        // names the person who left, and noteAlias would put that back.
+        if !replaced {
+            noteAlias(from: event)
+        }
         if rowsBeforeLayout != nil, replaced || episodeIdentity(of: agents) != before {
             rowsBeforeLayout = nil
             restoredMoveSinceRefresh = false
@@ -378,6 +415,72 @@ public struct HerdLiveTable: Sendable {
         }
     }
 
+    /// The rename moves with the row. A list is what sets or clears it;
+    /// a pane event has no `name` and must not drop the one already stored.
+    /// A pane that left the table drops it.
+    private mutating func noteAlias(from event: HerdrEvent) {
+        switch event {
+        case .paneUpdated(let info):
+            guard !info.paneId.isEmpty else { return }
+            guard agents.contains(where: { $0.id.raw == info.paneId }) else {
+                aliasByPane.removeValue(forKey: info.paneId)
+                return
+            }
+            if let incoming = AgentLabel.nonempty(info.name) {
+                aliasByPane[info.paneId] = incoming
+            }
+        case .paneMoved(let previousPaneId, let info, _, _):
+            let previousRaw = previousPaneId.isEmpty ? info.paneId : previousPaneId
+            let carried = aliasByPane[previousRaw]
+            if previousRaw != info.paneId {
+                aliasByPane.removeValue(forKey: previousRaw)
+            }
+            guard agents.contains(where: { $0.id.raw == info.paneId }) else {
+                aliasByPane.removeValue(forKey: info.paneId)
+                return
+            }
+            // The refetch already replaced `herd`. Its `name` wins over the
+            // rename the previous id was still holding.
+            if let listed = herd.agents.first(where: { $0.paneId == info.paneId }) {
+                if let incoming = AgentLabel.nonempty(listed.name) {
+                    aliasByPane[info.paneId] = incoming
+                } else {
+                    aliasByPane.removeValue(forKey: info.paneId)
+                }
+                return
+            }
+            if let incoming = AgentLabel.nonempty(info.name) {
+                aliasByPane[info.paneId] = incoming
+            } else if previousRaw != info.paneId, let carried {
+                aliasByPane[info.paneId] = carried
+            }
+        case .paneClosed(let paneId), .paneExited(let paneId):
+            aliasByPane.removeValue(forKey: paneId)
+        default:
+            break
+        }
+    }
+
+    /// Drop the rename herdr clears when the occupant changes. The event
+    /// itself has no `name`, so leaving the old one stored would put it
+    /// back on the next terminal-title update.
+    private mutating func clearAlias(for event: HerdrEvent) {
+        switch event {
+        case .paneUpdated(let info):
+            if !info.paneId.isEmpty {
+                aliasByPane.removeValue(forKey: info.paneId)
+            }
+        case .paneMoved(let previousPaneId, let info, _, _):
+            let previousRaw = previousPaneId.isEmpty ? info.paneId : previousPaneId
+            aliasByPane.removeValue(forKey: previousRaw)
+            if !info.paneId.isEmpty {
+                aliasByPane.removeValue(forKey: info.paneId)
+            }
+        default:
+            break
+        }
+    }
+
     /// Sessions named by `herd`, plus an identity a pane that is still
     /// showing left off this list. A layout refetch is `agent.list`.
     /// Leaving `agent_session` off is not a new occupant, and forgetting
@@ -414,6 +517,44 @@ public struct HerdLiveTable: Sendable {
         tabIdByPane = next
     }
 
+    /// Renames named by `herd`. A pane the list contains and does not name
+    /// has no rename: `agent rename --clear` omits the field. A pane the
+    /// list does not contain keeps the one it had, including an id a burst
+    /// is still restoring, so the following move can carry it.
+    private mutating func adoptAliases(from herd: HerdSnapshot, previous: [String: String]) {
+        var listed: Set<String> = []
+        var next: [String: String] = [:]
+        for info in herd.agents {
+            guard !info.paneId.isEmpty else { continue }
+            listed.insert(info.paneId)
+            if let name = AgentLabel.nonempty(info.name) {
+                next[info.paneId] = name
+            }
+        }
+        for agent in agents where !listed.contains(agent.id.raw) {
+            if let alias = previous[agent.id.raw] {
+                next[agent.id.raw] = alias
+            }
+        }
+        if let saved = rowsBeforeLayout {
+            for agent in saved where next[agent.id.raw] == nil && !listed.contains(agent.id.raw) {
+                if let alias = previous[agent.id.raw] {
+                    next[agent.id.raw] = alias
+                }
+            }
+        }
+        aliasByPane = next
+    }
+
+    private static func aliases(in herd: HerdSnapshot) -> [String: String] {
+        var aliases: [String: String] = [:]
+        for info in herd.agents {
+            guard !info.paneId.isEmpty, let name = AgentLabel.nonempty(info.name) else { continue }
+            aliases[info.paneId] = name
+        }
+        return aliases
+    }
+
     private static func sessions(in herd: HerdSnapshot) -> [String: String] {
         var sessions: [String: String] = [:]
         for info in herd.agents {
@@ -444,11 +585,23 @@ public struct HerdLiveTable: Sendable {
         now: Date
     ) -> [Agent] {
         guard case .paneMoved(let previousPaneId, let info, _, _) = event else {
-            return herd.applying(event, to: agents, tabIds: tabIdByPane, now: now)
+            return herd.applying(
+                event,
+                to: agents,
+                tabIds: tabIdByPane,
+                aliases: aliasByPane,
+                now: now
+            )
         }
         let previousRaw = previousPaneId.isEmpty ? info.paneId : previousPaneId
         let saved = savedRows.first { $0.id.raw == previousRaw }
-        var updated = herd.applying(event, to: agents, tabIds: tabIdByPane, now: now)
+        var updated = herd.applying(
+            event,
+            to: agents,
+            tabIds: tabIdByPane,
+            aliases: aliasByPane,
+            now: now
+        )
         guard let saved,
               let index = updated.firstIndex(where: { $0.id.raw == info.paneId }),
               updated[index].status == saved.status,
