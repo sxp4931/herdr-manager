@@ -16,7 +16,11 @@ private func info(
     status: String,
     seq: UInt64,
     session: HerdrSnapshot.AgentSession? = nil,
-    title: String? = "Claude"
+    title: String? = "Claude",
+    name: String? = nil,
+    terminalTitle: String? = nil,
+    cwd: String? = "/tmp",
+    foregroundCwd: String? = "/tmp"
 ) -> HerdrAgentInfo {
     HerdrAgentInfo(
         paneId: pane,
@@ -24,15 +28,15 @@ private func info(
         tabId: "wA:t1",
         agent: agent,
         displayAgent: agent,
-        name: nil,
+        name: name,
         title: title,
-        terminalTitleStripped: title,
+        terminalTitleStripped: terminalTitle ?? title,
         agentStatus: status,
         agentSession: session,
         focused: false,
         stateChangeSeq: seq,
-        cwd: "/tmp",
-        foregroundCwd: "/tmp",
+        cwd: cwd,
+        foregroundCwd: foregroundCwd,
         revision: 1,
         tokens: [:],
         stateLabels: [:],
@@ -378,6 +382,88 @@ struct AnswerSendCheckTests {
         #expect(unnamed.occupantFingerprint == "fallback|unknown|unknown|wA:p1")
     }
 
+    @Test("An empty title is not an occupant, so the rename or terminal title is")
+    func emptyTitleIsAbsent() {
+        let cleared = info(
+            agent: "codex", status: "blocked", seq: 1,
+            title: "", name: "reviewer", terminalTitle: "Action Required"
+        )
+        let named = info(
+            agent: "codex", status: "blocked", seq: 1,
+            title: nil, name: "reviewer", terminalTitle: "Action Required"
+        )
+        #expect(cleared.occupantFingerprint == "fallback|codex|reviewer|wA:p1")
+        #expect(cleared.occupantFingerprint == named.occupantFingerprint)
+
+        let blankName = info(
+            agent: "codex", status: "blocked", seq: 1,
+            title: "", name: "", terminalTitle: "Bash"
+        )
+        let terminal = info(
+            agent: "codex", status: "blocked", seq: 1,
+            title: nil, name: nil, terminalTitle: "Bash"
+        )
+        #expect(blankName.occupantFingerprint == "fallback|codex|Bash|wA:p1")
+        #expect(blankName.occupantFingerprint == terminal.occupantFingerprint)
+
+        let none = info(
+            agent: "codex", status: "blocked", seq: 1,
+            title: "", name: "", terminalTitle: ""
+        )
+        #expect(none.occupantFingerprint == "fallback|codex|codex|wA:p1")
+
+        // A real title still leads, and a session still leads over the title.
+        let titled = info(
+            agent: "codex", status: "blocked", seq: 1,
+            title: "Review", name: "reviewer", terminalTitle: "Bash"
+        )
+        #expect(titled.occupantFingerprint == "fallback|codex|Review|wA:p1")
+        let withSession = info(
+            status: "blocked", seq: 5, session: session("abc"),
+            title: "", name: "reviewer"
+        )
+        #expect(withSession.occupantFingerprint == "session|agent|claude|session|abc|wA:p1")
+        // display_agent is set to the kind by the fixture and is not the label.
+        #expect(cleared.displayAgent == "codex")
+    }
+
+    @Test("A cleared title still matches the rename on the re-read before the keys")
+    func emptyTitleMatchesTheRename() {
+        let observed = info(
+            agent: "codex", status: "blocked", seq: 1,
+            title: "", name: "reviewer", terminalTitle: "Action Required"
+        )
+        let current = info(
+            agent: "codex", status: "blocked", seq: 1,
+            title: nil, name: "reviewer", terminalTitle: "Action Required"
+        )
+        #expect(AnswerSendCheck.refusal(sendingTo: observed, in: herd([current])) == nil)
+
+        let otherScreen = info(
+            agent: "codex", status: "blocked", seq: 1,
+            title: "", name: "", terminalTitle: "Other"
+        )
+        #expect(AnswerSendCheck.refusal(sendingTo: observed, in: herd([otherScreen])) == .occupantChanged)
+    }
+
+    @Test("An empty foreground directory is not where a new pane starts")
+    func emptyForegroundDirectoryFallsThrough() {
+        let foreground = info(status: "idle", seq: 1, cwd: "/work", foregroundCwd: "/front")
+        #expect(foreground.workingDirectory == "/front")
+
+        let cleared = info(status: "idle", seq: 1, cwd: "/work", foregroundCwd: "")
+        #expect(cleared.workingDirectory == "/work")
+
+        let onlyCwd = info(status: "idle", seq: 1, cwd: "/work", foregroundCwd: nil)
+        #expect(onlyCwd.workingDirectory == "/work")
+
+        let neither = info(status: "idle", seq: 1, cwd: "", foregroundCwd: "")
+        #expect(neither.workingDirectory == nil)
+
+        let missing = info(status: "idle", seq: 1, cwd: nil, foregroundCwd: nil)
+        #expect(missing.workingDirectory == nil)
+    }
+
     @Test("A prompt still blocked on the same episode and occupant may be answered")
     func sameEpisodePasses() {
         let observed = info(status: "blocked", seq: 5, session: session("abc"))
@@ -721,6 +807,16 @@ struct GatedSayFollowTests {
 
         let renamed = info(agent: "codex", status: "idle", seq: 2, title: "Other")
         #expect(resolve(fallback, in: [renamed]) == .failure(.occupantChanged))
+
+        let cleared = info(
+            agent: "codex", status: "idle", seq: 2,
+            title: "", name: "reviewer", terminalTitle: "Action Required"
+        )
+        let same = info(
+            agent: "codex", status: "idle", seq: 9,
+            title: nil, name: "reviewer", terminalTitle: "Action Required"
+        )
+        #expect(resolve(cleared, in: [same]) == .success(same))
 
         let empty = info(status: "idle", seq: 4, session: session(""))
         #expect(

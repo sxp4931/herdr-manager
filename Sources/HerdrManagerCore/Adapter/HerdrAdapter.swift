@@ -590,10 +590,9 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         focus: Bool
     ) async throws -> (tabId: String, rootPaneId: String) {
         try await onIO(writes: true) { [reqClient] in
-            var params: [String: Any] = ["focus": focus]
-            if let workspaceId { params["workspace_id"] = workspaceId }
-            if let cwd { params["cwd"] = cwd }
-            if let label { params["label"] = label }
+            let params = LiveHerdrAdapter.createTabParams(
+                workspaceId: workspaceId, cwd: cwd, label: label, focus: focus
+            )
             let result = try reqClient.sendWrite(method: "tab.create", params: params)
             guard let tab = result["tab"] as? [String: Any],
                   let tabId = tab["tab_id"] as? String, !tabId.isEmpty else {
@@ -617,13 +616,29 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         }
     }
 
+    /// `tab.create` parameters. An empty cwd is omitted, same as a nil
+    /// one: herdr then picks the directory itself instead of starting in
+    /// a path named `""`.
+    internal static func createTabParams(
+        workspaceId: String?,
+        cwd: String?,
+        label: String?,
+        focus: Bool
+    ) -> [String: Any] {
+        var params: [String: Any] = ["focus": focus]
+        if let workspaceId { params["workspace_id"] = workspaceId }
+        if let cwd = AgentLabel.nonempty(cwd) { params["cwd"] = cwd }
+        if let label { params["label"] = label }
+        return params
+    }
+
     internal static func splitPaneParams(targetPaneId: String, cwd: String?) -> [String: Any] {
         var params: [String: Any] = [
             "target_pane_id": targetPaneId,
             "direction": "right",
             "focus": true
         ]
-        if let cwd { params["cwd"] = cwd }
+        if let cwd = AgentLabel.nonempty(cwd) { params["cwd"] = cwd }
         return params
     }
 

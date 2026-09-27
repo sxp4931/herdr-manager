@@ -597,15 +597,27 @@ public struct HerdrAgentInfo: Sendable, Equatable {
     /// Who is in this pane, for write revalidation. Prefers herdr's
     /// agent-session id (`source|agent|kind|value`) so two agents of the
     /// same kind in the same pane still differ. Falls back to kind and
-    /// title only when no session id is present. The string is the value
-    /// stored on pending actions as `_fp_occupant`. The pane id is part of
-    /// the string, so a cross-workspace move does not compare equal.
+    /// title only when no session id is present. An empty title, name, or
+    /// terminal title is not a label: herdr sends `""` for a cleared
+    /// field, and treating it as present made this same occupant look
+    /// new. That reset the answer cap and refused the write. `display_agent`
+    /// stays out of this string. It is a presentation label, and the
+    /// fingerprints already stored on pending actions do not include it.
+    /// The string is the value stored on pending actions as `_fp_occupant`.
+    /// The pane id is part of the string, so a cross-workspace move does
+    /// not compare equal.
     public var occupantFingerprint: String {
         if let session = agentSession {
             return "session|\(session.source)|\(session.agent)|\(session.kind)|\(session.value)|\(paneId)"
         }
         let kind = agent ?? "unknown"
-        let label = title ?? name ?? terminalTitleStripped ?? kind
+        // Same absence rule as the row's name, minus `display_agent`.
+        let label = AgentLabel.preferred(
+            title: title,
+            displayAgent: nil,
+            name: name,
+            terminalTitleStripped: terminalTitleStripped
+        ) ?? kind
         return "fallback|\(kind)|\(label)|\(paneId)"
     }
 
@@ -616,6 +628,14 @@ public struct HerdrAgentInfo: Sendable, Equatable {
     public var sessionIdentity: String? {
         guard let session = agentSession, !session.value.isEmpty else { return nil }
         return "\(session.source)|\(session.agent)|\(session.kind)|\(session.value)"
+    }
+
+    /// Directory a new tab or split should start in. The foreground
+    /// directory wins, then the pane's cwd. An empty string is not a
+    /// directory: herdr sends `""` for a cleared field, and `"" ??` the
+    /// real cwd handed that empty string to `tab.create` and `pane.split`.
+    public var workingDirectory: String? {
+        AgentLabel.nonempty(foregroundCwd) ?? AgentLabel.nonempty(cwd)
     }
 
     public static func == (lhs: HerdrAgentInfo, rhs: HerdrAgentInfo) -> Bool {

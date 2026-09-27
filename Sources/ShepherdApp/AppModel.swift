@@ -933,16 +933,17 @@ final class AppModel {
         }
     }
 
-    /// Best-guess cwd for a new tab in `workspaceId`: the foreground cwd of
-    /// whichever pane in that workspace herdr currently reports as focused,
+    /// Best-guess cwd for a new tab in `workspaceId`: the working directory
+    /// of whichever pane in that workspace herdr currently reports as focused,
     /// falling back to any pane in the workspace, falling back to nil (herdr
-    /// then defaults the cwd itself). `agent.list`/`HerdSnapshot` don't carry
-    /// a per-workspace "last focused pane" concept beyond the single globally
-    /// focused pane, so this is a reasonable approximation, not a guarantee.
+    /// then defaults the cwd itself). An empty `foreground_cwd` is not that
+    /// directory. `agent.list`/`HerdSnapshot` don't carry a per-workspace
+    /// "last focused pane" concept beyond the single globally focused pane,
+    /// so this is a reasonable approximation, not a guarantee.
     private func cwdHint(forWorkspace workspaceId: String) -> String? {
         let inWorkspace = lastHerdAgents.filter { $0.workspaceId == workspaceId }
         let candidate = inWorkspace.first(where: { $0.focused }) ?? inWorkspace.first
-        return candidate?.foregroundCwd ?? candidate?.cwd
+        return candidate?.workingDirectory
     }
 
     func placementOptions(forWorkspace workspaceId: String) -> [AgentPlacementOption] {
@@ -967,7 +968,7 @@ final class AppModel {
 
     private func cwdHint(forPane paneId: String) -> String? {
         guard let pane = lastHerdAgents.first(where: { $0.paneId == paneId }) else { return nil }
-        return pane.foregroundCwd ?? pane.cwd
+        return pane.workingDirectory
     }
 
     /// Start in either a new tab or a split beside `targetPaneId`. Both paths

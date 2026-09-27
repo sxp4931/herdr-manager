@@ -463,7 +463,7 @@ actor MCPServer {
                 info.terminalTitleStripped ?? "",
                 herd.workspaceNames[info.workspaceId] ?? info.workspaceId,
                 herd.tabNames[info.tabId] ?? info.tabId,
-                info.foregroundCwd ?? info.cwd ?? ""
+                info.workingDirectory ?? ""
             ]
             return fields.contains { $0.lowercased().contains(needle) }
         }
@@ -1490,7 +1490,7 @@ actor MCPServer {
                     }
                     cwdHint = herd.agents.first(where: {
                         $0.workspaceId == requestedWorkspace
-                    }).flatMap { $0.foregroundCwd ?? $0.cwd }
+                    })?.workingDirectory
                 } else {
                     guard let targetId = arguments["target_agent_id"] as? String,
                           !targetId.isEmpty else {
@@ -1501,7 +1501,7 @@ actor MCPServer {
                     }
                     targetInfo = target
                     workspaceId = target.workspaceId
-                    cwdHint = target.foregroundCwd ?? target.cwd
+                    cwdHint = target.workingDirectory
                 }
             } catch {
                 return makeToolError("Failed to resolve placement: \(error.localizedDescription)")
@@ -1622,7 +1622,7 @@ actor MCPServer {
                 finalWorkspaceId = current.workspaceId
                 paneId = try await adapter.splitPane(
                     targetPaneId: current.paneId,
-                    cwd: current.foregroundCwd ?? current.cwd ?? cwdHint
+                    cwd: current.workingDirectory ?? cwdHint
                 )
 
             default:
@@ -2170,10 +2170,11 @@ actor MCPServer {
         } else if let agent = info.agent {
             lines.append("Kind: \(agent)")
         }
-        if let cwd = info.cwd {
+        if let cwd = AgentLabel.nonempty(info.cwd) {
             lines.append("CWD: \(cwd)")
         }
-        if let foregroundCwd = info.foregroundCwd, foregroundCwd != info.cwd {
+        if let foregroundCwd = AgentLabel.nonempty(info.foregroundCwd),
+           foregroundCwd != AgentLabel.nonempty(info.cwd) {
             lines.append("Foreground CWD: \(foregroundCwd)")
         }
         if !info.stateLabels.isEmpty {

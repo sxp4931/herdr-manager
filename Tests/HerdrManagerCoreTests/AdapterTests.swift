@@ -987,6 +987,31 @@ struct PaneReadAndSplitTests {
         #expect(params["cwd"] as? String == "/tmp/project")
     }
 
+    @Test("pane.split and tab.create omit an empty cwd")
+    func emptyCwdIsOmitted() {
+        let split = LiveHerdrAdapter.splitPaneParams(targetPaneId: "wE:p1", cwd: "")
+        #expect(split["target_pane_id"] as? String == "wE:p1")
+        #expect(split["cwd"] == nil)
+        let splitMissing = LiveHerdrAdapter.splitPaneParams(targetPaneId: "wE:p1", cwd: nil)
+        #expect(splitMissing["cwd"] == nil)
+
+        let tab = LiveHerdrAdapter.createTabParams(
+            workspaceId: "w1", cwd: "", label: "Claude", focus: true
+        )
+        #expect(tab["workspace_id"] as? String == "w1")
+        #expect(tab["label"] as? String == "Claude")
+        #expect(tab["focus"] as? Bool == true)
+        #expect(tab["cwd"] == nil)
+
+        let withCwd = LiveHerdrAdapter.createTabParams(
+            workspaceId: nil, cwd: "/work", label: nil, focus: false
+        )
+        #expect(withCwd["cwd"] as? String == "/work")
+        #expect(withCwd["workspace_id"] == nil)
+        #expect(withCwd["label"] == nil)
+        #expect(withCwd["focus"] as? Bool == false)
+    }
+
     @Test("pane.split unwraps the returned pane_info envelope")
     func splitResponse() throws {
         let response: [String: Any] = [
