@@ -74,7 +74,41 @@ public final class SecretRedactor: Sendable {
         // immediately before `@host`. This lookahead is that whole token
         // plus the `@`, so the URL pattern does not count it again.
         let urlPlaceholder = "(?:(?:\(labels.joined(separator: "|")))?\\[REDACTED\\]|\\[REDACTED PRIVATE KEY\\])@"
+        // HTTP Basic. Bearer names its own scheme, and an assignment
+        // keyword never sees `Authorization: Basic dXNlcjpw…`, so the
+        // base64 user:password reached the model. `Proxy-Authorization`
+        // is the same header. A JSON value `"Authorization": "Basic …"`
+        // is too, and so is the single-quoted form. The closing quote
+        // stays, so a second pass still sees a boundary. The prefix
+        // keeps its case. There may be no space between the scheme and
+        // the token. The token is standard base64, at least 8 characters,
+        // with or without padding. It has to carry a digit, `+`, `/`, or
+        // `=`, or two capitals and two lowercase letters. That second
+        // shape is `user:pass` (`dXNlcjpwYXNz`), which has no digit.
+        // `Authorization: Basic authentication` and a single capital
+        // (`Password`) stay. The classes are written out rather than
+        // `(?i)`, so those capitals stay case-sensitive. A recognized
+        // `xai-` or `ghp_` value was already replaced above. A hyphen or
+        // an underscore is not part of this token.
+        let proxy = "[Pp][Rr][Oo][Xx][Yy]"
+        let authorization = "[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]"
+        let basicWord = "[Bb][Aa][Ss][Ii][Cc]"
+        let basicHeader = "(?:\(proxy)-)?\(authorization):\\s*\(basicWord)\\s*"
+        let basicQuoted = "\"(?:\(proxy)-)?\(authorization)\"\\s*:\\s*\"\(basicWord)\\s*"
+        let basicSingle = "'(?:\(proxy)-)?\(authorization)'\\s*:\\s*'\(basicWord)\\s*"
+        let basicPrefix = "((?:^|[^A-Za-z0-9_-])(?:\(basicHeader)|\(basicQuoted)|\(basicSingle)))"
+        let basicSignal =
+            "(?=(?:[A-Za-z0-9+/]*[0-9+/=]|(?=(?:[A-Za-z0-9+/]*[A-Z]){2})(?=(?:[A-Za-z0-9+/]*[a-z]){2})[A-Za-z0-9+/]))"
+        let basicToken =
+            "(?:" +
+            "(?:[A-Za-z0-9+/]{4}){2,}" +
+            "|(?:[A-Za-z0-9+/]{4})+[A-Za-z0-9+/]{2}==" +
+            "|(?:[A-Za-z0-9+/]{4})+[A-Za-z0-9+/]{3}=" +
+            "|(?:[A-Za-z0-9+/]{4}){2,}[A-Za-z0-9+/]{2}" +
+            "|(?:[A-Za-z0-9+/]{4}){2,}[A-Za-z0-9+/]{3}" +
+            ")(?![A-Za-z0-9+/=])"
         let defs = labeled + [
+            (basicPrefix + basicSignal + basicToken, "$1[REDACTED]"),
             // Generic assignments. A JSON key has a quote between the name
             // and the colon (`"api_key": "…"`); an env assignment does not
             // (`api_key=…`, `token: "…"`). `secret_key` and

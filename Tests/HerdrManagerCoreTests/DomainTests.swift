@@ -610,6 +610,168 @@ struct SecretRedactorTests {
         let assignedAgain = redactor.redact(assigned.redactedText)
         #expect(assignedAgain.redactionCount == 0)
     }
+
+    @Test("Redacts an HTTP Basic credential and leaves the header")
+    func redactsAuthorizationBasic() {
+        let redactor = SecretRedactor()
+        // user:password, user:pass (no digit), app:ab (8, no digit),
+        // ab:cd (padding, no lowercase), root:root (one capital, digits).
+        let userPassword = "dXNlcjpwYXNzd29yZA=="
+        let userPass = "dXNlcjpwYXNz"
+        let appAb = "YXBwOmFi"
+        let abCd = "YWI6Y2Q="
+        let root = "cm9vdDpyb290"
+
+        let header = redactor.redact("Authorization: Basic \(userPassword)")
+        #expect(header.redactedText == "Authorization: Basic [REDACTED]")
+        #expect(header.redactionCount == 1)
+        #expect(!header.redactedText.contains(userPassword))
+        let headerAgain = redactor.redact(header.redactedText)
+        #expect(headerAgain.redactedText == header.redactedText)
+        #expect(headerAgain.redactionCount == 0)
+
+        #expect(redactor.redact("Authorization: Basic \(userPass)").redactedText == "Authorization: Basic [REDACTED]")
+        #expect(redactor.redact("authorization: basic \(userPassword)").redactedText == "authorization: basic [REDACTED]")
+        #expect(
+            redactor.redact("PROXY-AUTHORIZATION: BASIC \(userPassword)").redactedText
+                == "PROXY-AUTHORIZATION: BASIC [REDACTED]"
+        )
+        #expect(
+            redactor.redact("Proxy-Authorization: Basic \(userPass)").redactedText
+                == "Proxy-Authorization: Basic [REDACTED]"
+        )
+        // No space between the scheme and the token, and none after the colon.
+        #expect(
+            redactor.redact("Authorization:Basic\(userPassword)").redactedText
+                == "Authorization:Basic[REDACTED]"
+        )
+        // Padding omitted. `+` and `/` are part of the token.
+        #expect(redactor.redact("Authorization: Basic dXNlcjpwYXNzd29yZA").redactedText == "Authorization: Basic [REDACTED]")
+        #expect(redactor.redact("Authorization: Basic \(appAb)").redactedText == "Authorization: Basic [REDACTED]")
+        #expect(redactor.redact("Authorization: Basic \(abCd)").redactedText == "Authorization: Basic [REDACTED]")
+        #expect(redactor.redact("Authorization: Basic YWI6Yw==").redactedText == "Authorization: Basic [REDACTED]")
+        #expect(redactor.redact("Authorization: Basic \(root)").redactedText == "Authorization: Basic [REDACTED]")
+        #expect(redactor.redact("Authorization: Basic dXNlcjp+fn5+").redactedText == "Authorization: Basic [REDACTED]")
+        #expect(redactor.redact("Authorization: Basic YWI6Y2QvZWY=").redactedText == "Authorization: Basic [REDACTED]")
+
+        let json = redactor.redact(
+            #"{"Authorization": "Basic \#(userPassword)", "host": "db.internal"}"#
+        )
+        #expect(
+            json.redactedText
+                == #"{"Authorization": "Basic [REDACTED]", "host": "db.internal"}"#
+        )
+        #expect(json.redactionCount == 1)
+        #expect(!json.redactedText.contains(userPassword))
+        let jsonAgain = redactor.redact(json.redactedText)
+        #expect(jsonAgain.redactedText == json.redactedText)
+        #expect(jsonAgain.redactionCount == 0)
+        #expect(
+            redactor.redact("{'Authorization': 'Basic \(userPassword)'}").redactedText
+                == "{'Authorization': 'Basic [REDACTED]'}"
+        )
+        #expect(
+            redactor.redact(#"{"authorization":"basic \#(userPassword)"}"#).redactedText
+                == #"{"authorization":"basic [REDACTED]"}"#
+        )
+
+        let curl = redactor.redact("> Authorization: Basic \(userPassword)\r\nHost: db.internal")
+        #expect(curl.redactedText == "> Authorization: Basic [REDACTED]\r\nHost: db.internal")
+        #expect(curl.redactionCount == 1)
+        let folded = redactor.redact("Authorization:\nBasic \(userPassword)")
+        #expect(folded.redactedText == "Authorization:\nBasic [REDACTED]")
+
+        let both = redactor.redact(
+            "Authorization: Basic \(userPass) Proxy-Authorization: Basic \(root)"
+        )
+        #expect(
+            both.redactedText
+                == "Authorization: Basic [REDACTED] Proxy-Authorization: Basic [REDACTED]"
+        )
+        #expect(both.redactionCount == 2)
+        let bothAgain = redactor.redact(both.redactedText)
+        #expect(bothAgain.redactionCount == 0)
+
+        // The period and the following word stay. A tab is still a separator.
+        #expect(redactor.redact("Authorization: Basic \(userPass).").redactedText == "Authorization: Basic [REDACTED].")
+        #expect(
+            redactor.redact("sent Authorization: Basic \(userPassword) to db").redactedText
+                == "sent Authorization: Basic [REDACTED] to db"
+        )
+        #expect(
+            redactor.redact("Authorization:\tBasic\t\(userPassword)").redactedText
+                == "Authorization:\tBasic\t[REDACTED]"
+        )
+
+        // A recognized token keeps its label. Basic does not take a second count.
+        let key = "xai-abcdefghijklmnopqrstuvwxyz0123456789"
+        let labeled = redactor.redact("Authorization: Basic \(key)")
+        #expect(labeled.redactedText == "Authorization: Basic xai-[REDACTED]")
+        #expect(labeled.redactionCount == 1)
+        #expect(!labeled.redactedText.contains("abcdefghijklmnopqrstuvwxyz0123456789"))
+        let labeledAgain = redactor.redact(labeled.redactedText)
+        #expect(labeledAgain.redactedText == labeled.redactedText)
+        #expect(labeledAgain.redactionCount == 0)
+
+        let ghp = "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789"
+        let pat = redactor.redact("Authorization: Basic \(ghp)")
+        #expect(pat.redactedText == "Authorization: Basic ghp_[REDACTED]")
+        #expect(pat.redactionCount == 1)
+        let patAgain = redactor.redact(pat.redactedText)
+        #expect(patAgain.redactionCount == 0)
+
+        let bearer = "eyJhbGciOiJIUzI1NiJ9.test.sig"
+        let mixed = redactor.redact(
+            "Authorization: Bearer \(bearer)\nAuthorization: Basic \(userPassword)"
+        )
+        #expect(
+            mixed.redactedText
+                == "Authorization: Bearer [REDACTED]\nAuthorization: Basic [REDACTED]"
+        )
+        #expect(mixed.redactionCount == 2)
+        #expect(!mixed.redactedText.contains(bearer))
+        #expect(!mixed.redactedText.contains(userPassword))
+        let mixedAgain = redactor.redact(mixed.redactedText)
+        #expect(mixedAgain.redactionCount == 0)
+
+        // An assignment on the same line is still its own redaction.
+        let alongside = redactor.redact(
+            "token=supersecretvalue Authorization: Basic \(userPassword)"
+        )
+        #expect(
+            alongside.redactedText
+                == "token=[REDACTED] Authorization: Basic [REDACTED]"
+        )
+        #expect(alongside.redactionCount == 2)
+        let alongsideAgain = redactor.redact(alongside.redactedText)
+        #expect(alongsideAgain.redactionCount == 0)
+
+        // Two capitals is the base64 signal. One capital, and an
+        // all-lowercase word, are not.
+        #expect(redactor.redact("Authorization: Basic TestTest").redactedText == "Authorization: Basic [REDACTED]")
+        #expect(redactor.redact("Authorization: Basic ABCdefgh").redactedText == "Authorization: Basic [REDACTED]")
+
+        let kept = [
+            "Authorization: Basic authentication",
+            "Authorization: Basic Authentication",
+            "Authorization: Basic password",
+            "Authorization: Basic Password",
+            "Authorization: Basic hunter2",
+            "Authorization: Basic YTph",
+            "Authorization: Basic password==",
+            "Basic authentication is documented in RFC 7617",
+            "See Authorization: Basic in RFC 7617",
+            "MyAuthorization: Basic \(userPassword)",
+            "Authorization: Basicly \(userPassword)",
+            "Authorization: Basic <credentials>",
+            "Authorization: Basic password\nNOTE: later",
+        ]
+        for line in kept {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line)")
+            #expect(result.redactedText == line)
+        }
+    }
 }
 
 // MARK: - DwellTracker Tests
