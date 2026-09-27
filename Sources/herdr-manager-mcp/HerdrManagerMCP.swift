@@ -428,65 +428,22 @@ actor MCPServer {
     }
 
     /// Resolve a stable pane ID or a human description such as an agent title,
-    /// workspace, tab, or repository directory. Query resolution is read-only;
-    /// write tools continue to require an exact agent ID.
+    /// workspace, tab, or repository directory. Used by the read tools.
+    /// A unique local suffix (`p1` of `w1:p1`) is accepted because that is
+    /// what an older overview printed. Write tools still require the full id.
     private func resolveAgent(
         arguments: [String: Any],
         herd: HerdSnapshot
     ) -> Result<HerdrAgentInfo, AgentResolutionError> {
-        if let agentId = arguments["agent_id"] as? String, !agentId.isEmpty {
-            guard let info = herd.agents.first(where: { $0.paneId == agentId }) else {
-                return .failure(AgentResolutionError(description: "Agent not found: \(agentId)"))
-            }
+        switch herd.resolveAgent(
+            agentId: arguments["agent_id"] as? String,
+            query: arguments["query"] as? String
+        ) {
+        case .found(let info):
             return .success(info)
+        case .failure(let description):
+            return .failure(AgentResolutionError(description: description))
         }
-
-        guard let query = arguments["query"] as? String,
-              !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return .failure(AgentResolutionError(
-                description: "Missing required parameter: provide agent_id or query"
-            ))
-        }
-
-        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let matches = herd.agents.filter { info in
-            let fields = [
-                info.paneId,
-                info.agent ?? "",
-                info.displayAgent ?? "",
-                info.name ?? "",
-                info.title ?? "",
-                info.terminalTitleStripped ?? "",
-                herd.workspaceNames[info.workspaceId] ?? info.workspaceId,
-                herd.tabNames[info.tabId] ?? info.tabId,
-                info.workingDirectory ?? ""
-            ]
-            return fields.contains { $0.lowercased().contains(needle) }
-        }
-
-        if matches.count == 1, let match = matches.first {
-            return .success(match)
-        }
-        if matches.isEmpty {
-            return .failure(AgentResolutionError(
-                description: "No agent matches query '\(query)'"
-            ))
-        }
-
-        let candidates = matches.prefix(8).map { info in
-            let title = AgentLabel.preferred(
-                title: info.title,
-                displayAgent: info.displayAgent,
-                name: info.name,
-                terminalTitleStripped: info.terminalTitleStripped
-            ) ?? info.agent ?? "unknown"
-            let workspace = herd.workspaceNames[info.workspaceId] ?? info.workspaceId
-            let tab = herd.tabNames[info.tabId] ?? info.tabId
-            return "\(info.paneId) (\(title), \(workspace) / \(tab))"
-        }.joined(separator: "; ")
-        return .failure(AgentResolutionError(
-            description: "Query '\(query)' is ambiguous. Matches: \(candidates)"
-        ))
     }
 
     private static func initialVerdict(for status: AgentStatus) -> Verdict {
@@ -520,7 +477,7 @@ actor MCPServer {
                 }
             }
 
-            let text = Self.formatOverview(
+            let text = HerdReport.overview(
                 agents: Array(agents.values),
                 workspaceNames: herd.workspaceNames
             )
@@ -573,12 +530,12 @@ actor MCPServer {
                         agent.workspaceName,
                         agent.tabName,
                         agent.cwd,
-                        Self.agentKindString(agent.kind)
+                        HerdReport.kindText(agent.kind)
                     ].contains { $0.lowercased().contains(needle) }
                 }
             }
 
-            let text = Self.formatAgentList(
+            let text = HerdReport.agentList(
                 agents: agentList,
                 workspaceNames: herd.workspaceNames
             )
@@ -2031,105 +1988,6 @@ actor MCPServer {
 
     // MARK: - Formatting (nonisolated — pure functions on Sendable inputs)
 
-    nonisolated private static func formatOverview(
-        agents: [Agent],
-        workspaceNames: [String: String]
-    ) -> String {
-        guard !agents.isEmpty else {
-            return "Herd Overview — 0 agents\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nNo agents found."
-        }
-
-        // Count statuses. Mutually exclusive, worst-first — a gone pane
-        // with a leftover working/silent label is gone, not working.
-        let counts = AttentionTriage.counts(agents)
-        let gone = counts.gone
-        let blocked = counts.blocked
-        let silent = counts.silent
-        let done = counts.done
-        let working = counts.working
-        let idle = agents.filter { AttentionTriage.kind(for: $0) == .idle }.count
-
-        // Group by workspace
-        var byWorkspace: [String: [Agent]] = [:]
-        for agent in agents {
-            let wsKey = agent.id.workspaceId
-            byWorkspace[wsKey, default: []].append(agent)
-        }
-
-        var lines: [String] = []
-        lines.append("Herd Overview — \(agents.count) agents across \(byWorkspace.count) workspace\(byWorkspace.count == 1 ? "" : "s")")
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-        var statusParts: [String] = []
-        if gone > 0 { statusParts.append("\(AttentionTriage.statusMark(for: AttentionTriage.Kind.gone)) \(gone) gone") }
-        if blocked > 0 { statusParts.append("\(AttentionTriage.statusMark(for: AttentionTriage.Kind.blocked)) \(blocked) blocked") }
-        if silent > 0 { statusParts.append("\(AttentionTriage.statusMark(for: AttentionTriage.Kind.silent)) \(silent) silent") }
-        if done > 0 { statusParts.append("\(AttentionTriage.statusMark(for: AttentionTriage.Kind.done)) \(done) done") }
-        if working > 0 {
-            statusParts.append("\(AttentionTriage.statusMark(for: AttentionTriage.Kind.working, working: "🟡")) \(working) working")
-        }
-        if idle > 0 { statusParts.append("\(AttentionTriage.statusMark(for: AttentionTriage.Kind.idle)) \(idle) idle") }
-        let unknown = agents.filter { AttentionTriage.kind(for: $0) == .unknown }.count
-        if unknown > 0 {
-            statusParts.append("\(AttentionTriage.statusMark(for: AttentionTriage.Kind.unknown)) \(unknown) unknown")
-        }
-        lines.append(statusParts.joined(separator: " · "))
-        lines.append("")
-
-        // Sort workspaces by name
-        let sortedWs = byWorkspace.keys.sorted {
-            let nameA = workspaceNames[$0] ?? $0
-            let nameB = workspaceNames[$1] ?? $1
-            return nameA < nameB
-        }
-
-        for wsId in sortedWs {
-            let wsAgents = byWorkspace[wsId] ?? []
-            let wsName = workspaceNames[wsId] ?? wsId
-            lines.append("\(wsName) (\(wsId)) — \(wsAgents.count) agent\(wsAgents.count == 1 ? "" : "s")")
-
-            // Worst first (gone/blocked, silent, done, rest), then by pane id
-            // so equal-priority rows keep their order between calls.
-            let sorted = wsAgents.sorted(by: AttentionTriage.ranksBefore)
-
-            for agent in sorted {
-                let glyph = statusGlyph(agent)
-                let verdictHint = agent.verdict.summaryLine ?? agent.status.rawValue
-                lines.append("  \(glyph) \(agent.name) [\(agent.id.paneId)] — \(verdictHint)")
-            }
-            lines.append("")
-        }
-
-        return lines.joined(separator: "\n")
-    }
-
-    nonisolated private static func formatAgentList(
-        agents: [Agent],
-        workspaceNames: [String: String]
-    ) -> String {
-        guard !agents.isEmpty else {
-            return "No agents found."
-        }
-
-        var lines: [String] = []
-        lines.append(pad("Status", 8) + " " + pad("Name", 20) + " " + pad("Kind", 10) + " " + pad("Workspace", 12) + " " + pad("Pane", 8) + " Verdict")
-        lines.append(String(repeating: "─", count: 90))
-
-        let sorted = agents.sorted(by: AttentionTriage.ranksBefore)
-        for agent in sorted {
-            let glyph = statusGlyph(agent)
-            let kindStr = agentKindString(agent.kind)
-            let wsName = workspaceNames[agent.id.workspaceId] ?? agent.id.workspaceId
-            let verdictStr = agent.verdict.summaryLine ?? agent.status.rawValue
-
-            lines.append(pad(glyph, 8) + " " + pad(truncate(agent.name, 20), 20) + " " + pad(truncate(kindStr, 10), 10) + " " + pad(truncate(wsName, 12), 12) + " " + pad(truncate(agent.id.paneId, 8), 8) + " " + truncate(verdictStr, 40))
-        }
-
-        lines.append("")
-        lines.append("Total: \(agents.count) agent\(agents.count == 1 ? "" : "s")")
-        return lines.joined(separator: "\n")
-    }
-
     nonisolated private static func formatInspect(
         info: HerdrAgentInfo,
         verdict: Verdict,
@@ -2365,10 +2223,6 @@ actor MCPServer {
 
     // MARK: - Formatting Helpers
 
-    nonisolated private static func statusGlyph(_ agent: Agent) -> String {
-        AttentionTriage.statusMark(for: agent, working: "🟡")
-    }
-
     nonisolated private static func verdictName(_ verdict: Verdict) -> String {
         switch verdict {
         case .healthy: return "HEALTHY"
@@ -2377,21 +2231,6 @@ actor MCPServer {
         case .processGone: return "PROCESS GONE"
         case .unclassifiable: return "UNCLASSIFIABLE"
         }
-    }
-
-    nonisolated private static func agentKindString(_ kind: AgentKind) -> String {
-        switch kind {
-        case .claude: return "claude"
-        case .codex: return "codex"
-        case .opencode: return "opencode"
-        case .aider: return "aider"
-        case .gemini: return "gemini"
-        case .custom(let s): return s
-        }
-    }
-
-    nonisolated private static func formatDwell(enteredAt: Date) -> String {
-        formatElapsed(since: enteredAt)
     }
 
     nonisolated private static func formatElapsed(since date: Date) -> String {
@@ -2411,11 +2250,6 @@ actor MCPServer {
     nonisolated private static func truncate(_ s: String, _ maxLen: Int) -> String {
         if s.count <= maxLen { return s }
         return String(s.prefix(maxLen - 1)) + "…"
-    }
-
-    nonisolated private static func pad(_ s: String, _ width: Int) -> String {
-        if s.count >= width { return s }
-        return s + String(repeating: " ", count: width - s.count)
     }
 
     // MARK: - JSON-RPC Response Builders
@@ -2440,7 +2274,7 @@ actor MCPServer {
     nonisolated(unsafe) static let toolDefinitions: [[String: Any]] = [
         [
             "name": "herd.overview",
-            "description": "Overview of all AI agents in the herdr multiplexer, grouped by workspace. Shows counts by status and which agents need attention. Quiet is reported once this server has seen the same detection screen past the silence threshold.",
+            "description": "Overview of all AI agents in the herdr multiplexer, grouped by workspace. Shows counts by status and which agents need attention. Each agent line includes its agent_id in brackets, in workspace:pane form (for example w5:p2); that is the id other tools accept. Quiet is reported once this server has seen the same detection screen past the silence threshold.",
             "inputSchema": [
                 "type": "object",
                 "properties": [String: Any]()
@@ -2448,7 +2282,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "agent.list",
-            "description": "List all agents with their current status. Optionally filter by status or workspace.",
+            "description": "List all agents with their current status. The ID column is the agent_id other tools accept, in workspace:pane form (for example w5:p2), not the bare pane suffix. Optionally filter by status or workspace.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
