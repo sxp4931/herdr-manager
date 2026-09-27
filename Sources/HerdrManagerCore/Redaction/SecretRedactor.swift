@@ -69,6 +69,11 @@ public final class SecretRedactor: Sendable {
             .filter { $0.hasSuffix("[REDACTED]") }
             .map { NSRegularExpression.escapedPattern(for: String($0.dropLast("[REDACTED]".count))) }
         let placeholder = "(?:(?:\(labels.joined(separator: "|")))?\\[REDACTED\\]|\\[REDACTED PRIVATE KEY\\])(?![^\\s'\"&])"
+        // The assignment placeholder treats `@` as part of a value, not as
+        // the end of one. A URL password that is already `[REDACTED]` sits
+        // immediately before `@host`. This lookahead is that whole token
+        // plus the `@`, so the URL pattern does not count it again.
+        let urlPlaceholder = "(?:(?:\(labels.joined(separator: "|")))?\\[REDACTED\\]|\\[REDACTED PRIVATE KEY\\])@"
         let defs = labeled + [
             // Generic assignments. A JSON key has a quote between the name
             // and the colon (`"api_key": "…"`); an env assignment does not
@@ -88,6 +93,18 @@ public final class SecretRedactor: Sendable {
             // swallow the brace. An unquoted value stays one token and
             // still stops at whitespace or `&`.
             ("(?i)(api[_-]?key|secret(?:[_-]access)?[_-]key|private[_-]key|password[_-]key|secret|token|password)['\"]?\\s*[=:]\\s*(?:\"(?!\(placeholder))[^\"\\n]{8,}|'(?!\(placeholder))[^'\\n]{8,}|(?!\(placeholder))[^\\s'\"&]{8,})", "$1=[REDACTED]"),
+            // A password in a URL is not an assignment. `DATABASE_URL`,
+            // a Redis URL, and a git remote look like
+            // `scheme://user:secret@host`, and the keyword list never
+            // sees that secret. The user and the host stay. The password
+            // is everything after the first colon of the userinfo, so a
+            // colon inside it is still covered, and an empty user
+            // (`redis://:secret@host`) is too. A password shorter than 8
+            // characters stays, the same floor as an assignment. A value
+            // that is already a placeholder is not a second secret. A
+            // URL with no userinfo, including a host that only has a
+            // port, is not a password.
+            ("(?i)([a-z][a-z0-9+.-]*://[^:@\\s/]{0,256}:)(?!\(urlPlaceholder))[^\\s@]{8,}(?=@)", "$1[REDACTED]"),
         ]
 
         var result: [(NSRegularExpression, String)] = []

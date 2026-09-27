@@ -495,6 +495,121 @@ struct SecretRedactorTests {
         #expect(blockResult.redactionCount == 1)
         #expect(!blockResult.redactedText.contains("MIIEv"))
     }
+
+    @Test("Redacts a URL userinfo password and leaves the host")
+    func redactsURLUserinfo() {
+        let redactor = SecretRedactor()
+        let postgres = redactor.redact(
+            "DATABASE_URL=postgres://app:supersecret@db.internal:5432/app"
+        )
+        #expect(postgres.redactedText == "DATABASE_URL=postgres://app:[REDACTED]@db.internal:5432/app")
+        #expect(postgres.redactionCount == 1)
+        #expect(!postgres.redactedText.contains("supersecret"))
+        let postgresAgain = redactor.redact(postgres.redactedText)
+        #expect(postgresAgain.redactedText == postgres.redactedText)
+        #expect(postgresAgain.redactionCount == 0)
+
+        let json = redactor.redact(
+            #"{"database_url": "postgres://app:supersecret@db.internal:5432/app"}"#
+        )
+        #expect(
+            json.redactedText
+                == #"{"database_url": "postgres://app:[REDACTED]@db.internal:5432/app"}"#
+        )
+        #expect(json.redactionCount == 1)
+        let jsonAgain = redactor.redact(json.redactedText)
+        #expect(jsonAgain.redactedText == json.redactedText)
+        #expect(jsonAgain.redactionCount == 0)
+
+        // Scheme case, an empty Redis user, a colon inside the password,
+        // a `+` in the scheme, and a driver prefix before `://`.
+        #expect(
+            redactor.redact("HTTPS://Git:Supersecret@GitHub.com/org/repo.git").redactedText
+                == "HTTPS://Git:[REDACTED]@GitHub.com/org/repo.git"
+        )
+        #expect(
+            redactor.redact("redis://:supersecret@localhost:6379/0").redactedText
+                == "redis://:[REDACTED]@localhost:6379/0"
+        )
+        #expect(
+            redactor.redact("postgres://app:sec:retvalue@db.internal/app").redactedText
+                == "postgres://app:[REDACTED]@db.internal/app"
+        )
+        #expect(
+            redactor.redact("mongodb+srv://app:supersecret@cluster.example.net/db").redactedText
+                == "mongodb+srv://app:[REDACTED]@cluster.example.net/db"
+        )
+        #expect(
+            redactor.redact("jdbc:postgresql://app:supersecret@db.internal:5432/app").redactedText
+                == "jdbc:postgresql://app:[REDACTED]@db.internal:5432/app"
+        )
+        // `%40` is an encoded `@` inside the password. The real delimiter
+        // is the later `@`, so the whole password goes.
+        #expect(
+            redactor.redact("https://app:p%40ssw0rd!!@host/path").redactedText
+                == "https://app:[REDACTED]@host/path"
+        )
+
+        let both = redactor.redact(
+            "postgres://app:supersecret@db/app redis://:anothersecret@localhost:6379"
+        )
+        #expect(
+            both.redactedText
+                == "postgres://app:[REDACTED]@db/app redis://:[REDACTED]@localhost:6379"
+        )
+        #expect(both.redactionCount == 2)
+        let bothAgain = redactor.redact(both.redactedText)
+        #expect(bothAgain.redactionCount == 0)
+
+        // A recognized token keeps its label and the host. The URL pattern
+        // does not take a second count off the placeholder.
+        let key = "xai-abcdefghijklmnopqrstuvwxyz0123456789"
+        let labeled = redactor.redact("postgres://app:\(key)@db.internal/app")
+        #expect(labeled.redactedText == "postgres://app:xai-[REDACTED]@db.internal/app")
+        #expect(labeled.redactionCount == 1)
+        #expect(!labeled.redactedText.contains("abcdefghijklmnopqrstuvwxyz0123456789"))
+        let labeledAgain = redactor.redact(labeled.redactedText)
+        #expect(labeledAgain.redactedText == labeled.redactedText)
+        #expect(labeledAgain.redactionCount == 0)
+
+        let ghp = "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789"
+        let remote = redactor.redact("https://git:\(ghp)@github.com/org/repo.git")
+        #expect(remote.redactedText == "https://git:ghp_[REDACTED]@github.com/org/repo.git")
+        #expect(remote.redactionCount == 1)
+        #expect(!remote.redactedText.contains("abcdefghijklmnopqrstuvwxyz0123456789"))
+        let remoteAgain = redactor.redact(remote.redactedText)
+        #expect(remoteAgain.redactionCount == 0)
+
+        // No userinfo, a port, a public git remote, a 7-character password,
+        // and a short password beside one that meets the floor.
+        let kept = [
+            "https://example.com:8080/path?x=1",
+            "https://example.com/callback?code=12345678",
+            "ssh://git@github.com/org/repo.git",
+            "git@github.com:org/repo.git",
+            "postgres://app:hunter2@localhost/db",
+            "http://localhost:8080",
+            "see https://example.com/wiki/User:Supersecret@talk",
+        ]
+        for line in kept {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line)")
+            #expect(result.redactedText == line)
+        }
+        #expect(
+            redactor.redact("https://user:short@host https://user:correcthorse@host").redactedText
+                == "https://user:short@host https://user:[REDACTED]@host"
+        )
+
+        // An assignment whose value is the whole URL is still one
+        // redaction. The URL pattern does not see a password after it.
+        let assigned = redactor.redact("password=https://git:supersecret@host/repo")
+        #expect(assigned.redactedText == "password=[REDACTED]")
+        #expect(assigned.redactionCount == 1)
+        #expect(!assigned.redactedText.contains("supersecret"))
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+    }
 }
 
 // MARK: - DwellTracker Tests
