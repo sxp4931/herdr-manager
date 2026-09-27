@@ -3415,6 +3415,128 @@ struct SecretRedactorTests {
             #expect(result.redactedText == line)
         }
     }
+
+    @Test("A Shopify Admin token is redacted once and keeps its prefix")
+    func redactsShopifyTokens() {
+        let redactor = SecretRedactor()
+        let body = String(repeating: "0123456789abcdef", count: 2)
+        #expect(body.count == 32)
+        let access = "shpat_\(body)"
+        let custom = "shpca_\(body)"
+        let delegate = "shppa_\(String(repeating: "a", count: 32))"
+        let secret = "shpss_\(body)"
+        let refresh = "shprt_\(String(repeating: "b", count: 32))"
+        let accessKept = "shpat_[REDACTED]"
+        let customKept = "shpca_[REDACTED]"
+        let delegateKept = "shppa_[REDACTED]"
+        let secretKept = "shpss_[REDACTED]"
+        let refreshKept = "shprt_[REDACTED]"
+
+        let bare = redactor.redact("curl printed \(access)")
+        #expect(bare.redactedText == "curl printed \(accessKept)")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains(body))
+        let again = redactor.redact(bare.redactedText)
+        #expect(again.redactedText == bare.redactedText)
+        #expect(again.redactionCount == 0)
+
+        let five = redactor.redact("\(access) \(custom) \(delegate) \(secret) \(refresh)")
+        #expect(
+            five.redactedText
+                == "\(accessKept) \(customKept) \(delegateKept) \(secretKept) \(refreshKept)"
+        )
+        #expect(five.redactionCount == 5)
+        #expect(!five.redactedText.contains(body))
+        #expect(!five.redactedText.contains(String(repeating: "a", count: 32)))
+        #expect(!five.redactedText.contains(String(repeating: "b", count: 32)))
+
+        let assigned = redactor.redact("SHOPIFY_ACCESS_TOKEN=\(access)")
+        #expect(assigned.redactedText == "SHOPIFY_ACCESS_TOKEN=\(accessKept)")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        // The name already ends in token, so a shorter value is still
+        // an assignment. Seven characters stays.
+        let shortName = redactor.redact("SHOPIFY_ACCESS_TOKEN=12345678")
+        #expect(shortName.redactedText == "SHOPIFY_ACCESS_TOKEN=[REDACTED]")
+        #expect(shortName.redactionCount == 1)
+        let tooShort = redactor.redact("SHOPIFY_ACCESS_TOKEN=1234567")
+        #expect(tooShort.redactedText == "SHOPIFY_ACCESS_TOKEN=1234567")
+        #expect(tooShort.redactionCount == 0)
+        let secretName = redactor.redact("SHOPIFY_API_SECRET=\(secret)")
+        #expect(secretName.redactedText == "SHOPIFY_API_SECRET=\(secretKept)")
+        #expect(secretName.redactionCount == 1)
+        let quoted = redactor.redact(
+            #"{"access_token": "\#(access)", "refresh_token": "\#(refresh)"}"#
+        )
+        #expect(
+            quoted.redactedText
+                == #"{"access_token": "\#(accessKept)", "refresh_token": "\#(refreshKept)"}"#
+        )
+        #expect(quoted.redactionCount == 2)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        let header = redactor.redact("X-Shopify-Access-Token: \(access)")
+        #expect(header.redactedText == "X-Shopify-Access-Token: \(accessKept)")
+        #expect(header.redactionCount == 1)
+        let bearer = redactor.redact("Authorization: Bearer \(refresh)")
+        #expect(bearer.redactedText == "Authorization: Bearer \(refreshKept)")
+        #expect(bearer.redactionCount == 1)
+        let bearerAgain = redactor.redact(bearer.redactedText)
+        #expect(bearerAgain.redactionCount == 0)
+        let lower = redactor.redact("authorization: bearer \(custom)")
+        #expect(lower.redactedText == "authorization: bearer \(customKept)")
+        #expect(lower.redactionCount == 1)
+
+        let remote = redactor.redact("https://key:\(access)@example.myshopify.com/admin/api")
+        #expect(remote.redactedText == "https://key:\(accessKept)@example.myshopify.com/admin/api")
+        #expect(remote.redactionCount == 1)
+        #expect(remote.redactedText.contains("example.myshopify.com/admin/api"))
+        let remoteAgain = redactor.redact(remote.redactedText)
+        #expect(remoteAgain.redactionCount == 0)
+
+        let sentence = redactor.redact("saw \(delegate). next")
+        #expect(sentence.redactedText == "saw \(delegateKept). next")
+        #expect(sentence.redactionCount == 1)
+        let hyphen = redactor.redact("my-\(secret)")
+        #expect(hyphen.redactedText == "my-\(secretKept)")
+        #expect(hyphen.redactionCount == 1)
+        let note = redactor.redact("\(access)-note")
+        #expect(note.redactedText == "\(accessKept)-note")
+        #expect(note.redactionCount == 1)
+
+        let leftover = redactor.redact("token=\(access)@leftoversecret")
+        #expect(leftover.redactedText == "token=[REDACTED]")
+        #expect(leftover.redactionCount == 2)
+        #expect(!leftover.redactedText.contains("leftoversecret"))
+        #expect(!leftover.redactedText.contains(body))
+
+        let keptLines = [
+            "tokens start with shpat_",
+            "shpat_" + String(repeating: "a", count: 31),
+            "shpat_" + String(repeating: "a", count: 33),
+            "shpca_" + String(repeating: "a", count: 31),
+            "shppa_" + String(repeating: "a", count: 33),
+            "shpss_" + String(repeating: "a", count: 31),
+            "shprt_" + String(repeating: "a", count: 33),
+            "SHPAT_" + body,
+            "shpat_" + String(repeating: "A", count: 32),
+            "x" + access,
+            "_" + access,
+            "shpat_" + String(repeating: "a", count: 16) + "-" + String(repeating: "b", count: 15),
+            "shprt_" + String(repeating: "a", count: 10) + "y" + String(repeating: "b", count: 21),
+            String(repeating: "a", count: 32),
+            "shpat" + body,
+            "shptka_" + body,
+            "shpat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        ]
+        for line in keptLines {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line.prefix(80))")
+            #expect(result.redactedText == line)
+        }
+    }
 }
 
 // MARK: - DwellTracker Tests

@@ -551,6 +551,45 @@ public final class SecretRedactor: Sendable {
                 "(?<![A-Za-z0-9_])dor_v1_[a-f0-9]{64}(?![A-Za-z0-9])",
                 "dor_v1_[REDACTED]"
             ),
+            // Shopify Admin tokens and the app secret. `shpat_` is the
+            // access token (offline, online, and client credentials).
+            // `shpca_` is a custom app. `shppa_` is a private app or a
+            // delegate token. `shpss_` is the secret that signs
+            // webhooks. `shprt_` is the refresh token, and it mints
+            // another access token. The body is exactly 32 lowercase
+            // hex characters: Shopify lengthened the old 32-character
+            // token by putting the prefix in front, and a shorter
+            // floor would take `shpat_` out of a sentence. An
+            // assignment named token or secret already hides
+            // `SHOPIFY_ACCESS_TOKEN` and `SHOPIFY_API_SECRET`. A pane
+            // log, a curl line, and a pasted token have no keyword,
+            // and one access token can read the store. A shorter body
+            // stays, and a longer run stays whole, so a tail is not
+            // left behind. Uppercase hex is not what Shopify writes.
+            // A letter, digit, or underscore glued to the front is not
+            // the prefix. The prefix is the lowercase form Shopify
+            // prints. A legacy 32-hex secret with no prefix is not one
+            // of these. The five prefixes do not overlap.
+            (
+                "(?<![A-Za-z0-9_])shpat_[a-f0-9]{32}(?![A-Za-z0-9])",
+                "shpat_[REDACTED]"
+            ),
+            (
+                "(?<![A-Za-z0-9_])shpca_[a-f0-9]{32}(?![A-Za-z0-9])",
+                "shpca_[REDACTED]"
+            ),
+            (
+                "(?<![A-Za-z0-9_])shppa_[a-f0-9]{32}(?![A-Za-z0-9])",
+                "shppa_[REDACTED]"
+            ),
+            (
+                "(?<![A-Za-z0-9_])shpss_[a-f0-9]{32}(?![A-Za-z0-9])",
+                "shpss_[REDACTED]"
+            ),
+            (
+                "(?<![A-Za-z0-9_])shprt_[a-f0-9]{32}(?![A-Za-z0-9])",
+                "shprt_[REDACTED]"
+            ),
         ]
         // Compact JWS or JWE, then a PEM block. Both stay after bearer:
         // a JWT written after the scheme has to be one redaction, and
