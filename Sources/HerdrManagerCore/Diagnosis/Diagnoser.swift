@@ -1190,6 +1190,15 @@ private enum ShellForeground {
             }
             if lettaEvalFlag(arg) { return nil }
             if arg.hasPrefix("-") {
+                // Bun's `-c` and space-separated `--config` do not take a
+                // separate word, so the next word can be Letta.
+                // `--config=file` stays one word. Node still consumes
+                // `--config` here; that process exits, and `runtimeScript`
+                // does not treat the following path as the script.
+                if runtimeName == "bun", bunConfigFlagWidth(arg) != nil {
+                    index += 1
+                    continue
+                }
                 if let width = valueFlagWidth(
                     arg,
                     runtime: runtimeName,
@@ -1415,11 +1424,15 @@ private enum ShellForeground {
     /// Deno 2.9.7 takes `--import-map`, `--cert`, `--location`, `--ext`,
     /// and the other flags in `denoRequiredValueFlags`, so
     /// `deno run --import-map codex server.js` stays a plain runtime.
-    /// `--inspect`, `--inspect-wait`, and `--inspect-brk` take
-    /// the next word only when it is a port or host:port, and only on bun.
-    /// `bun --inspect ./codex` keeps the path. Node's and Deno's
-    /// `--inspect` do not take that word: `deno run --inspect ./codex`
-    /// is the script.
+    /// Deno's `--config` still takes the next word. Bun's space-separated
+    /// `--config` does not: `bun run --config /tmp/codex` is that script,
+    /// and `--config=file` keeps the file in the flag word. Node and
+    /// Python reject `--config` and `--config=file` and exit, so a path
+    /// after either is not a script. `--inspect`, `--inspect-wait`, and
+    /// `--inspect-brk` take the next word only when it is a port or
+    /// host:port, and only on bun. `bun --inspect ./codex` keeps the path.
+    /// Node's and Deno's `--inspect` do not take that word:
+    /// `deno run --inspect ./codex` is the script.
     private static func runtimeScriptIsAgent(_ process: ForegroundProcess) -> Bool {
         guard let argv = launchArguments(process), let script = runtimeScript(argv) else {
             return false
@@ -1466,9 +1479,10 @@ private enum ShellForeground {
                 return following
             }
             // Deno's `-c` is `--config`, and the next word is that file.
-            // Bun's `-c` does not take a separate word: the next word is
-            // the script. Both have to run before the eval abandon, which
-            // is python's `-c` and still applies to node.
+            // Bun's `-c` and space-separated `--config` do not take a
+            // separate word: the next word is the script. Both have to
+            // run before the eval abandon, which is python's `-c` and
+            // still applies to node.
             if runtime == "bun", bunConfigFlagWidth(arg) != nil {
                 index += 1
                 continue
@@ -1478,6 +1492,13 @@ private enum ShellForeground {
                 continue
             }
             if runtimeAbandonsScript(arg) {
+                return nil
+            }
+            // Node and Python reject `--config` and `--config=file` and
+            // exit. The words after the flag are not a program. A script
+            // that already appeared is returned above. Bun's space form
+            // was handled as the script, and Deno still consumes it below.
+            if configFlagExits(runtime), arg == "--config" || arg.hasPrefix("--config=") {
                 return nil
             }
             if runtimeValueFlags.contains(arg) {
@@ -1550,8 +1571,10 @@ private enum ShellForeground {
     /// The list is the string and number options on Bun 1.4.2's `bun run`
     /// help, plus `--origin`, which that binary still consumes and the
     /// help no longer prints. `--loader`, `--require`, `--import`,
-    /// `--preload`, `--cwd`, `--env-file`, `--config`, `--filter`, and
-    /// `--tsconfig-override` are already `runtimeValueFlags`. `-e` and
+    /// `--preload`, `--cwd`, `--env-file`, `--filter`, and
+    /// `--tsconfig-override` are already `runtimeValueFlags`. Bun's
+    /// space-separated `--config` is not: the next word is the script.
+    /// Deno still takes `--config` from that set. `-e` and
     /// `-p` abandon the walk before this set is consulted, so they are
     /// not `--external` or `--port`. Bun's `-c` is not a value here: the
     /// next word is the script. `--external`, `--target`, and `--packages`
@@ -1707,12 +1730,24 @@ private enum ShellForeground {
         return 2
     }
 
-    /// Bun 1.4.2 keeps a config path glued to `-c` (`-cPATH`, `-c=PATH`).
-    /// A separate word is the script: `bun -c /tmp/codex` runs that file.
-    /// Python's `-c` is still eval, and node's `-c` is still a syntax check.
+    /// Bun 1.4.2 keeps a config path glued to the flag (`-cPATH`,
+    /// `-c=PATH`, `--config=PATH`). A separate word is the script:
+    /// `bun -c /tmp/codex` and `bun run --config /tmp/codex` run that
+    /// file. Python's `-c` is still eval, node's `-c` is still a syntax
+    /// check, and Deno's `--config` and `-c` still take the next word.
     private static func bunConfigFlagWidth(_ arg: String) -> Int? {
+        if arg == "--config" { return 1 }
         guard arg.hasPrefix("-c"), !arg.hasPrefix("--") else { return nil }
         return 1
+    }
+
+    /// Node and Python reject `--config` and exit. The words after it
+    /// are not a program. Bun's space form is the script, and Deno's is
+    /// the config file; neither runtime is this check.
+    private static func configFlagExits(_ runtime: String) -> Bool {
+        if runtime == "node" || runtime == "nodejs" { return true }
+        guard runtime.hasPrefix("python") else { return false }
+        return genericRuntimeName(runtime)
     }
 
     /// Deno flags whose next word is the script. `-r` is `--reload`.

@@ -1392,17 +1392,11 @@ struct DiagnoserCpuSamplePidTests {
             "bun",
             argv: ["bun", "run", "--preload", "/home/user/codex", "dev"]
         )
-        let withConfig = process(
-            4,
-            "bun",
-            argv: ["bun", "run", "--config", "/home/user/codex", "dev"]
-        )
         #expect(Diagnoser.cpuSamplePid([withCwd, claude]) == 12)
         #expect(Diagnoser.cpuSamplePid([withEnv, claude]) == 12)
         #expect(Diagnoser.cpuSamplePid([withFilter, claude]) == 12)
         #expect(Diagnoser.cpuSamplePid([withFilterShort, claude]) == 12)
         #expect(Diagnoser.cpuSamplePid([withPreload, claude]) == 12)
-        #expect(Diagnoser.cpuSamplePid([withConfig, claude]) == 12)
 
         // A program named run stays the script. The later agent path is its argument.
         let namedRun = process(4, "bun", argv: ["bun", "./run", "/tmp/codex"])
@@ -1619,6 +1613,128 @@ struct DiagnoserCpuSamplePidTests {
             ]
         )
         #expect(Diagnoser.cpuSamplePid([helper, featureLetta]) == 30)
+    }
+
+    @Test("bun's --config word is the script, and the other runtimes keep theirs")
+    func bunConfigWordIsTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+
+        // Bun 1.4.2 does not take a separate word. The path is the script.
+        let runsCodex = process(
+            4, "bun", argv: ["bun", "run", "--config", "/home/user/codex", "dev"]
+        )
+        let bare = process(20, "bun", argv: ["bun", "--config", "/usr/local/bin/codex"])
+        let equals = process(
+            20, "bun", argv: ["bun", "--config=/tmp/bunfig.toml", "/tmp/codex"]
+        )
+        let bunExe = process(
+            20, "bun.exe", argv: ["bun.exe", "run", "--config", "/tmp/codex"]
+        )
+        let watched = process(
+            20, "bun", argv: ["bun", "--config", "--watch", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([runsCodex, claude]) == 4)
+        #expect(Diagnoser.cpuSamplePid([helper, bare]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, equals]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bunExe]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, watched]) == 20)
+
+        // The first word is the program. The agent path is its argument.
+        let toml = process(
+            4,
+            "bun",
+            argv: ["bun", "run", "--config", "bunfig.toml", "/usr/local/bin/codex"]
+        )
+        let server = process(
+            4,
+            "bun",
+            argv: ["bun", "run", "--config", "server.js", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([toml, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([server, claude]) == 12)
+
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let leader = process(
+            20, "bun", argv: ["bun", "run", "--config", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, leader]) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+        let falseLeader = process(
+            20,
+            "bun",
+            argv: ["bun", "run", "--config", "server.js", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, falseLeader]) == 10)
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, falseLeader], foregroundProcessGroupId: 20) == 10
+        )
+
+        let letta = process(
+            30,
+            "bun",
+            argv: ["bun", "--config", "/home/user/node_modules/.bin/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, letta]) == 30)
+        let oneShot = process(
+            8,
+            "bun",
+            argv: [
+                "bun", "--config",
+                "/home/user/node_modules/.bin/letta", "--prompt", "hello",
+            ]
+        )
+        let interactive = process(30, "letta", argv: ["letta"])
+        #expect(Diagnoser.cpuSamplePid([oneShot, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([oneShot]) == 8)
+        #expect(
+            Diagnoser.cpuSamplePid([oneShot, interactive], foregroundProcessGroupId: 8) == 30
+        )
+
+        // Deno still consumes the next word. The = form keeps the file in the flag.
+        let denoValue = process(
+            4, "deno", argv: ["deno", "run", "--config", "codex", "server.js"]
+        )
+        let denoScript = process(
+            20, "deno", argv: ["deno", "run", "--config", "deno.json", "/tmp/codex"]
+        )
+        let denoEquals = process(
+            20, "deno", argv: ["deno", "--config=/tmp/deno.json", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([denoValue, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, denoScript]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, denoEquals]) == 20)
+
+        // Node and Python reject the flag and exit. A path after it is not
+        // the script. A script before the flag still is.
+        let nodeBare = process(
+            4, "node", argv: ["node", "--config", "/usr/local/bin/codex"]
+        )
+        let nodeAfter = process(
+            4, "node", argv: ["node", "--config", "file.js", "/usr/local/bin/codex"]
+        )
+        let nodeEquals = process(
+            4, "nodejs", argv: ["nodejs", "--config=/tmp/file", "/usr/local/bin/codex"]
+        )
+        let nodeScriptFirst = process(
+            20, "node", argv: ["node", "/usr/local/bin/codex", "--config"]
+        )
+        let pythonBare = process(
+            4, "python3", argv: ["python3", "--config", "/tmp/codex"]
+        )
+        let pythonEquals = process(
+            4, "python3.11", argv: ["python3.11", "--config=/tmp/file", "/tmp/codex"]
+        )
+        let pythonScriptFirst = process(
+            20, "python3", argv: ["python3", "/tmp/codex", "--config"]
+        )
+        #expect(Diagnoser.cpuSamplePid([nodeBare, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([nodeAfter, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([nodeEquals, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeScriptFirst]) == 20)
+        #expect(Diagnoser.cpuSamplePid([pythonBare, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([pythonEquals, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, pythonScriptFirst]) == 20)
     }
 
     @Test("a node flag value is not the agent script")
