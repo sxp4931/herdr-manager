@@ -1203,7 +1203,13 @@ private enum ShellForeground {
                 // script and exits, so neither it nor the path after
                 // it is Letta. A path, and `--inspect=9229`, still are.
                 // Node's `--debug-port` consumes a port word. A dash
-                // word, or no word, makes that node exit.
+                // word, or no word, makes that node exit. The same is
+                // true of every node value flag. Bun rejects `-W`,
+                // `-X`, `-S`, `-L`, and `-o`; the path after one is
+                // not Letta.
+                if runtimeName == "bun", bunRejectedShort(arg) {
+                    return nil
+                }
                 if runtimeName == "bun",
                    bunConfigFlagWidth(arg) != nil || bunFlagNamesTheScript(arg) {
                     index += 1
@@ -1236,11 +1242,11 @@ private enum ShellForeground {
                     continue
                 }
                 if isNodeRuntime(runtimeName),
-                   let port = nodeDebugPort(
+                   let option = nodeOption(
                     arg,
                     following: index + 1 < argv.count ? argv[index + 1] : nil
                    ) {
-                    switch port {
+                    switch option {
                     case .skip(let width):
                         index += width
                     case .exits:
@@ -1506,6 +1512,14 @@ private enum ShellForeground {
     /// the address is not a program. Node's and Deno's `--inspect` do
     /// not take that word either: `node --inspect 9229 ./codex` names
     /// `9229`, and `deno run --inspect ./codex` is the script.
+    /// Node 22.23 does not take a value that starts with `-`, and an
+    /// empty `--flag=` is not a value either: `node --title --watch
+    /// /tmp/codex` and `node --title=` exit, so the path is not the
+    /// program. Node also rejects `--cwd`, `--filter`, `--preload`,
+    /// `--tsconfig-override`, `-W`, `-X`, `-S`, `-L`, `-o`, and `-F`,
+    /// including a glued short. Bun still runs `--cwd` and
+    /// `--title --watch`. Bun rejects `-W`, `-X`, `-S`, `-L`, and
+    /// `-o`. Python's `-W` and `-X` still take the next word.
     private static func runtimeScriptIsAgent(_ process: ForegroundProcess) -> Bool {
         guard let argv = launchArguments(process), let script = runtimeScript(argv) else {
             return false
@@ -1524,7 +1538,11 @@ private enum ShellForeground {
     /// with no `:` makes bun exit. Python rejects both node flags and
     /// `--config`. Deno still consumes this set, including `--loader`.
     /// `-S` is Python's own boolean and Deno's permission flag, handled
-    /// before the set.
+    /// before the set. Node rejects `--cwd`, `--filter`, `--preload`,
+    /// `--tsconfig-override`, `-W`, `-X`, `-S`, `-L`, `-o`, and `-F`
+    /// (`nodeOption`). Bun rejects the same shorts except `-F`, which
+    /// is its filter. A node value flag whose next word starts with
+    /// `-` exits in `nodeOption` instead of taking that word.
     private static let runtimeValueFlags: Set<String> = [
         "-r", "--require", "--loader", "--import", "--experimental-loader",
         "--inspect-port", "-W", "-X", "-S", "-L", "-o",
@@ -1592,6 +1610,11 @@ private enum ShellForeground {
                 }
                 continue
             }
+            // Bun 1.4.2 has no `-W`, `-X`, `-S`, `-L`, or `-o`. The
+            // process exits before the file after the flag runs.
+            if runtime == "bun", bunRejectedShort(arg) {
+                return nil
+            }
             if runtime == "deno", let width = denoFlagWidth(arg, following: following) {
                 index += width
                 continue
@@ -1609,15 +1632,15 @@ private enum ShellForeground {
             // Python rejects these two node flags and exits. Bun's space
             // form was handled above. Node still consumes them from the
             // shared set, and so does Deno. `--debug-port` is the same
-            // rejection; node consumes it in `nodeDebugPort`.
+            // rejection; node consumes it in `nodeOption`.
             if isPythonRuntime(runtime), pythonRejectsNodeFlag(arg) {
                 return nil
             }
-            // Node's alias of `--inspect-port`. The port is the next word
-            // unless that word is missing or starts with `-`, in which
-            // case node exits. `--debug-port=9229` is not this check.
-            if isNodeRuntime(runtime), let port = nodeDebugPort(arg, following: following) {
-                switch port {
+            // Node 22.23 exits when a value is missing or starts with
+            // `-`, and when the flag is one bun or Python owns. The
+            // path after that flag is not a program.
+            if isNodeRuntime(runtime), let option = nodeOption(arg, following: following) {
+                switch option {
                 case .skip(let width):
                     index += width
                 case .exits:
@@ -1641,8 +1664,8 @@ private enum ShellForeground {
                 // Deno's `-r` is `--reload` with no separate value, and
                 // `-W` / `-S` / `--env-file` are the same shape. Node's
                 // `-r` and `--env-file`, and Python's `-W` and `-X`, still
-                // take the next word. Node and bun reject `-S` and exit,
-                // so they still consume it here and the path is not a script.
+                // take the next word. Node and bun already returned on
+                // the shorts they reject, so this consume is not that exit.
                 if runtime == "deno", denoBooleanFlags.contains(arg) {
                     index += 1
                     continue
@@ -1869,9 +1892,11 @@ private enum ShellForeground {
     }
 
     /// Words this flag occupies, including itself. Nil when `arg` is not
-    /// one of bun's or node's value flags. A required value always takes
-    /// the next word. Bun's `--inspect` is `bunInspect`: an address-shaped
-    /// word makes bun exit, and a path is the script.
+    /// one of bun's or node's value flags. A required value takes the
+    /// next word. Node's dash word, empty `--flag=`, and rejected flags
+    /// exit in `nodeOption` before this width is used. Bun's `--inspect`
+    /// is `bunInspect`: an address-shaped word makes bun exit, and a
+    /// path is the script.
     private static func valueFlagWidth(_ arg: String, runtime: String) -> Int? {
         if let width = bunFlagWidth(arg, runtime: runtime) {
             return width
@@ -1897,32 +1922,104 @@ private enum ShellForeground {
         runtime == "node" || runtime == "nodejs"
     }
 
-    /// How Node's `--debug-port` occupies argv. Nil when `arg` is not
-    /// that flag, so `--debug-port=9229` stays one word and the next
-    /// word is the script.
-    private enum NodeDebugPort {
+    /// How a Node option occupies argv. Nil when `arg` is not one of
+    /// Node's value flags and not a flag Node rejects, so
+    /// `--title=helper` and `--debug-port=9229` stay one word and the
+    /// next word is the script.
+    private enum NodeOption {
         /// Words to advance, including the flag.
         case skip(Int)
         /// Node rejects the invocation and does not run a script.
         case exits
     }
 
-    /// Node 22.23's alias of `--inspect-port`.
+    /// Flags in the shared set that Node 22.23 rejects. `--config` is
+    /// `configFlagExits`. `-F` is Bun's filter; the other shorts are
+    /// Python's or Bun's. A script written before the flag is already
+    /// returned.
+    private static let nodeRejectedFlags: Set<String> = [
+        "-W", "-X", "-S", "-L", "-o", "-F",
+        "--cwd", "--filter", "--preload", "--tsconfig-override",
+    ]
+
+    /// Shared flags Node does accept, besides `nodeRequiredValueFlags`.
+    /// `--debug-port` is the alias of `--inspect-port`. The `=` form is
+    /// not in this set.
+    private static let nodeAcceptedSharedFlags: Set<String> = [
+        "-r", "--require", "--loader", "--import", "--experimental-loader",
+        "--inspect-port", "--env-file", "--debug-port",
+    ]
+
+    /// Node 22.23's option parser, checked on this runtime.
     ///
-    /// `node --debug-port 9229 /tmp/codex` runs `/tmp/codex`.
-    /// `node --debug-port /usr/local/bin/codex server.js` runs `server.js`:
-    /// the path is the port. A missing word, `--`, `-`, `-1`, and an empty
-    /// `--debug-port=` exit before any script. `--debug-port=9229` and
-    /// `--debug-port=-` keep the port in the flag word. Bun does not use
-    /// this check: its next word is the script. Python rejects the flag
-    /// in `pythonRejectsNodeFlag`.
-    private static func nodeDebugPort(_ arg: String, following: String?) -> NodeDebugPort? {
-        if arg == "--debug-port=" { return .exits }
-        guard arg == "--debug-port" else { return nil }
+    /// A separate word that does not start with `-` is the value, and
+    /// the script is the word after it: `node --title helper
+    /// /tmp/codex`, `node --debug-port 9229 /tmp/codex`, and
+    /// `node -r ./preload.js /tmp/codex` run that file. A missing word
+    /// or a word that starts with `-` (`--watch`, `--`, `-`, `-1`)
+    /// makes node exit, for every flag in `nodeRequiredValueFlags` and
+    /// `nodeAcceptedSharedFlags`. An empty `--title=` or
+    /// `--debug-port=` exits too. `--title=helper` and
+    /// `--debug-port=-` keep the value in the flag word.
+    /// `--cwd`, `--filter`, `--preload`, `--tsconfig-override`, `-W`,
+    /// `-X`, `-S`, `-L`, `-o`, and `-F` are not node options, including
+    /// `--cwd=/tmp` and `-Wignore`, so the path after them is not a
+    /// program. A short value glued on (`-rpreload.js`, `-Cdev`) is
+    /// the same exit. Bun does not use this check: `--title --watch`
+    /// runs the file, and `--cwd` takes the directory. Python's `-W`
+    /// and `-X` still take the next word.
+    private static func nodeOption(_ arg: String, following: String?) -> NodeOption? {
+        if nodeOptionExits(arg) { return .exits }
+        guard nodeTakesSeparateValue(arg) else { return nil }
         if let following, !following.hasPrefix("-") {
             return .skip(2)
         }
         return .exits
+    }
+
+    private static func nodeTakesSeparateValue(_ arg: String) -> Bool {
+        nodeRequiredValueFlags.contains(arg) || nodeAcceptedSharedFlags.contains(arg)
+    }
+
+    private static func nodeOptionExits(_ arg: String) -> Bool {
+        if nodeRejectedFlags.contains(arg) { return true }
+        for flag in nodeRejectedFlags where flag.hasPrefix("--") {
+            if arg.hasPrefix(flag + "=") { return true }
+        }
+        if nodeEmptyEquals(arg) { return true }
+        return nodeGluedShort(arg)
+    }
+
+    /// `--title=` and `--debug-port=`. A non-empty `--title=helper`
+    /// is not empty: the value stays in the word.
+    private static func nodeEmptyEquals(_ arg: String) -> Bool {
+        guard arg.hasSuffix("=") else { return false }
+        let name = String(arg.dropLast())
+        return nodeRequiredValueFlags.contains(name) || nodeAcceptedSharedFlags.contains(name)
+    }
+
+    /// `-rpreload.js` and `-Cdev`. Node has no glued short value.
+    /// `-Wignore` is a rejected short with the same shape. An exact
+    /// `-r` or `-C` is a separate word and is not this check.
+    private static func nodeGluedShort(_ arg: String) -> Bool {
+        guard arg.hasPrefix("-"), !arg.hasPrefix("--"), arg.count > 2 else { return false }
+        let short = String(arg.prefix(2))
+        if short == "-r" || short == "-C" { return true }
+        return nodeRejectedFlags.contains(short)
+    }
+
+    /// Bun 1.4.2 rejects these shorts. `bun -W ignore /tmp/codex` exits
+    /// with `Invalid Argument '-W'` and does not run the file. `-X`,
+    /// `-S`, `-L`, and `-o` do the same, including `-Wignore`. `-F` is
+    /// `--filter` and is not here. Python still takes `-W` and `-X`.
+    private static let bunRejectedShorts: Set<String> = [
+        "-W", "-X", "-S", "-L", "-o",
+    ]
+
+    private static func bunRejectedShort(_ arg: String) -> Bool {
+        if bunRejectedShorts.contains(arg) { return true }
+        guard arg.hasPrefix("-"), !arg.hasPrefix("--"), arg.count > 2 else { return false }
+        return bunRejectedShorts.contains(String(arg.prefix(2)))
     }
 
     /// Bun 1.4.2 does not take a separate word for these node flags.
@@ -1931,8 +2028,9 @@ private enum ShellForeground {
     /// `bun --inspect-port 9229 /tmp/codex` tries to run `9229` and
     /// exits. `--experimental-loader=mod` and `--inspect-port=9229`
     /// keep the value in the flag word, so they are not this check.
-    /// Node still consumes both from `runtimeValueFlags`. Python
-    /// rejects them in `pythonRejectsNodeFlag`.
+    /// Node consumes both in `nodeOption`: a word that starts with `-`
+    /// makes node exit, and any other word is the loader or the port.
+    /// Python rejects them in `pythonRejectsNodeFlag`.
     private static func bunFlagNamesTheScript(_ arg: String) -> Bool {
         arg == "--experimental-loader" || arg == "--inspect-port"
     }
@@ -2046,7 +2144,7 @@ private enum ShellForeground {
     /// `python3 --debug-port 9229 /tmp/codex` exit before any script runs,
     /// including the `=` form. A script written before the flag is already
     /// returned. Node consumes the first two from the shared set and
-    /// `--debug-port` in `nodeDebugPort`. Bun's space form of each is the
+    /// `--debug-port` in `nodeOption`. Bun's space form of each is the
     /// script.
     private static func pythonRejectsNodeFlag(_ arg: String) -> Bool {
         if arg == "--experimental-loader" || arg.hasPrefix("--experimental-loader=") {

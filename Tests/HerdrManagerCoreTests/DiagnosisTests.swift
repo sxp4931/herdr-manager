@@ -2203,6 +2203,210 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([nodeInspectPort, claude]) == 12)
     }
 
+    @Test("a dash word is not a node value, and a flag node rejects is not the script")
+    func nodeDashValueAndRejectedFlagAreNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23 exits when the next word starts with `-`. The path
+        // after it does not run, so this node is not the group leader.
+        let titleWatch = process(
+            4, "node", argv: ["node", "--title", "--watch", "/usr/local/bin/codex"]
+        )
+        let requireWatch = process(
+            4, "nodejs", argv: ["nodejs", "--require", "--watch", "/tmp/codex"]
+        )
+        let shortWatch = process(
+            4, "node.exe", argv: ["node.exe", "-r", "--watch", "/tmp/codex"]
+        )
+        let portWatch = process(
+            4, "node", argv: ["node", "--inspect-port", "--", "/usr/local/bin/codex"]
+        )
+        let envWatch = process(
+            4, "node", argv: ["node", "--env-file", "-my.env", "/tmp/codex"]
+        )
+        let intervalWatch = process(
+            4, "node", argv: ["node", "--cpu-prof-interval", "-1", "/tmp/codex"]
+        )
+        let conditionsWatch = process(
+            4, "node", argv: ["node", "-C", "--watch", "/tmp/codex"]
+        )
+        let emptyTitle = process(4, "node", argv: ["node", "--title=", "/tmp/codex"])
+        let emptyPort = process(4, "node", argv: ["node", "--require=", "/usr/local/bin/codex"])
+        let missingTitle = process(4, "node", argv: ["node", "--title"])
+        #expect(Diagnoser.cpuSamplePid([titleWatch, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([requireWatch, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([shortWatch, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([portWatch, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([envWatch, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([intervalWatch, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([conditionsWatch, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([emptyTitle, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([emptyPort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([missingTitle, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([mcp, titleWatch], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([titleWatch]) == 4)
+
+        // A real value, including one glued with `=`, still names the script.
+        let title = process(
+            20, "node", argv: ["node", "--title", "helper", "/usr/local/bin/codex"]
+        )
+        let titled = process(20, "node", argv: ["node", "--title=helper", "/tmp/codex"])
+        let preload = process(
+            20, "node", argv: ["node", "-r", "./preload.js", "/usr/local/bin/codex"]
+        )
+        let required = process(
+            20, "nodejs", argv: ["nodejs", "--require=./preload.js", "/tmp/codex"]
+        )
+        let dottedEnv = process(
+            20, "node", argv: ["node", "--env-file", "./-my.env", "/tmp/codex"]
+        )
+        let scriptFirst = process(
+            20, "node", argv: ["node", "/usr/local/bin/codex", "--title", "--watch"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, title]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, titled]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, preload]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, required]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, dottedEnv]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, scriptFirst]) == 20)
+
+        // Node rejects the shared flags it does not own. The path after
+        // the value, and a glued short, are not the program.
+        let cwd = process(
+            4, "node", argv: ["node", "--cwd", "/tmp", "/usr/local/bin/codex"]
+        )
+        let cwdEquals = process(
+            4, "node.exe", argv: ["node.exe", "--cwd=/tmp", "/tmp/codex"]
+        )
+        let filter = process(
+            4, "node", argv: ["node", "--filter", "pkg", "/usr/local/bin/codex"]
+        )
+        let pre = process(
+            4, "nodejs", argv: ["nodejs", "--preload", "helper.js", "/tmp/codex"]
+        )
+        let tsconfig = process(
+            4,
+            "node",
+            argv: ["node", "--tsconfig-override", "tsconfig.json", "/tmp/codex"]
+        )
+        let warning = process(
+            4, "node", argv: ["node", "-W", "ignore", "/usr/local/bin/codex"]
+        )
+        let warningGlued = process(4, "node", argv: ["node", "-Wignore", "/tmp/codex"])
+        let dev = process(4, "node", argv: ["node", "-X", "dev", "/tmp/codex"])
+        let site = process(4, "node", argv: ["node", "-S", "ignore", "/tmp/codex"])
+        let lib = process(4, "node", argv: ["node", "-L", "lib", "/tmp/codex"])
+        let option = process(4, "node", argv: ["node", "-o", "pipefail", "/tmp/codex"])
+        let filterShort = process(4, "node", argv: ["node", "-F", "pkg", "/tmp/codex"])
+        let conditionsGlued = process(4, "node", argv: ["node", "-Cdev", "/tmp/codex"])
+        let requireGlued = process(
+            4, "node", argv: ["node", "-rpreload.js", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([cwd, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([cwdEquals, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([filter, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([pre, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([tsconfig, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([warning, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([warningGlued, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([dev, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([site, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([lib, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([option, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([filterShort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([conditionsGlued, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([requireGlued, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([mcp, cwd], foregroundProcessGroupId: 4) == 10)
+        let cwdFirst = process(
+            20, "node", argv: ["node", "/usr/local/bin/codex", "--cwd", "/tmp"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, cwdFirst]) == 20)
+
+        // The same shape on Bun still runs. `-W` does not: bun exits.
+        let bunTitle = process(
+            20, "bun", argv: ["bun", "--title", "--watch", "/usr/local/bin/codex"]
+        )
+        let bunCwd = process(
+            20, "bun", argv: ["bun", "--cwd", "/tmp", "/usr/local/bin/codex"]
+        )
+        let bunRequire = process(
+            20, "bun", argv: ["bun", "-r./preload.js", "/tmp/codex"]
+        )
+        let bunWarning = process(
+            4, "bun", argv: ["bun", "-W", "ignore", "/usr/local/bin/codex"]
+        )
+        let bunGlued = process(4, "bun.exe", argv: ["bun.exe", "-Wignore", "/tmp/codex"])
+        let bunOption = process(4, "bun", argv: ["bun", "-o", "pipefail", "/tmp/codex"])
+        #expect(Diagnoser.cpuSamplePid([helper, bunTitle]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bunCwd]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bunRequire]) == 20)
+        #expect(Diagnoser.cpuSamplePid([bunWarning, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([bunGlued, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([bunOption, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([mcp, bunWarning], foregroundProcessGroupId: 4) == 10)
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, bunTitle], foregroundProcessGroupId: 20) == 20
+        )
+
+        // Python still takes `-W` and `-X`. The next word is the script.
+        let pythonWarning = process(
+            20, "python3", argv: ["python3", "-W", "ignore", "/usr/local/bin/codex"]
+        )
+        let pythonDev = process(
+            20, "python3.11", argv: ["python3.11", "-Xdev", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, pythonWarning]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, pythonDev]) == 20)
+
+        // A dash word or a rejected flag in front of Letta is not the TUI.
+        // `bun --title --watch` still is.
+        let falseLetta = process(
+            8,
+            "node",
+            argv: [
+                "node", "--title", "--watch",
+                "/home/user/node_modules/.bin/letta",
+            ]
+        )
+        let cwdLetta = process(
+            8,
+            "node",
+            argv: ["node", "--cwd", "/tmp", "/home/user/node_modules/.bin/letta"]
+        )
+        let cwdPrompt = process(
+            9,
+            "node",
+            argv: ["node", "--cwd", "/tmp", "/home/user/node_modules/.bin/letta", "--prompt", "hi"]
+        )
+        #expect(Diagnoser.cpuSamplePid([falseLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([falseLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([falseLetta]) == 8)
+        #expect(Diagnoser.cpuSamplePid([mcp, falseLetta], foregroundProcessGroupId: 8) == 10)
+        #expect(Diagnoser.cpuSamplePid([cwdLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([cwdLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([cwdPrompt, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([cwdPrompt]) == 9)
+        let bunLetta = process(
+            30,
+            "bun",
+            argv: [
+                "bun", "--title", "--watch",
+                "/home/user/node_modules/.bin/letta", "--conversation", "id",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, bunLetta]) == 30)
+        let bunWarningLetta = process(
+            8,
+            "bun",
+            argv: ["bun", "-W", "ignore", "/home/user/node_modules/.bin/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([bunWarningLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([bunWarningLetta]) == 8)
+    }
+
     @Test("a deno flag value is not the agent script")
     func denoFlagValueIsNotTheScript() {
         let helper = process(10, "node", argv: ["node", "server.js"])
@@ -2510,7 +2714,10 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([script, claude]) == 4)
         let dashed = process(4, "node", argv: ["node", "--", "codex"])
         #expect(Diagnoser.cpuSamplePid([dashed]) == 4)
-        let required = process(4, "node", argv: ["node", "-rpreload.js", "codex"])
+        // Node 22 rejects a preload glued onto `-r`. A separate word is the value.
+        let gluedRequire = process(4, "node", argv: ["node", "-rpreload.js", "codex"])
+        #expect(Diagnoser.cpuSamplePid([gluedRequire, claude]) == 42)
+        let required = process(4, "node", argv: ["node", "-r", "preload.js", "codex"])
         #expect(Diagnoser.cpuSamplePid([required, claude]) == 4)
     }
 
