@@ -1442,6 +1442,131 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([eval, claude]) == 12)
     }
 
+    @Test("a bun flag value is not the agent script")
+    func bunFlagValueIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+
+        let defined = process(
+            20,
+            "bun",
+            argv: ["bun", "--define", "process.env.NODE_ENV:\"development\"", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, defined]) == 20)
+        let shortDefine = process(
+            20,
+            "bun",
+            argv: ["bun", "-d", "process.env.NODE_ENV:\"development\"", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, shortDefine]) == 20)
+        let attachedDefine = process(20, "bun", argv: ["bun", "--define=KEY:1", "/tmp/codex"])
+        let gluedDefine = process(20, "bun", argv: ["bun", "-dKEY:1", "/tmp/codex"])
+        #expect(Diagnoser.cpuSamplePid([helper, attachedDefine]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, gluedDefine]) == 20)
+
+        // The value's basename is an agent. The script after it is not.
+        let title = process(4, "bun", argv: ["bun", "--title", "codex", "server.js"])
+        let userAgent = process(4, "bun", argv: ["bun", "--user-agent", "codex", "server.js"])
+        let dropped = process(4, "bun", argv: ["bun", "--drop", "codex", "server.js"])
+        let shellFlag = process(4, "bun", argv: ["bun", "--shell", "codex", "server.js"])
+        let conditions = process(4, "bun", argv: ["bun", "--conditions", "codex", "server.js"])
+        let jsx = process(4, "bun", argv: ["bun", "--jsx-import-source", "codex", "server.js"])
+        let port = process(4, "bun", argv: ["bun", "--port", "codex", "server.js"])
+        let install = process(4, "bun", argv: ["bun", "--install", "codex", "server.js"])
+        #expect(Diagnoser.cpuSamplePid([title, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([userAgent, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([dropped, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([shellFlag, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([conditions, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([jsx, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([port, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([install, claude]) == 12)
+
+        let afterRun = process(
+            20,
+            "bun",
+            argv: ["bun", "run", "--define", "KEY", "--watch", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, afterRun]) == 20)
+
+        // The path is the script. A host:port is the address, and the script follows.
+        let inspectPath = process(20, "bun", argv: ["bun", "--inspect", "./codex"])
+        let inspectWaitPath = process(20, "bun", argv: ["bun", "--inspect-wait", "./codex"])
+        let inspectBrkPath = process(4, "bun", argv: ["bun", "--inspect-brk", "/tmp/server.js"])
+        #expect(Diagnoser.cpuSamplePid([helper, inspectPath]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, inspectWaitPath]) == 20)
+        #expect(Diagnoser.cpuSamplePid([inspectBrkPath, claude]) == 12)
+        let address = process(
+            20,
+            "bun",
+            argv: ["bun", "--inspect-wait", "127.0.0.1:9229", "/tmp/codex"]
+        )
+        let portOnly = process(20, "bun", argv: ["bun", "--inspect-brk", "9229", "/tmp/codex"])
+        let prefix = process(
+            20,
+            "bun",
+            argv: ["bun", "--inspect", "localhost:6499/prefix", "/tmp/codex"]
+        )
+        let v6 = process(20, "bun", argv: ["bun", "--inspect-wait", "[::1]:9229", "/tmp/codex"])
+        let attachedInspect = process(
+            20,
+            "bun",
+            argv: ["bun", "--inspect=0.0.0.0:9229", "/tmp/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, address]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, portOnly]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, prefix]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, v6]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, attachedInspect]) == 20)
+
+        let windows = process(20, "bun.exe", argv: ["bun.exe", "--inspect", "C:\\Users\\codex.js"])
+        #expect(Diagnoser.cpuSamplePid([windows, claude]) == 20)
+
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let leader = process(
+            20,
+            "bun",
+            argv: ["bun", "--inspect-wait", "localhost:9229", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, leader]) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+
+        let letta = process(
+            30,
+            "bun",
+            argv: [
+                "bun", "--define", "KEY",
+                "/home/user/node_modules/.bin/letta", "--conversation", "id",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, letta]) == 30)
+        let oneShot = process(
+            8,
+            "bun",
+            argv: ["bun", "--inspect-wait", "127.0.0.1:9229", "letta", "--prompt", "hello"]
+        )
+        let interactive = process(30, "letta", argv: ["letta"])
+        #expect(Diagnoser.cpuSamplePid([oneShot, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([oneShot]) == 8)
+        #expect(
+            Diagnoser.cpuSamplePid([oneShot, interactive], foregroundProcessGroupId: 8) == 30
+        )
+
+        // These shorts are eval, not bun's --port / --config / --external.
+        let printFlag = process(4, "bun", argv: ["bun", "-p", "3000", "/tmp/codex"])
+        let configShort = process(4, "bun", argv: ["bun", "-c", "/tmp/codex", "server.js"])
+        let externalShort = process(4, "bun", argv: ["bun", "-e", "codex", "/tmp/codex"])
+        #expect(Diagnoser.cpuSamplePid([printFlag, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([configShort, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([externalShort, claude]) == 12)
+
+        // Node and python do not take bun's flags. The next word is the script.
+        let nodeDefine = process(4, "node", argv: ["node", "--define", "codex", "server.js"])
+        let pythonDebug = process(4, "python3", argv: ["python3", "-d", "/tmp/codex"])
+        #expect(Diagnoser.cpuSamplePid([nodeDefine, claude]) == 4)
+        #expect(Diagnoser.cpuSamplePid([pythonDebug, claude]) == 4)
+    }
+
     @Test("The shell that is the agent interpreter is the sample when nothing else is")
     func interpreterShellIsTheSample() {
         let shell = process(2, "sh", argv: ["sh", "codex"])

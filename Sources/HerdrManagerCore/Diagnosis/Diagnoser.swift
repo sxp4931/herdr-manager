@@ -1189,7 +1189,15 @@ private enum ShellForeground {
             }
             if lettaEvalFlag(arg) { return nil }
             if arg.hasPrefix("-") {
-                index += lettaOptionTakesValue(arg) ? 2 : 1
+                if let width = bunFlagWidth(
+                    arg,
+                    runtime: runtimeName,
+                    following: index + 1 < argv.count ? argv[index + 1] : nil
+                ) {
+                    index += width
+                } else {
+                    index += lettaOptionTakesValue(arg) ? 2 : 1
+                }
                 continue
             }
             if !skippedSubcommand, runtimeSubcommand(arg, runtime: runtimeName) {
@@ -1398,10 +1406,12 @@ private enum ShellForeground {
     /// agent. Eval and module flags are not a path, including a value
     /// glued onto the flag. A flag that takes a value is not the script
     /// either. `bun run`, `bun x`, and `deno run` are subcommands, so
-    /// they are not the script. Bun's value flags (`--cwd`, `--env-file`,
-    /// `--filter` / `-F`, `--preload`, `--config`, `--tsconfig-override`)
-    /// take the next word, so `bun run --cwd ~/src/codex dev` stays a
-    /// plain runtime.
+    /// they are not the script. Bun's value flags take the next word,
+    /// including `--define` / `-d` and the other `bun run` options that
+    /// require one, so `bun --define codex server.js` stays a plain
+    /// runtime. `--inspect`, `--inspect-wait`, and `--inspect-brk` take
+    /// the next word only when it is a port or host:port.
+    /// `bun --inspect ./codex` keeps the path.
     private static func runtimeScriptIsAgent(_ process: ForegroundProcess) -> Bool {
         guard let argv = launchArguments(process), let script = runtimeScript(argv) else {
             return false
@@ -1457,6 +1467,14 @@ private enum ShellForeground {
                 index += 1
                 continue
             }
+            if let width = bunFlagWidth(
+                arg,
+                runtime: runtime,
+                following: index + 1 < argv.count ? argv[index + 1] : nil
+            ) {
+                index += width
+                continue
+            }
             if arg.hasPrefix("-") {
                 index += 1
                 continue
@@ -1495,6 +1513,85 @@ private enum ShellForeground {
             return true
         }
         return false
+    }
+
+    /// `bun run` options whose next word is a value, not the script.
+    ///
+    /// The list is the string and number options on the current `bun run`
+    /// help. `--loader`, `--require`, `--import`, `--preload`, `--cwd`,
+    /// `--env-file`, `--config`, `--filter`, and `--tsconfig-override`
+    /// are already `runtimeValueFlags`. `-e`, `-p`, and `-c` abandon the
+    /// walk before this set is consulted, so they are not `--external`,
+    /// `--port`, or `--config`. `-dVALUE` and `--define=KEY` keep the
+    /// value in the flag word. Node and python are not bun, so
+    /// `node --define` and `python -d` do not use this set.
+    private static let bunRequiredValueFlags: Set<String> = [
+        "--define", "-d",
+        "--drop",
+        "-l",
+        "--shell",
+        "--title",
+        "--unhandled-rejections",
+        "--console-depth",
+        "--watch-kill-signal",
+        "--elide-lines",
+        "--install",
+        "--conditions",
+        "--main-fields",
+        "--extension-order",
+        "--jsx-factory",
+        "--jsx-fragment",
+        "--jsx-import-source",
+        "--jsx-runtime",
+        "--port",
+        "--fetch-preconnect",
+        "--max-http-header-size",
+        "--dns-result-order",
+        "--user-agent",
+    ]
+
+    /// Optional address. `bun --inspect ./codex` is the script. A separate
+    /// port or host:port is the address, and the script is the word after it.
+    private static let bunInspectFlags: Set<String> = [
+        "--inspect", "--inspect-wait", "--inspect-brk",
+    ]
+
+    /// Words this flag occupies, including itself. Nil when `arg` is not
+    /// one of bun's value flags. A required value always takes the next
+    /// word. An inspect flag takes it only when that word is an address.
+    private static func bunFlagWidth(_ arg: String, runtime: String, following: String?) -> Int? {
+        guard runtime == "bun" else { return nil }
+        if bunRequiredValueFlags.contains(arg) { return 2 }
+        guard bunInspectFlags.contains(arg) else { return nil }
+        if let following, looksLikeInspectAddress(following) { return 2 }
+        return 1
+    }
+
+    /// A port, `host:port`, `host:port/prefix`, or `[::1]:port`. A Windows
+    /// drive (`C:\…`) is a path. A script path is not an address.
+    private static func looksLikeInspectAddress(_ value: String) -> Bool {
+        if value.isEmpty || value.hasPrefix("-") { return false }
+        if value.allSatisfy({ isASCIIDigit($0) }) { return true }
+        if value.hasPrefix("["), let close = value.firstIndex(of: "]") {
+            let afterBracket = value.index(after: close)
+            guard afterBracket < value.endIndex, value[afterBracket] == ":" else { return false }
+            return inspectPort(value[value.index(after: afterBracket)...])
+        }
+        guard let colon = value.firstIndex(of: ":") else { return false }
+        let host = value[..<colon]
+        let rest = value[value.index(after: colon)...]
+        if host.count == 1, let first = host.first, isASCIILetter(first),
+           (rest.first == "\\" || rest.first == "/") {
+            return false
+        }
+        return inspectPort(rest)
+    }
+
+    private static func inspectPort(_ rest: Substring) -> Bool {
+        let port = rest.prefix { isASCIIDigit($0) }
+        guard !port.isEmpty else { return false }
+        let after = rest[port.endIndex...]
+        return after.isEmpty || after.first == "/"
     }
 
     /// `--require=mod` and `-rpreload` keep the value in the same word.
