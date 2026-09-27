@@ -1848,6 +1848,11 @@ actor MCPServer {
 
     /// Brief delivery after `agent.start` has returned. Nothing here fails
     /// the spawn. The pane id is the result either way.
+    ///
+    /// The wait's bool is unused. herdr's status timeout returns false,
+    /// and the list below is what decides. A connect failure, or any
+    /// other throw, still withholds the brief: that pane's status was
+    /// not read.
     private func deliverBrief(paneId: String, brief: String) async -> SpawnBrief.Outcome {
         do {
             _ = try await adapter.waitStatus(
@@ -2605,7 +2610,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "agent.say",
-            "description": "Send free-text prompt to an agent via agent.prompt (atomic, bracketed-paste aware). Auto-allowed when idle/done; requires confirmation when working/blocked. Max 2000 chars. Optional wait_for accepts \(SayWait.statusWords) only, and is refused before any text is sent when the status or timeout is not usable. outcome \(SayWait.waitFailedToken) means the text was already sent. outcome \(SayWait.enterUnconfirmedToken) means the text is already in the pane and Enter did not finish; do not send that text again. When the pane moved before the text was sent, resolvedAgentId is the pane that received it.",
+            "description": "Send free-text prompt to an agent via agent.prompt (atomic, bracketed-paste aware). Auto-allowed when idle/done; requires confirmation when working/blocked. Max 2000 chars. Optional wait_for accepts \(SayWait.statusWords) only, and is refused before any text is sent when the status or timeout is not usable. outcome timeout means herdr ended the wait without that status; the text was still sent. outcome \(SayWait.waitFailedToken) means the wait itself failed after the text was sent. outcome \(SayWait.enterUnconfirmedToken) means the text is already in the pane and Enter did not finish; do not send that text again. When the pane moved before the text was sent, resolvedAgentId is the pane that received it.",
             "inputSchema": [
                 "type": "object",
                 "properties": [

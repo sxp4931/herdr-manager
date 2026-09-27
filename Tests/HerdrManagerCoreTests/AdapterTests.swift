@@ -2015,6 +2015,84 @@ struct NDJSONResponseUnwrapTests {
     }
 }
 
+/// `agent.wait` succeeds as `agent_info`. A timeout is an error whose
+/// message is exactly `timed out waiting for agent status`, not
+/// `settled: false`. Treating that error as a thrown failure made
+/// `agent.say` report `wait_failed` and made a spawn brief skip the
+/// herd list.
+@Suite("agent.wait result")
+struct AgentWaitResultTests {
+    private func object(_ json: String) throws -> [String: Any] {
+        let parsed = try JSONSerialization.jsonObject(with: Data(json.utf8))
+        guard let object = parsed as? [String: Any] else {
+            Issue.record("Expected an object")
+            return [:]
+        }
+        return object
+    }
+
+    @Test("A matching agent_info is settled, and any other status is not")
+    func agentInfoEnvelope() throws {
+        let idle = try object(#"{"type":"agent_info","agent":{"agent_status":"idle","pane_id":"w1:p1"}}"#)
+        #expect(LiveHerdrAdapter.agentWaitSettled(idle, until: ["idle", "done", "blocked"]))
+        #expect(!LiveHerdrAdapter.agentWaitSettled(idle, until: ["done"]))
+        #expect(!LiveHerdrAdapter.agentWaitSettled(idle, until: ["Idle"]))
+
+        let working = try object(#"{"type":"agent_info","agent":{"agent_status":"working"}}"#)
+        #expect(LiveHerdrAdapter.agentWaitSettled(working, until: ["working"]))
+        #expect(!LiveHerdrAdapter.agentWaitSettled(working, until: ["idle"]))
+    }
+
+    @Test("The agent record wins over a settled flag on the same object")
+    func agentRecordWins() throws {
+        let working = try object(#"{"settled":true,"agent":{"agent_status":"working"}}"#)
+        #expect(!LiveHerdrAdapter.agentWaitSettled(working, until: ["idle"]))
+        #expect(LiveHerdrAdapter.agentWaitSettled(working, until: ["working"]))
+    }
+
+    @Test("A result with no agent record still accepts settled or a top-level status")
+    func legacyShapes() throws {
+        let settled = try object(#"{"settled":true}"#)
+        #expect(LiveHerdrAdapter.agentWaitSettled(settled, until: ["idle"]))
+        let other = try object(#"{"settled":false,"status":"working"}"#)
+        #expect(!LiveHerdrAdapter.agentWaitSettled(other, until: ["idle"]))
+        #expect(LiveHerdrAdapter.agentWaitSettled(other, until: ["working"]))
+        let bare = try object(#"{"type":"ok"}"#)
+        #expect(!LiveHerdrAdapter.agentWaitSettled(bare, until: ["idle"]))
+    }
+
+    @Test("herdr's status timeout is unsettled, and a different failure is not")
+    func timeoutIsUnsettled() throws {
+        let response: [String: Any] = [
+            "id": "7",
+            "error": [
+                "code": "timeout",
+                "message": LiveHerdrAdapter.agentWaitTimeoutDetail
+            ] as [String: Any]
+        ]
+        do {
+            _ = try NDJSONClient.unwrapResponse(response)
+            Issue.record("Expected the timeout error to throw")
+        } catch {
+            #expect(LiveHerdrAdapter.agentWaitTimedOut(error))
+        }
+
+        #expect(!LiveHerdrAdapter.agentWaitTimedOut(
+            NDJSONClientError.invalidResponse("timed out waiting for output match")
+        ))
+        #expect(!LiveHerdrAdapter.agentWaitTimedOut(
+            NDJSONClientError.invalidResponse("timed out waiting for agent status now")
+        ))
+        #expect(!LiveHerdrAdapter.agentWaitTimedOut(
+            NDJSONClientError.invalidResponse("agent is not running")
+        ))
+        #expect(!LiveHerdrAdapter.agentWaitTimedOut(NDJSONClientError.timeout))
+        #expect(!LiveHerdrAdapter.agentWaitTimedOut(
+            NDJSONClientError.connectFailed("/tmp/herdr.sock", 2)
+        ))
+    }
+}
+
 /// Shepherd and MCP render failures with `error.localizedDescription`.
 /// For an enum that is only CustomStringConvertible that bridges to
 /// "The operation couldn't be completed. (…Error error 4.)", so "Connect

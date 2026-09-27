@@ -502,6 +502,12 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         }
     }
 
+    /// `agent.wait` returns `{"type":"agent_info","agent":{…}}` when the
+    /// status matches. A timeout is not `settled: false`: herdr answers
+    /// with an error whose message is `agentWaitTimeoutDetail`. That is
+    /// an unsettled wait, so callers can tell it from a dropped socket.
+    /// Any other error still throws. `until` is matched exactly, which
+    /// is how herdr matches it.
     public func waitStatus(paneId: String, until: [String], timeoutMs: Int) async throws -> Bool {
         try await onIO { [reqClient] in
             let params: [String: Any] = [
@@ -509,19 +515,50 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                 "until": until,
                 "timeout_ms": timeoutMs
             ]
-            let result = try reqClient.sendWrite(method: "agent.wait", params: params)
-            if let settled = result["settled"] as? Bool {
-                if settled { return true }
+            do {
+                let result = try reqClient.sendWrite(method: "agent.wait", params: params)
+                return LiveHerdrAdapter.agentWaitSettled(result, until: until)
+            } catch {
+                if LiveHerdrAdapter.agentWaitTimedOut(error) { return false }
+                throw error
             }
-            if let status = result["status"] as? String {
-                if until.contains(status) { return true }
-            }
-            if let agent = result["agent"] as? [String: Any],
-               let status = agent["agent_status"] as? String {
-                return until.contains(status)
-            }
+        }
+    }
+
+    /// herdr `agent.wait` status timeout. The error code is `timeout`
+    /// and this sentence is the message. A longer sentence, including
+    /// one that only contains these words, is a different failure.
+    static let agentWaitTimeoutDetail = "timed out waiting for agent status"
+
+    /// True when the wait reached a requested status.
+    ///
+    /// The success envelope is `agent_info` with `agent.agent_status`.
+    /// That status wins when it is present, including over a `settled`
+    /// flag on the same object. A result with no agent record still
+    /// accepts `settled: true` or a top-level `status` in `until`.
+    static func agentWaitSettled(_ result: [String: Any], until: [String]) -> Bool {
+        if let agent = result["agent"] as? [String: Any],
+           let status = agent["agent_status"] as? String {
+            return until.contains(status)
+        }
+        if let settled = result["settled"] as? Bool, settled {
+            return true
+        }
+        if let status = result["status"] as? String {
+            return until.contains(status)
+        }
+        return false
+    }
+
+    /// True only for herdr's status-timeout error. A socket timeout,
+    /// `agent_not_running`, and `timed out waiting for output match`
+    /// are different failures and stay thrown.
+    static func agentWaitTimedOut(_ error: Error) -> Bool {
+        guard let client = error as? NDJSONClientError,
+              case .invalidResponse(let detail) = client else {
             return false
         }
+        return detail == agentWaitTimeoutDetail
     }
 
     public func reportMetadata(paneId: String, source: String, tokens: [String: String], ttlMs: Int) async throws {

@@ -14,10 +14,13 @@ import Foundation
 ///
 /// The request socket stops a silent read after
 /// `NDJSONClient.requestIOTimeoutSeconds`. A wait of that length or
-/// longer loses the race and comes back as a socket error, which the
-/// tool used to report as `agent.say failed` after the text was already
-/// in the pane. The cap sits `socketMarginMs` under that budget so
-/// herdr can answer `settled: false` first.
+/// longer loses the race and comes back as a socket error. The tool
+/// used to report that as `agent.say failed` after the text was already
+/// in the pane, and a socket error is still `wait_failed`. The cap sits
+/// `socketMarginMs` under that budget so herdr's own status timeout
+/// arrives first. That answer is an error, `timed out waiting for agent
+/// status`, not `settled: false`. `waitStatus` turns it into an
+/// unsettled wait, which this tool reports as `timeout`.
 public enum SayWait: Sendable {
 
     /// Schema order. `working` and `unknown` are not settled results.
