@@ -345,10 +345,12 @@ public actor Diagnoser {
 /// The documented example of that setting is `nu`. PowerShell is `pwsh`
 /// or `powershell`, including the `.exe` a remote pane reports. `csh` is
 /// the shell beside `tcsh`. herdr's login-shell list also names `ash` and
-/// `mksh`, beside `dash` and `ksh`. A login shell's argv0 is `-nu` or a
-/// path, and the comm name can be the other spelling of the same binary,
-/// so either field counts. A runtime (`node`, `tmux`) does not: the agent
-/// may still be the program that name is running.
+/// `mksh`, beside `dash` and `ksh`. herdr's pane-shell check also names
+/// `elvish` and `xonsh`: a dead agent leaves that process in the foreground.
+/// A login shell's argv0 is `-nu` or a path, and the comm name can be the
+/// other spelling of the same binary, so either field counts. A runtime
+/// (`node`, `tmux`) does not: the agent may still be the program that
+/// name is running.
 ///
 /// A shell is not bare when its argument vector is launching an agent.
 /// herdr identifies `sh /path/to/pi` as Pi and `powershell -File claude.ps1`
@@ -365,10 +367,12 @@ public actor Diagnoser {
 /// that starts with `-c`, even when a later argument names an agent:
 /// that flag's operand is a script, not a program path, and herdr does
 /// not treat it as the agent either. A `c` later in the cluster does
-/// not hide the program (`-xco pipefail claude` is still claude). `nu`
-/// is not unwrapped. `cmd` is a shell only when an
-/// argument vector is present, so a payload that omits `argv` and
-/// `cmdline` does not start calling every `cmd.exe` a crash. One
+/// not hide the program (`-xco pipefail claude` is still claude). `nu`,
+/// `elvish`, and `xonsh` are not unwrapped: herdr does not read a script
+/// path on those shells, so a later argument stays the prompt. `cmd` is
+/// a shell only when an argument vector is present, so a payload that
+/// omits `argv` and `cmdline` does not start calling every `cmd.exe` a
+/// crash. One
 /// non-shell in the group keeps the row alive; the caller applies that.
 private enum ShellForeground {
     private enum Kind {
@@ -394,7 +398,7 @@ private enum ShellForeground {
         guard let name else { return false }
         return [
             "zsh", "bash", "sh", "fish", "tcsh", "ksh", "dash", "ash", "mksh", "csh",
-            "nu", "pwsh", "powershell", "login",
+            "nu", "elvish", "xonsh", "pwsh", "powershell", "login",
         ].contains(shellBase(name))
     }
 
@@ -436,7 +440,8 @@ private enum ShellForeground {
     /// because a login argv0 can be `-zsh` while the comm is `MainThread`.
     /// `dash`, `ksh`, `csh`, `tcsh`, `ash`, and `mksh` use the same script
     /// rule as `sh`: the first word that is not a flag is the program.
-    /// `nu` is not here. A later path is not how that pane is still an agent.
+    /// `nu`, `elvish`, and `xonsh` are not here. A later path is not how
+    /// that pane is still an agent.
     private static func unwrappingKind(_ process: ForegroundProcess) -> Kind? {
         let args = launchArguments(process)
         let candidates = [args?.first, process.argv0, process.name]

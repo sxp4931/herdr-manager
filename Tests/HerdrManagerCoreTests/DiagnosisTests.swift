@@ -1451,6 +1451,75 @@ struct DiagnoserFinishedClassificationTests {
         #expect(finished == .running)
     }
 
+    @Test("Elvish and xonsh are the shell a crashed agent leaves")
+    func elvishAndXonshAreProcessGone() async {
+        let working = Agent(id: AgentID("w1:p1"), kind: .claude, status: .working)
+        let diagnoser = Diagnoser()
+
+        func observe(_ processes: [ForegroundProcess]) async -> ProcessGoneObservation {
+            await diagnoser.observeProcessGone(
+                agent: working,
+                adapter: MockHerdrAdapter(processInfoResult: ProcessInfoResult(
+                    shellPid: 10,
+                    foregroundProcesses: processes
+                ))
+            )
+        }
+
+        // herdr's pane-shell check names both. A dead agent leaves that
+        // process, including a login argv0, a path, and `.exe`.
+        let elvish = await observe([
+            ForegroundProcess(pid: 91, name: "elvish", argv0: nil, cmdline: nil, cwd: nil)
+        ])
+        #expect(elvish == .gone(lastLine: "elvish (pid 91)"))
+        let loginElvish = await observe([
+            ForegroundProcess(pid: 92, name: "MainThread", argv0: "-elvish", cmdline: nil, cwd: nil)
+        ])
+        #expect(loginElvish == .gone(lastLine: "MainThread (pid 92)"))
+        let elvishPath = await observe([
+            ForegroundProcess(
+                pid: 93, name: "MainThread", argv0: "/usr/bin/elvish", cmdline: nil, cwd: nil
+            )
+        ])
+        #expect(elvishPath == .gone(lastLine: "MainThread (pid 93)"))
+        let xonsh = await observe([
+            ForegroundProcess(pid: 94, name: "Xonsh.EXE", argv0: nil, cmdline: nil, cwd: nil)
+        ])
+        #expect(xonsh == .gone(lastLine: "Xonsh.EXE (pid 94)"))
+
+        // herdr does not unwrap a script on these shells. The path is not
+        // the agent, the same as `nu /tmp/claude`.
+        let elvishScript = await observe([
+            ForegroundProcess(
+                pid: 95, name: "elvish", argv0: nil, cmdline: nil, cwd: nil,
+                argv: ["elvish", "/usr/bin/claude"]
+            )
+        ])
+        #expect(elvishScript == .gone(lastLine: "elvish (pid 95)"))
+        let xonshScript = await observe([
+            ForegroundProcess(
+                pid: 96, name: "xonsh", argv0: "-xonsh", cmdline: nil, cwd: nil,
+                argv: ["-xonsh", "/usr/local/bin/codex"]
+            )
+        ])
+        #expect(xonshScript == .gone(lastLine: "xonsh (pid 96)"))
+
+        // A name that only begins with the shell, and a runtime beside it, stay.
+        let elvishrc = await observe([
+            ForegroundProcess(pid: 97, name: "elvishrc", argv0: nil, cmdline: nil, cwd: nil)
+        ])
+        #expect(elvishrc == .running)
+        let xonshy = await observe([
+            ForegroundProcess(pid: 98, name: "xonshy", argv0: nil, cmdline: nil, cwd: nil)
+        ])
+        #expect(xonshy == .running)
+        let mixed = await observe([
+            ForegroundProcess(pid: 91, name: "elvish", argv0: nil, cmdline: nil, cwd: nil),
+            ForegroundProcess(pid: 99, name: "node", argv0: "/usr/local/bin/node", cmdline: nil, cwd: nil),
+        ])
+        #expect(mixed == .running)
+    }
+
     @Test("A shell whose argv launches an agent is still that agent")
     func shellWrapperIsNotProcessGone() async {
         let working = Agent(id: AgentID("w1:p1"), kind: .claude, status: .working)
