@@ -105,6 +105,84 @@ struct SecretRedactorTests {
         #expect(result.redactedText.contains("Bearer [REDACTED]"))
     }
 
+    @Test("A lowercase bearer scheme and a raw JWT are redacted once")
+    func redactsBearerCaseAndRawJWT() {
+        let redactor = SecretRedactor()
+        let opaque = "opaquetoken" + "1234567890"
+        let jwt = "eyJ" + "aaaaaaaaaa" + "." + "bbbbbbbbbb" + "." + "cccccccccc"
+
+        let lower = redactor.redact("Authorization: bearer \(opaque)")
+        #expect(lower.redactedText == "Authorization: Bearer [REDACTED]")
+        #expect(lower.redactionCount == 1)
+        #expect(!lower.redactedText.contains(opaque))
+        let lowerAgain = redactor.redact(lower.redactedText)
+        #expect(lowerAgain.redactedText == lower.redactedText)
+        #expect(lowerAgain.redactionCount == 0)
+
+        let upper = redactor.redact("Proxy-Authorization: BEARER \(opaque)")
+        #expect(upper.redactedText == "Proxy-Authorization: Bearer [REDACTED]")
+        #expect(upper.redactionCount == 1)
+
+        // The scheme and the token may sit inside a JSON string. The
+        // closing quote stays, so a second pass still sees a boundary.
+        let quoted = redactor.redact(#"{"Authorization": "bearer \#(opaque)"}"#)
+        #expect(quoted.redactedText == #"{"Authorization": "Bearer [REDACTED]"}"#)
+        #expect(quoted.redactionCount == 1)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        // A JWT after the scheme is the bearer token, not a second secret.
+        let wrapped = redactor.redact("authorization: bearer \(jwt)")
+        #expect(wrapped.redactedText == "authorization: Bearer [REDACTED]")
+        #expect(wrapped.redactionCount == 1)
+        #expect(!wrapped.redactedText.contains("aaaaaaaaaa"))
+        #expect(!wrapped.redactedText.contains("cccccccccc"))
+
+        let raw = redactor.redact("session \(jwt) done")
+        #expect(raw.redactedText == "session eyJ[REDACTED] done")
+        #expect(raw.redactionCount == 1)
+        #expect(!raw.redactedText.contains("bbbbbbbbbb"))
+        let rawAgain = redactor.redact(raw.redactedText)
+        #expect(rawAgain.redactedText == raw.redactedText)
+        #expect(rawAgain.redactionCount == 0)
+
+        // The whole value is the token, so the assignment does not count it again.
+        let assigned = redactor.redact("token=\(jwt)")
+        #expect(assigned.redactedText == "token=eyJ[REDACTED]")
+        #expect(assigned.redactionCount == 1)
+        let assignedJSON = redactor.redact(#"{"id_token": "\#(jwt)"}"#)
+        #expect(assignedJSON.redactedText == #"{"id_token": "eyJ[REDACTED]"}"#)
+        #expect(assignedJSON.redactionCount == 1)
+        let assignedAgain = redactor.redact(assignedJSON.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+
+        let pair = redactor.redact("\(jwt) \(jwt)")
+        #expect(pair.redactionCount == 2)
+        #expect(pair.redactedText == "eyJ[REDACTED] eyJ[REDACTED]")
+
+        // Five segments are one compact JWE, not three tokens.
+        let jwe = redactor.redact(jwt + "." + "dddddddddd" + "." + "eeeeeeeeee")
+        #expect(jwe.redactedText == "eyJ[REDACTED]")
+        #expect(jwe.redactionCount == 1)
+        let jweAgain = redactor.redact(jwe.redactedText)
+        #expect(jweAgain.redactionCount == 0)
+
+        // Below the segment floor, or missing a segment, this is not a JWT.
+        // The short dotted example still needs the word Bearer. An empty
+        // segment (`..`) is not one either.
+        let shortSegment = "eyJ" + "aaaaaaaaa" + "." + "bbbbbbbbbb" + "." + "cccccccccc"
+        let twoSegments = "eyJ" + "aaaaaaaaaa" + "." + "bbbbbbbbbb"
+        let dottedExample = "eyJhbGciOiJIUzI1NiJ9.test.sig"
+        let emptySegment = "eyJ" + "aaaaaaaaaa" + ".." + "bbbbbbbbbb" + "." + "cccccccccc" + "." + "dddddddddd"
+        let glued = "xx" + jwt
+        let gluedScheme = "notbearer " + opaque
+        for kept in [shortSegment, twoSegments, dottedExample, emptySegment, glued, gluedScheme] {
+            let result = redactor.redact(kept)
+            #expect(result.redactedText == kept)
+            #expect(result.redactionCount == 0)
+        }
+    }
+
     @Test("No false positives on clean text")
     func cleanText() {
         let redactor = SecretRedactor()

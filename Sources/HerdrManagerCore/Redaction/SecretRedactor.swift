@@ -48,8 +48,19 @@ public final class SecretRedactor: Sendable {
             ("xox[baprs]-[A-Za-z0-9-]{10,}", "xox[REDACTED]"),
             // AWS access key IDs
             ("AKIA[0-9A-Z]{16}", "AKIA[REDACTED]"),
-            // Bearer tokens in headers
-            ("Bearer\\s+[A-Za-z0-9\\-._~+/]+=*", "Bearer [REDACTED]"),
+            // Bearer scheme. HTTP treats the scheme as case-insensitive,
+            // and pane logs paste `authorization: bearer …`. A letter,
+            // digit, or underscore glued to the front is not the scheme
+            // (`notbearer` stays). The token alphabet is unchanged, and
+            // it includes `.`, so a JWT after this word is one redaction.
+            // The payload is not left for the pattern below.
+            ("(?<![A-Za-z0-9_])[Bb][Ee][Aa][Rr][Ee][Rr]\\s+[A-Za-z0-9\\-._~+/]+=*", "Bearer [REDACTED]"),
+            // Compact JWS or JWE with no scheme. The header is base64url
+            // of JSON, so the token starts with `eyJ`. Each segment is at
+            // least 10 characters and there are at least three, so a short
+            // dotted example (`.test.sig`) is not this token. An empty
+            // segment (`..`) stays: the piece between the dots is missing.
+            ("(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}(?:\\.[A-Za-z0-9_-]{10,}){2,}", "eyJ[REDACTED]"),
             // PEM private keys
             ("-----BEGIN[A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END[A-Z ]*PRIVATE KEY-----", "[REDACTED PRIVATE KEY]"),
         ]
