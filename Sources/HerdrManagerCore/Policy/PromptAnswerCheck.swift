@@ -10,7 +10,9 @@ import Foundation
 ///
 /// The app re-reads `agent.list` right before the send, and this check asks
 /// whether the prompt the row showed is still the one waiting. It is the
-/// panel's counterpart to the seq check MCP `agent.answer` makes.
+/// panel's counterpart to the seq check MCP `agent.answer` makes. When the
+/// click captured a session, the pane still has to be that session: the
+/// same kind blocked on the same seq can be a different occupant.
 ///
 /// The re-read can already show a cross-workspace move: the row's pane id
 /// is gone and the same session is blocked on the new id. `sessionIdentity`
@@ -74,12 +76,21 @@ public enum PromptAnswerCheck: Sendable {
 
     /// The pane id the keys should be sent to, or why they should not.
     ///
-    /// The row's own id wins when that pane still runs an agent. A move
-    /// drops it. The captured session then has to name exactly one other
-    /// agent, and that agent still has to be the blocked episode the row
-    /// showed. A different kind, a status that left blocked, or a different
-    /// seq refuses. The returned id is the one to address: sending to
-    /// `shown.id` would hit the pane the agent left.
+    /// The row's own id wins when that pane still runs the occupant the
+    /// click captured. Kind, status, and seq are not that occupant: a
+    /// herdr restart, or a new session in the same pane, can be the same
+    /// kind, still blocked, on the same seq. When `sessionIdentity` was
+    /// captured, a different session refuses, and so does a re-read that
+    /// no longer names one. The keys do not follow the old session onto
+    /// another pane while this pane still runs an agent. Callers that
+    /// captured no identity keep the kind comparison — there is no
+    /// session to require.
+    ///
+    /// A move drops the pane. The captured session then has to name
+    /// exactly one other agent, and that agent still has to be the blocked
+    /// episode the row showed. A different kind, a status that left
+    /// blocked, or a different seq refuses. The returned id is the one to
+    /// address: sending to `shown.id` would hit the pane the agent left.
     public static func destination(
         answering shown: Agent,
         in snapshot: HerdSnapshot,
@@ -87,6 +98,15 @@ public enum PromptAnswerCheck: Sendable {
     ) -> Result<String, Refusal> {
         let currentInfo: HerdrAgentInfo?
         if let same = snapshot.agents.first(where: { $0.paneId == shown.id.raw && Self.isListedAgent($0) }) {
+            if let sessionIdentity, !sessionIdentity.isEmpty {
+                // Missing and different are the same refusal. A list that
+                // drops `agent_session` is not proof this is still the
+                // occupant, and a longer value (`abc|extra`) is not `abc`.
+                guard let currentSession = same.sessionIdentity,
+                      currentSession == sessionIdentity else {
+                    return .failure(.agentReplaced)
+                }
+            }
             currentInfo = same
         } else if let sessionIdentity, !sessionIdentity.isEmpty,
                   let followed = ConfirmedPaneFollow.uniqueSuccessor(

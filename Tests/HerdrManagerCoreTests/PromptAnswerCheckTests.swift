@@ -129,6 +129,86 @@ struct PromptAnswerCheckTests {
         #expect(refusal == .agentReplaced)
     }
 
+    @Test("A different session in the same pane refuses, even at the same seq and kind")
+    func replacedSessionRefuses() throws {
+        let occupant = session("abc")
+        let shown = try shownRow(after: herd([info(status: "blocked", seq: 5, session: occupant)]))
+        let identity = "agent|claude|session|abc"
+        // Same kind, still blocked, same seq. Kind does not name the occupant.
+        let replaced = herd([info(status: "blocked", seq: 5, session: session("xyz"), title: "Claude")])
+        #expect(
+            PromptAnswerCheck.destination(answering: shown, in: replaced, sessionIdentity: identity)
+                == .failure(.agentReplaced)
+        )
+        // The old session is also sitting on another pane. This pane still
+        // runs an agent, so the keys stay here and refuse. They do not follow.
+        let elsewhere = herd([
+            info(status: "blocked", seq: 5, session: session("xyz")),
+            info(pane: "wB:p4", status: "blocked", seq: 5, session: occupant),
+        ])
+        #expect(
+            PromptAnswerCheck.destination(answering: shown, in: elsewhere, sessionIdentity: identity)
+                == .failure(.agentReplaced)
+        )
+        // A value that continues with `|` is a different occupant.
+        #expect(
+            PromptAnswerCheck.destination(
+                answering: shown,
+                in: herd([info(status: "blocked", seq: 5, session: session("abc|extra"))]),
+                sessionIdentity: identity
+            ) == .failure(.agentReplaced)
+        )
+        // A re-read that drops the session is not the captured occupant.
+        #expect(
+            PromptAnswerCheck.destination(
+                answering: shown,
+                in: herd([info(status: "blocked", seq: 5)]),
+                sessionIdentity: identity
+            ) == .failure(.agentReplaced)
+        )
+    }
+
+    @Test("The same session still in the pane may be answered, including a renamed title")
+    func sameSessionPasses() throws {
+        let shown = try shownRow(after: herd([
+            info(status: "blocked", seq: 5, session: session("abc|extra")),
+        ]))
+        let identity = "agent|claude|session|abc|extra"
+        #expect(
+            PromptAnswerCheck.destination(
+                answering: shown,
+                in: herd([info(status: "blocked", seq: 5, session: session("abc|extra"), title: "Renamed")]),
+                sessionIdentity: identity
+            ) == .success(paneId)
+        )
+        // Same occupant, new episode: not "a different agent".
+        #expect(
+            PromptAnswerCheck.destination(
+                answering: shown,
+                in: herd([info(status: "working", seq: 6, session: session("abc|extra"))]),
+                sessionIdentity: identity
+            ) == .failure(.notBlocked(now: .working))
+        )
+        #expect(
+            PromptAnswerCheck.destination(
+                answering: shown,
+                in: herd([info(status: "blocked", seq: 9, session: session("abc|extra"))]),
+                sessionIdentity: identity
+            ) == .failure(.promptChanged)
+        )
+    }
+
+    @Test("Without a captured session, same kind and seq still pass")
+    func omittedIdentityKeepsTheKindCheck() throws {
+        let shown = try shownRow(after: herd([info(status: "blocked", seq: 5, session: session("abc"))]))
+        #expect(
+            PromptAnswerCheck.destination(
+                answering: shown,
+                in: herd([info(status: "blocked", seq: 5, session: session("xyz"))])
+            ) == .success(paneId)
+        )
+    }
+
     @Test("A row blocked by a seq-less status event refuses once, then passes after the fresh snapshot is applied")
     func seqlessEventRefusesUntilApplied() throws {
         let store = AgentStore()
