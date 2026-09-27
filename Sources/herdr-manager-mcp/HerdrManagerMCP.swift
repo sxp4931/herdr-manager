@@ -397,12 +397,7 @@ actor MCPServer {
             let wsName = herd.workspaceNames[info.workspaceId] ?? info.workspaceId
             let tabName = herd.tabNames[info.tabId] ?? info.tabId
 
-            let kind: AgentKind
-            if let session = info.agentSession {
-                kind = AgentKind.custom(session.agent)
-            } else {
-                kind = AgentKind.custom(agentKind)
-            }
+            let kind = AgentKind.resolved(sessionAgent: info.agentSession?.agent, detected: agentKind)
 
             let name = AgentLabel.preferred(
                 title: info.title,
@@ -2166,10 +2161,18 @@ actor MCPServer {
         if info.launchPending {
             lines.append("Launch pending: yes")
         }
-        if let session = info.agentSession {
-            lines.append("Kind: \(session.agent) (source: \(session.source))")
-        } else if let agent = info.agent {
-            lines.append("Kind: \(agent)")
+        if let detected = AgentLabel.nonempty(info.agent) {
+            // Same rule as the row. An empty session agent is not a kind,
+            // and an empty session value is not a reason to hide the
+            // detected one behind a blank source.
+            let name = AgentLabel.nonempty(info.agentSession?.agent) ?? detected
+            let namesSession = info.agentSession?.identity != nil
+                || AgentLabel.nonempty(info.agentSession?.agent) != nil
+            if namesSession, let source = info.agentSession.flatMap({ AgentLabel.nonempty($0.source) }) {
+                lines.append("Kind: \(name) (source: \(source))")
+            } else {
+                lines.append("Kind: \(name)")
+            }
         }
         if let cwd = AgentLabel.nonempty(info.cwd) {
             lines.append("CWD: \(cwd)")

@@ -62,6 +62,16 @@ public enum AgentKind: Sendable, Equatable {
         case .custom(let s): return s.lowercased()
         }
     }
+
+    /// The runtime a row shows. `sessionAgent` wins when herdr named one.
+    /// An empty string is not a name: a session object with the key omitted
+    /// parses as `""`, and `.custom("")` is a different settings fingerprint
+    /// from the detected kind, and a blank kind in the menu bar and herdmgr.
+    /// `detected` is the non-empty `agent` the caller already accepted, or
+    /// `"unknown"` when a snapshot had neither.
+    public static func resolved(sessionAgent: String?, detected: String) -> AgentKind {
+        .custom(AgentLabel.nonempty(sessionAgent) ?? detected)
+    }
 }
 
 // MARK: - BlockKind
@@ -610,19 +620,25 @@ public struct HerdrAgentInfo: Sendable, Equatable {
 
     /// Who is in this pane, for write revalidation. Prefers herdr's
     /// agent-session id (`source|agent|kind|value`) so two agents of the
-    /// same kind in the same pane still differ. Falls back to kind and
-    /// title only when no session id is present. An empty title, name, or
-    /// terminal title is not a label: herdr sends `""` for a cleared
-    /// field, and treating it as present made this same occupant look
-    /// new. That reset the answer cap and refused the write. `display_agent`
-    /// stays out of this string. It is a presentation label, and the
-    /// fingerprints already stored on pending actions do not include it.
-    /// The string is the value stored on pending actions as `_fp_occupant`.
-    /// The pane id is part of the string, so a cross-workspace move does
-    /// not compare equal.
+    /// same kind in the same pane still differ. An empty session value is
+    /// not that id. herdr omits `agent_session` when no native session is
+    /// stored, and a present object whose value is `""` is the same
+    /// observation. Treating the object as a session ignored the title, so
+    /// two session-less occupants in one pane compared equal, and a list
+    /// that included the empty object disagreed with one that left it off.
+    /// That reset the answer cap and refused the write, or let the write
+    /// through. Falls back to kind and title only when no session id is
+    /// present. An empty title, name, or terminal title is not a label:
+    /// herdr sends `""` for a cleared field, and treating it as present
+    /// made this same occupant look new. `display_agent` stays out of this
+    /// string. It is a presentation label, and the fingerprints already
+    /// stored on pending actions do not include it. The string is the
+    /// value stored on pending actions as `_fp_occupant`. The pane id is
+    /// part of the string, so a cross-workspace move does not compare equal.
+    /// A value that is only whitespace is still an id.
     public var occupantFingerprint: String {
-        if let session = agentSession {
-            return "session|\(session.source)|\(session.agent)|\(session.kind)|\(session.value)|\(paneId)"
+        if let identity = agentSession?.identity {
+            return "session|\(identity)|\(paneId)"
         }
         let kind = agent ?? "unknown"
         // Same absence rule as the row's name, minus `display_agent`.
@@ -776,12 +792,7 @@ public struct HerdSnapshot: Sendable {
     public func displayAgent(for info: HerdrAgentInfo, now: Date = Date()) -> Agent? {
         guard !info.paneId.isEmpty else { return nil }
         guard let agentKind = info.agent, !agentKind.isEmpty else { return nil }
-        let kind: AgentKind
-        if let session = info.agentSession {
-            kind = .custom(session.agent)
-        } else {
-            kind = .custom(agentKind)
-        }
+        let kind = AgentKind.resolved(sessionAgent: info.agentSession?.agent, detected: agentKind)
         let name = AgentLabel.preferred(
             title: info.title,
             displayAgent: info.displayAgent,

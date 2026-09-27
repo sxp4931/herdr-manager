@@ -214,14 +214,8 @@ public final class AgentStore {
                 enteredAt = Date()
             }
 
-            let kind: AgentKind
-            if let session = pane.agentSession {
-                kind = AgentKind.custom(session.agent)
-            } else if let agentName = pane.agent {
-                kind = AgentKind.custom(agentName)
-            } else {
-                kind = .custom("unknown")
-            }
+            let detected = AgentLabel.nonempty(pane.agent) ?? "unknown"
+            let kind = AgentKind.resolved(sessionAgent: pane.agentSession?.agent, detected: detected)
 
             let name = pane.agent ?? pane.terminalTitleStripped ?? ""
 
@@ -423,12 +417,7 @@ public final class AgentStore {
                 && (seqUnchanged || (prior == nil && priorBasis?.continuesEpisode == true))
             let enteredAt = sameEpisode ? existing!.enteredAt : Date()
 
-            let kind: AgentKind
-            if let session = info.agentSession {
-                kind = .custom(session.agent)
-            } else {
-                kind = .custom(agentKind)
-            }
+            let kind = AgentKind.resolved(sessionAgent: info.agentSession?.agent, detected: agentKind)
 
             let name = AgentLabel.preferred(
                 title: info.title,
@@ -954,12 +943,7 @@ public final class AgentStore {
                 )
             }
 
-            let kind: AgentKind
-            if let session = info.agentSession {
-                kind = .custom(session.agent)
-            } else {
-                kind = .custom(agentKind)
-            }
+            let kind = AgentKind.resolved(sessionAgent: info.agentSession?.agent, detected: agentKind)
             let storedAlias = occupantReplaced ? nil : aliasByPane[agentId]
             if occupantReplaced {
                 aliasByPane.removeValue(forKey: agentId)
@@ -1124,12 +1108,7 @@ public final class AgentStore {
             stateChangeSeq = existing?.stateChangeSeq ?? 0
         }
 
-        let kind: AgentKind
-        if let session = info.agentSession {
-            kind = .custom(session.agent)
-        } else {
-            kind = .custom(agentKind)
-        }
+        let kind = AgentKind.resolved(sessionAgent: info.agentSession?.agent, detected: agentKind)
         let storedAlias = occupantReplaced
             ? nil
             : (aliasByPane[previousId] ?? (previousId == newId ? nil : aliasByPane[newId]))

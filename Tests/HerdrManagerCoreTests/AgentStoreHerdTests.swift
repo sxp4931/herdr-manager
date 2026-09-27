@@ -3409,3 +3409,58 @@ struct AgentRenameTests {
         #expect(store.agents[id]?.name == "New task")
     }
 }
+
+@Suite("An empty session object is not a kind")
+struct EmptySessionKindTests {
+    @Test("A blank session keeps the detected kind on the list, the update, and the move")
+    @MainActor
+    func blankSessionKeepsDetectedKind() throws {
+        let store = AgentStore()
+        let blank = HerdrSnapshot.AgentSession(source: "", agent: "", kind: "", value: "")
+        let stamp = store.captureHerdRequest()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(
+                paneId: "wA:p1", agent: "claude", agentStatus: "blocked", stateChangeSeq: 5,
+                title: "Review", session: blank
+            )
+        ]), requestedAtEpoch: stamp.epoch, requestedAtSerial: stamp.serial)
+        let id = AgentID("wA:p1")
+        let row = try #require(store.agents[id])
+        #expect(row.kind == .custom("claude"))
+        #expect(row.sessionIdentity == nil)
+        #expect(DwellTracker.fingerprint(for: row) == "custom:claude")
+
+        #expect(store.applyEvent(.paneUpdated(makeAgentInfo(
+            paneId: "wA:p1", agent: "claude", agentStatus: "blocked", stateChangeSeq: 0,
+            title: "Review", session: blank
+        ))) == nil)
+        #expect(store.agents[id]?.kind == .custom("claude"))
+        #expect(store.agents[id]?.enteredAt == row.enteredAt)
+
+        #expect(store.applyEvent(.paneMoved(
+            previousPaneId: "wA:p1",
+            pane: makeAgentInfo(
+                paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2",
+                agent: "claude", agentStatus: "blocked", stateChangeSeq: 0,
+                title: "Review", session: blank
+            ),
+            createdWorkspaceLabel: nil,
+            createdTabLabel: nil
+        )) == nil)
+        let moved = try #require(store.agents[AgentID("wB:p4")])
+        #expect(moved.kind == .custom("claude"))
+        #expect(DwellTracker.fingerprint(for: moved) == "custom:claude")
+        #expect(store.agents[id] == nil)
+
+        let named = HerdrSnapshot.AgentSession(
+            source: "herdr:codex", agent: "codex", kind: "id", value: "019f"
+        )
+        #expect(store.applyEvent(.paneUpdated(makeAgentInfo(
+            paneId: "wB:p4", workspaceId: "wB", tabId: "wB:t2",
+            agent: "claude", agentStatus: "blocked", stateChangeSeq: 0,
+            title: "Review", session: named
+        ))) == nil)
+        #expect(store.agents[AgentID("wB:p4")]?.kind == .custom("codex"))
+        #expect(store.sessionIdentity(for: AgentID("wB:p4")) == "herdr:codex|codex|id|019f")
+    }
+}

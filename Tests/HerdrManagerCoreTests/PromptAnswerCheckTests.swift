@@ -427,6 +427,46 @@ struct AnswerSendCheckTests {
         #expect(cleared.displayAgent == "codex")
     }
 
+    @Test("An empty session value is not an occupant, so the title is")
+    func emptySessionValueUsesTheTitle() {
+        let cleared = info(
+            agent: "codex", status: "blocked", seq: 1,
+            session: session(""), title: "Review", name: "reviewer"
+        )
+        let omitted = info(
+            agent: "codex", status: "blocked", seq: 1,
+            title: "Review", name: "reviewer"
+        )
+        #expect(cleared.sessionIdentity == nil)
+        #expect(cleared.occupantFingerprint == "fallback|codex|Review|wA:p1")
+        #expect(cleared.occupantFingerprint == omitted.occupantFingerprint)
+        #expect(AnswerSendCheck.refusal(sendingTo: cleared, in: herd([omitted])) == nil)
+
+        let otherTitle = info(
+            agent: "codex", status: "blocked", seq: 1,
+            session: session(""), title: "Other"
+        )
+        #expect(
+            AnswerSendCheck.refusal(sendingTo: cleared, in: herd([otherTitle])) == .occupantChanged
+        )
+
+        // A present object whose fields were all omitted parses as empty
+        // strings. That is the same occupant as no object.
+        let blank = HerdrSnapshot.AgentSession(source: "", agent: "", kind: "", value: "")
+        let parsed = info(
+            agent: "codex", status: "blocked", seq: 1,
+            session: blank, title: "Review", name: "reviewer"
+        )
+        #expect(parsed.occupantFingerprint == omitted.occupantFingerprint)
+        #expect(AgentKind.resolved(sessionAgent: blank.agent, detected: "codex") == .custom("codex"))
+
+        // Whitespace is still an id. Trimming it would join two values that
+        // were stored as different strings.
+        let spaced = info(status: "blocked", seq: 1, session: session(" "), title: "Review")
+        #expect(spaced.sessionIdentity == "agent|claude|session| ")
+        #expect(spaced.occupantFingerprint == "session|agent|claude|session| |wA:p1")
+    }
+
     @Test("A cleared title still matches the rename on the re-read before the keys")
     func emptyTitleMatchesTheRename() {
         let observed = info(
@@ -660,6 +700,18 @@ struct ConfirmedPaneFollowTests {
         let empty = info(status: "working", seq: 4, session: session(""))
         let emptyMoved = info(pane: "wB:p4", status: "working", seq: 4, session: session(""))
         #expect(resolve(empty, in: [emptyMoved]) == .failure(.paneGone))
+
+        let titled = info(status: "working", seq: 4, session: session(""), title: "Review")
+        let omitted = info(status: "working", seq: 4, title: "Review")
+        #expect(resolve(titled, in: [omitted]) == .success(omitted))
+        let otherTitle = info(status: "working", seq: 4, session: session(""), title: "Other")
+        #expect(
+            resolve(titled, in: [otherTitle])
+                == .failure(.occupantChanged(
+                    expected: titled.occupantFingerprint,
+                    current: otherTitle.occupantFingerprint
+                ))
+        )
     }
 
     @Test("A shell is not a successor, and a shell left at the old id does not block the move")
@@ -823,6 +875,11 @@ struct GatedSayFollowTests {
             resolve(empty, in: [info(pane: "wB:p4", status: "idle", seq: 4, session: session(""))])
                 == .failure(.agentGone)
         )
+        let titled = info(status: "idle", seq: 4, session: session(""), title: "Review")
+        let omitted = info(status: "idle", seq: 4, title: "Review")
+        #expect(resolve(titled, in: [omitted]) == .success(omitted))
+        let otherTitle = info(status: "idle", seq: 4, session: session(""), title: "Other")
+        #expect(resolve(titled, in: [otherTitle]) == .failure(.occupantChanged))
 
         let longer = info(pane: "wB:p4", status: "idle", seq: 4, session: session("abc|extra"))
         #expect(resolve(idle, in: [longer]) == .failure(.agentGone))

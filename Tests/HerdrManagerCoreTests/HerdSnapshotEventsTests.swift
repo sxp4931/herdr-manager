@@ -649,4 +649,74 @@ struct HerdSnapshotEventsTests {
         )
         #expect(snap.displayAgent(for: aliasOnly)?.name == "reviewer")
     }
+
+    @Test("An empty session agent is not a kind")
+    func emptySessionAgentUsesDetectedKind() {
+        let blank = HerdrSnapshot.AgentSession(source: "", agent: "", kind: "", value: "")
+        let info = makeEventAgentInfo(
+            paneId: "wA:p1",
+            agent: "claude",
+            agentStatus: "working",
+            stateChangeSeq: 3,
+            title: "Review",
+            session: blank
+        )
+        let snap = HerdSnapshot(
+            version: "0.7.5", protocol: 17,
+            agents: [info],
+            workspaceNames: ["wA": "Cuedora", "wB": "Beta"],
+            tabNames: ["wA:t1": "main", "wB:t2": "logs"],
+            focusedWorkspaceId: nil, focusedTabId: nil, focusedPaneId: nil
+        )
+        #expect(snap.displayAgent(for: info)?.kind == .custom("claude"))
+
+        let row = Agent(
+            id: AgentID("wA:p1"),
+            kind: .custom("claude"),
+            name: "Review",
+            displayName: "Review",
+            status: .working,
+            stateChangeSeq: 3,
+            enteredAt: now,
+            workspaceName: "Cuedora",
+            tabName: "main"
+        )
+        let updated = snap.applying(.paneUpdated(makeEventAgentInfo(
+            paneId: "wA:p1",
+            agent: "claude",
+            agentStatus: "working",
+            stateChangeSeq: 0,
+            title: "Review",
+            session: blank
+        )), to: [row], now: now)
+        #expect(updated.first?.kind == .custom("claude"))
+        #expect(updated.first?.enteredAt == now)
+
+        let moved = snap.applying(.paneMoved(
+            previousPaneId: "wA:p1",
+            pane: makeEventAgentInfo(
+                paneId: "wB:p4",
+                workspaceId: "wB",
+                tabId: "wB:t2",
+                agent: "claude",
+                agentStatus: "working",
+                stateChangeSeq: 0,
+                title: "Review",
+                session: blank
+            ),
+            createdWorkspaceLabel: nil,
+            createdTabLabel: nil
+        ), to: [row], now: now)
+        #expect(moved.first?.id.raw == "wB:p4")
+        #expect(moved.first?.kind == .custom("claude"))
+
+        let named = HerdrSnapshot.AgentSession(
+            source: "herdr:codex", agent: "codex", kind: "id", value: "019f"
+        )
+        let preferred = snap.displayAgent(for: makeEventAgentInfo(
+            paneId: "wA:p1", agent: "claude", agentStatus: "working",
+            stateChangeSeq: 3, session: named
+        ))
+        #expect(preferred?.kind == .custom("codex"))
+    }
 }

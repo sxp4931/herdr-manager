@@ -215,12 +215,7 @@ extension HerdSnapshot {
         } else {
             stateChangeSeq = existing?.stateChangeSeq ?? 0
         }
-        let kind: AgentKind
-        if let session = info.agentSession {
-            kind = .custom(session.agent)
-        } else {
-            kind = .custom(agentKind)
-        }
+        let kind = AgentKind.resolved(sessionAgent: info.agentSession?.agent, detected: agentKind)
         // A list that already contains the destination is the authority for
         // `name`. The id the row is leaving still has the old rename, and
         // carrying it would undo `agent rename --clear` on the refetch that
@@ -285,8 +280,9 @@ extension HerdSnapshot {
     ///
     /// The name uses `AgentLabel`: a metadata title, then `display_agent`,
     /// then `alias` (the rename from the last list), then the stripped
-    /// terminal title. An empty string is absent. Kind prefers the session's
-    /// agent when that string is non-empty, then the detected `agent`.
+    /// terminal title. An empty string is absent. Kind is
+    /// `AgentKind.resolved`: the session's agent when that string is
+    /// non-empty, then the detected `agent`.
     /// Directory prefers `foreground_cwd`. Workspace and tab update only
     /// when this snapshot already has a label for the id, so a raw id cannot
     /// replace a name the move just created. When every name source is
@@ -298,11 +294,7 @@ extension HerdSnapshot {
         preservingExistingName: Bool
     ) {
         guard let agentKind = info.agent, !agentKind.isEmpty else { return }
-        if let session = info.agentSession, !session.agent.isEmpty {
-            agent.kind = .custom(session.agent)
-        } else {
-            agent.kind = .custom(agentKind)
-        }
+        agent.kind = AgentKind.resolved(sessionAgent: info.agentSession?.agent, detected: agentKind)
         if let name = AgentLabel.preferred(
             title: info.title,
             displayAgent: info.displayAgent,
