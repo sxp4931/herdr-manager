@@ -28,6 +28,36 @@ public final class SecretRedactor: Sendable {
             // Stripe secret keys (underscores; generic sk- misses these)
             ("sk_live_[A-Za-z0-9]{20,}", "sk_live_[REDACTED]"),
             ("sk_test_[A-Za-z0-9]{20,}", "sk_test_[REDACTED]"),
+            // Stripe restricted keys. `sk_live_` does not name these, and
+            // a restricted key is the server credential the dashboard
+            // issues next to the secret key. The body is alphanumeric.
+            // Twenty characters is the floor `sk_live_` already uses; a
+            // shorter body stays. A letter, digit, or underscore glued
+            // to the front is not the prefix: `network_live_` and
+            // `mark_test_` contain these letters and are not keys.
+            // Publishable `pk_live_` is not a secret and is not this
+            // prefix. A `+` still ends the match.
+            (
+                "(?<![A-Za-z0-9_])rk_live_[A-Za-z0-9]{20,}",
+                "rk_live_[REDACTED]"
+            ),
+            (
+                "(?<![A-Za-z0-9_])rk_test_[A-Za-z0-9]{20,}",
+                "rk_test_[REDACTED]"
+            ),
+            // Webhook signing secrets. Stripe and Standard Webhooks
+            // (Svix, and the same prefix on a Clerk or Resend endpoint)
+            // use `whsec_`. The body is base64, so `+`, `/`, and `=`
+            // are part of the secret. The prefix stays. A body shorter
+            // than 20 stays. `-` or `_` is not consumed: a snake_case
+            // word is not a secret, and a body that continues with
+            // either of those stays whole instead of leaving a tail.
+            // A letter, digit, or underscore glued to the front is not
+            // the prefix.
+            (
+                "(?<![A-Za-z0-9_])whsec_[A-Za-z0-9+/=]{20,}(?![A-Za-z0-9+/=_-])",
+                "whsec_[REDACTED]"
+            ),
             // OpenAI / generic sk- keys
             ("sk-[A-Za-z0-9]{20,}", "sk-[REDACTED]"),
             // GitHub personal access tokens

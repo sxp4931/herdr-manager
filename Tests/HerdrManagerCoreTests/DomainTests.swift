@@ -1463,6 +1463,168 @@ struct SecretRedactorTests {
             #expect(result.redactedText == line)
         }
     }
+
+    @Test("Stripe restricted keys and webhook secrets are redacted once")
+    func redactsStripeRestrictedKeysAndWebhookSecrets() {
+        let redactor = SecretRedactor()
+        let body = "abcdefghijklmnopqrstuvwxyz0123"
+        let live = "rk" + "_live_" + body
+        let testKey = "rk" + "_test_" + body
+        let keptLive = "rk" + "_live_[REDACTED]"
+        let keptTest = "rk" + "_test_[REDACTED]"
+
+        let bare = redactor.redact("charged with \(live)")
+        #expect(bare.redactedText == "charged with \(keptLive)")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains(body))
+        let bareAgain = redactor.redact(bare.redactedText)
+        #expect(bareAgain.redactedText == bare.redactedText)
+        #expect(bareAgain.redactionCount == 0)
+
+        let sandbox = redactor.redact("sandbox \(testKey)")
+        #expect(sandbox.redactedText == "sandbox \(keptTest)")
+        #expect(sandbox.redactionCount == 1)
+        let sandboxAgain = redactor.redact(sandbox.redactedText)
+        #expect(sandboxAgain.redactionCount == 0)
+
+        let pair = redactor.redact("\(live) \(testKey)")
+        #expect(pair.redactedText == "\(keptLive) \(keptTest)")
+        #expect(pair.redactionCount == 2)
+        let pairAgain = redactor.redact(pair.redactedText)
+        #expect(pairAgain.redactionCount == 0)
+
+        // The secret key beside it keeps its own label. Both count.
+        let secret = "sk" + "_live_" + body
+        let keptSecret = "sk" + "_live_[REDACTED]"
+        let beside = redactor.redact("secret=\(secret) restricted=\(live)")
+        #expect(beside.redactedText == "secret=\(keptSecret) restricted=\(keptLive)")
+        #expect(beside.redactionCount == 2)
+        #expect(!beside.redactedText.contains(body))
+        let besideAgain = redactor.redact(beside.redactedText)
+        #expect(besideAgain.redactionCount == 0)
+
+        let assigned = redactor.redact("token=\(live)")
+        #expect(assigned.redactedText == "token=\(keptLive)")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        let quoted = redactor.redact(#"{"token": "\#(testKey)"}"#)
+        #expect(quoted.redactedText == #"{"token": "\#(keptTest)"}"#)
+        #expect(quoted.redactionCount == 1)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        let remote = redactor.redact("https://app:\(live)@api.stripe.com/v1")
+        #expect(remote.redactedText == "https://app:\(keptLive)@api.stripe.com/v1")
+        #expect(remote.redactionCount == 1)
+        #expect(!remote.redactedText.contains(body))
+        let remoteAgain = redactor.redact(remote.redactedText)
+        #expect(remoteAgain.redactedText == remote.redactedText)
+        #expect(remoteAgain.redactionCount == 0)
+
+        let floor = "rk" + "_live_" + String(repeating: "a", count: 20)
+        #expect(redactor.redact(floor).redactedText == keptLive)
+        let short = "rk" + "_live_" + String(repeating: "a", count: 19)
+        #expect(redactor.redact(short).redactedText == short)
+        let shortTest = "rk" + "_test_" + String(repeating: "b", count: 19)
+        #expect(redactor.redact(shortTest).redactedText == shortTest)
+
+        // The letters occur inside ordinary words. Those words stay.
+        let network = "network" + "_live_" + body
+        #expect(redactor.redact("mode \(network)").redactedText == "mode \(network)")
+        let mark = "mark" + "_test_" + body
+        #expect(redactor.redact(mark).redactedText == mark)
+
+        // Publishable keys are not this prefix.
+        let publishable = "pk" + "_live_" + body
+        let publishableTest = "pk" + "_test_" + body
+        #expect(redactor.redact(publishable).redactedText == publishable)
+        #expect(redactor.redact(publishableTest).redactedText == publishableTest)
+        let ephemeral = "ek" + "_live_" + body
+        #expect(redactor.redact(ephemeral).redactedText == ephemeral)
+
+        let upper = "RK" + "_LIVE_" + body
+        #expect(redactor.redact(upper).redactedText == upper)
+        let glued = "x" + live
+        #expect(redactor.redact(glued).redactedText == glued)
+        let underscored = "_" + live
+        #expect(redactor.redact(underscored).redactedText == underscored)
+        let sentence = redactor.redact("used \(live). next")
+        #expect(sentence.redactedText == "used \(keptLive). next")
+        #expect(sentence.redactionCount == 1)
+        // A `+` is not part of the key. The key is gone and the tail stays.
+        let plus = redactor.redact(live + "+note")
+        #expect(plus.redactedText == keptLive + "+note")
+        #expect(plus.redactionCount == 1)
+        #expect(!plus.redactedText.contains(body))
+
+        let hookBody = String(repeating: "c", count: 32)
+        let hook = "whsec" + "_" + hookBody
+        let hookKept = "whsec" + "_[REDACTED]"
+        let hookResult = redactor.redact("signing \(hook)")
+        #expect(hookResult.redactedText == "signing \(hookKept)")
+        #expect(hookResult.redactionCount == 1)
+        #expect(!hookResult.redactedText.contains(hookBody))
+        let hookAgain = redactor.redact(hookResult.redactedText)
+        #expect(hookAgain.redactedText == hookResult.redactedText)
+        #expect(hookAgain.redactionCount == 0)
+
+        // Base64 `+`, `/`, and padding are the secret, not a tail.
+        let mixed = "whsec" + "_" + "C2FVsBQIhrscChlQIMV" + "+b5sSYspob7oD" + "/w=="
+        let mixedResult = redactor.redact(mixed)
+        #expect(mixedResult.redactedText == hookKept)
+        #expect(mixedResult.redactionCount == 1)
+        #expect(!mixedResult.redactedText.contains("+b5s"))
+        #expect(!mixedResult.redactedText.contains("/w"))
+        #expect(!mixedResult.redactedText.contains("=="))
+        let mixedAgain = redactor.redact(mixedResult.redactedText)
+        #expect(mixedAgain.redactionCount == 0)
+
+        let hookAssigned = redactor.redact("token=\(hook)")
+        #expect(hookAssigned.redactedText == "token=\(hookKept)")
+        #expect(hookAssigned.redactionCount == 1)
+        let hookAssignedAgain = redactor.redact(hookAssigned.redactedText)
+        #expect(hookAssignedAgain.redactionCount == 0)
+        let hookJSON = redactor.redact(#"{"secret": "\#(hook)"}"#)
+        #expect(hookJSON.redactedText == #"{"secret": "\#(hookKept)"}"#)
+        #expect(hookJSON.redactionCount == 1)
+        let hookJSONAgain = redactor.redact(hookJSON.redactedText)
+        #expect(hookJSONAgain.redactionCount == 0)
+        let hookURL = redactor.redact("https://app:\(hook)@hooks.example/stripe")
+        #expect(hookURL.redactedText == "https://app:\(hookKept)@hooks.example/stripe")
+        #expect(hookURL.redactionCount == 1)
+        let hookURLAgain = redactor.redact(hookURL.redactedText)
+        #expect(hookURLAgain.redactionCount == 0)
+
+        let hookFloor = "whsec" + "_" + String(repeating: "d", count: 20)
+        #expect(redactor.redact(hookFloor).redactedText == hookKept)
+        let hookShort = "whsec" + "_" + String(repeating: "d", count: 19)
+        #expect(redactor.redact(hookShort).redactedText == hookShort)
+        let mention = redactor.redact("secrets start with whsec_ on Stripe")
+        #expect(mention.redactedText == "secrets start with whsec_ on Stripe")
+        #expect(mention.redactionCount == 0)
+        let hookSentence = redactor.redact("used \(hook). next")
+        #expect(hookSentence.redactedText == "used \(hookKept). next")
+        let hookQuery = redactor.redact(hook + "?x=1")
+        #expect(hookQuery.redactedText == hookKept + "?x=1")
+        #expect(hookQuery.redactionCount == 1)
+
+        let hookGlued = "n" + hook
+        #expect(redactor.redact(hookGlued).redactedText == hookGlued)
+        let hookUnder = "_" + hook
+        #expect(redactor.redact(hookUnder).redactedText == hookUnder)
+        // `-` or `_` inside the body keeps the whole token, tail included.
+        let hyphenated = hookFloor + "-tail"
+        #expect(redactor.redact(hyphenated).redactedText == hyphenated)
+        let scored = hookFloor + "_tail"
+        #expect(redactor.redact(scored).redactedText == scored)
+
+        let both = redactor.redact("\(live) \(hook)")
+        #expect(both.redactedText == "\(keptLive) \(hookKept)")
+        #expect(both.redactionCount == 2)
+        let bothAgain = redactor.redact(both.redactedText)
+        #expect(bothAgain.redactionCount == 0)
+    }
 }
 
 // MARK: - DwellTracker Tests
