@@ -4327,6 +4327,307 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([helper, clusteredLetta]) == 10)
         #expect(Diagnoser.cpuSamplePid([clusteredLetta, interactive]) == 30)
     }
+
+    @Test("an unknown node or bun short is not the agent script")
+    func nodeAndBunUnknownShortIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23 does not cluster and does not run the file. `-i` is
+        // the one short boolean that still does. A lone `-` is stdin.
+        let nodeUnknown = process(
+            4, "node", argv: ["node", "-z", "/usr/local/bin/codex"]
+        )
+        let nodeQuiet = process(
+            4, "nodejs", argv: ["nodejs", "-q", "/tmp/codex"]
+        )
+        let nodeLetter = process(
+            4, "node.exe", argv: ["node.exe", "-a", "/usr/local/bin/codex"]
+        )
+        let nodeCluster = process(
+            4, "node", argv: ["node", "-qh", "/tmp/codex"]
+        )
+        let nodeRepeated = process(
+            4, "node", argv: ["node", "-ii", "/usr/local/bin/codex"]
+        )
+        let nodeHelp = process(
+            4, "node", argv: ["node", "-h", "/usr/local/bin/codex"]
+        )
+        let nodeVersion = process(
+            4, "Node.EXE", argv: ["Node.EXE", "-v", "/tmp/codex"]
+        )
+        let nodeStdin = process(
+            4, "node", argv: ["node", "-", "/usr/local/bin/codex"]
+        )
+        let nodeInteractiveStdin = process(
+            4, "node", argv: ["node", "-i", "-", "/tmp/codex"]
+        )
+        let nodeRejected = [
+            nodeUnknown, nodeQuiet, nodeLetter, nodeCluster, nodeRepeated,
+            nodeHelp, nodeVersion, nodeStdin, nodeInteractiveStdin,
+        ]
+        for exited in nodeRejected {
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12)
+        }
+        #expect(Diagnoser.cpuSamplePid([mcp, nodeUnknown], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, nodeHelp], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, nodeStdin], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([nodeUnknown]) == 4)
+
+        // Bun 1.4.2 walks the cluster. An unknown letter, help, version,
+        // and stdin do not run the file. `-u` with no value takes the
+        // next word, so that path is not the script. A bad define or
+        // loader value, and eval, are the same exit.
+        let bunUnknown = process(
+            4, "bun", argv: ["bun", "-z", "/usr/local/bin/codex"]
+        )
+        let bunQuiet = process(
+            4, "bun.exe", argv: ["bun.exe", "-q", "/tmp/codex"]
+        )
+        let bunCluster = process(
+            4, "bun", argv: ["bun", "-bz", "/usr/local/bin/codex"]
+        )
+        let bunInstallUnknown = process(
+            4, "bun", argv: ["bun", "-iz", "/tmp/codex"]
+        )
+        let bunHelp = process(
+            4, "bun", argv: ["bun", "-h", "/usr/local/bin/codex"]
+        )
+        let bunVersion = process(
+            4, "bun", argv: ["bun", "-v", "/tmp/codex"]
+        )
+        let bunHelpAfter = process(
+            4, "bun", argv: ["bun", "-hu", "/usr/local/bin/codex"]
+        )
+        let bunHelpWord = process(
+            4, "bun", argv: ["bun", "-bi", "-h", "/tmp/codex"]
+        )
+        let bunStdin = process(
+            4, "bun", argv: ["bun", "-", "/usr/local/bin/codex"]
+        )
+        let bunEquals = process(
+            4, "bun", argv: ["bun", "-b=/usr/local/bin/codex"]
+        )
+        let bunModule = process(
+            4, "bun", argv: ["bun", "-m", "/tmp/codex"]
+        )
+        let bunRunUnknown = process(
+            4, "bun", argv: ["bun", "run", "-z", "/usr/local/bin/codex"]
+        )
+        let bunValueOnly = process(
+            4, "bun", argv: ["bun", "-u", "/usr/local/bin/codex"]
+        )
+        let bunInstallValue = process(
+            4, "bun", argv: ["bun", "-iu", "/tmp/codex"]
+        )
+        let bunDefine = process(
+            4, "bun", argv: ["bun", "-id", "K", "/usr/local/bin/codex"]
+        )
+        let bunLoader = process(
+            4, "bun", argv: ["bun", "-il", "nocolon", "/tmp/codex"]
+        )
+        let bunEval = process(
+            4, "bun", argv: ["bun", "-ie", "console.log(1)", "/usr/local/bin/codex"]
+        )
+        let bunRejected = [
+            bunUnknown, bunQuiet, bunCluster, bunInstallUnknown, bunHelp,
+            bunVersion, bunHelpAfter, bunHelpWord, bunStdin, bunEquals,
+            bunModule, bunRunUnknown, bunValueOnly, bunInstallValue,
+            bunDefine, bunLoader, bunEval,
+        ]
+        for exited in bunRejected {
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12)
+        }
+        #expect(Diagnoser.cpuSamplePid([mcp, bunUnknown], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, bunHelp], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([mcp, bunValueOnly], foregroundProcessGroupId: 4) == 10)
+        #expect(Diagnoser.cpuSamplePid([bunUnknown]) == 4)
+
+        // The shorts that still run the file name it, including when
+        // that process is the group leader. A value's word is not the
+        // script. `--cpu-prof` before the name flag still counts when
+        // the preload is a cluster.
+        let nodeInteractive = process(
+            20, "node", argv: ["node", "-i", "/usr/local/bin/codex"]
+        )
+        let nodejsInteractive = process(
+            20, "nodejs", argv: ["nodejs", "-i", "/tmp/codex"]
+        )
+        let nodeExeInteractive = process(
+            20, "node.exe", argv: ["node.exe", "-i", "-i", "/usr/local/bin/codex"]
+        )
+        let nodeLong = process(
+            20, "node", argv: ["node", "--interactive", "/tmp/codex"]
+        )
+        let nodeScriptFirst = process(
+            20, "node", argv: ["node", "/usr/local/bin/codex", "-z"]
+        )
+        let bunInstall = process(
+            20, "bun", argv: ["bun", "-i", "/usr/local/bin/codex"]
+        )
+        let bunForce = process(
+            20, "bun", argv: ["bun", "-b", "/tmp/codex"]
+        )
+        let bunBoth = process(
+            20, "bun.exe", argv: ["bun.exe", "-bi", "/usr/local/bin/codex"]
+        )
+        let bunRepeated = process(
+            20, "bun", argv: ["bun", "-ii", "/tmp/codex"]
+        )
+        let bunRun = process(
+            20, "bun", argv: ["bun", "run", "-i", "/usr/local/bin/codex"]
+        )
+        let bunConfig = process(
+            20, "bun", argv: ["bun", "-ic", "/tmp/codex"]
+        )
+        let bunConfigOther = process(
+            20, "bun", argv: ["bun", "-bc", "/usr/local/bin/codex"]
+        )
+        let bunGluedValue = process(
+            20, "bun", argv: ["bun", "-uz", "/tmp/codex"]
+        )
+        let bunSeparateValue = process(
+            20, "bun", argv: ["bun", "-u", "foo", "/usr/local/bin/codex"]
+        )
+        let bunValueHelp = process(
+            20, "bun", argv: ["bun", "-uh", "/tmp/codex"]
+        )
+        let bunPreload = process(
+            20,
+            "bun",
+            argv: ["bun", "-ir", "preload.js", "/usr/local/bin/codex"]
+        )
+        let bunDefineOk = process(
+            20, "bun", argv: ["bun", "-id", "K:1", "/tmp/codex"]
+        )
+        let bunLoaderOk = process(
+            20, "bun", argv: ["bun", "-il", ".js:jsx", "/usr/local/bin/codex"]
+        )
+        let bunSubcommand = process(
+            20, "bun", argv: ["bun", "-i", "run", "/tmp/codex"]
+        )
+        let bunLong = process(
+            20, "bun", argv: ["bun", "--bun", "/usr/local/bin/codex"]
+        )
+        let bunUnknownLong = process(
+            20, "bun", argv: ["bun", "--not-a-flag", "/tmp/codex"]
+        )
+        let bunProfile = process(
+            20,
+            "bun",
+            argv: [
+                "bun", "-ir", "preload.js", "--cpu-prof",
+                "--cpu-prof-name", "out.js", "/usr/local/bin/codex",
+            ]
+        )
+        let bunScriptFirst = process(
+            20, "bun", argv: ["bun", "/usr/local/bin/codex", "-z"]
+        )
+        let kept = [
+            nodeInteractive, nodejsInteractive, nodeExeInteractive, nodeLong,
+            nodeScriptFirst, bunInstall, bunForce, bunBoth, bunRepeated,
+            bunRun, bunConfig, bunConfigOther, bunGluedValue, bunSeparateValue,
+            bunValueHelp, bunPreload, bunDefineOk, bunLoaderOk, bunSubcommand,
+            bunLong, bunUnknownLong, bunProfile, bunScriptFirst,
+        ]
+        for running in kept {
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20)
+        }
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, nodeInteractive], foregroundProcessGroupId: 20) == 20
+        )
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, bunBoth], foregroundProcessGroupId: 20) == 20
+        )
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, bunPreload], foregroundProcessGroupId: 20) == 20
+        )
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, bunProfile], foregroundProcessGroupId: 20) == 20
+        )
+        let bunProfileMissing = process(
+            4,
+            "bun",
+            argv: [
+                "bun", "-ir", "preload.js", "--cpu-prof-name", "out.js",
+                "/usr/local/bin/codex",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([bunProfileMissing, claude]) == 12)
+
+        // An unknown short in front of a Letta path is not the TUI.
+        // `-i` and `-b` in front of one still are. `--prompt` after the
+        // path is a one-shot, so the helper's lower pid still wins.
+        let nodeFalseLetta = process(
+            8,
+            "node",
+            argv: ["node", "-z", "/home/user/node_modules/.bin/letta"]
+        )
+        let nodeHelpLetta = process(
+            8,
+            "node",
+            argv: ["node", "-h", "/home/user/node_modules/.bin/letta"]
+        )
+        let bunFalseLetta = process(
+            8,
+            "bun",
+            argv: ["bun", "-z", "/home/user/node_modules/.bin/letta"]
+        )
+        let nodeLetta = process(
+            40,
+            "node",
+            argv: ["node", "-i", "/home/user/node_modules/.bin/letta"]
+        )
+        let bunLetta = process(
+            40,
+            "bun",
+            argv: ["bun", "-b", "/tmp/letta"]
+        )
+        let bunOneShot = process(
+            40,
+            "bun",
+            argv: ["bun", "-b", "/tmp/letta", "--prompt"]
+        )
+        #expect(Diagnoser.cpuSamplePid([nodeFalseLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([nodeFalseLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([nodeFalseLetta]) == 8)
+        #expect(
+            Diagnoser.cpuSamplePid([mcp, nodeFalseLetta], foregroundProcessGroupId: 8) == 10
+        )
+        #expect(Diagnoser.cpuSamplePid([nodeHelpLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([bunFalseLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, bunLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([nodeLetta, interactive]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, bunOneShot]) == 10)
+        #expect(Diagnoser.cpuSamplePid([bunOneShot, interactive]) == 30)
+
+        // Deno was not installed. An unknown short is still skipped, and
+        // so are Node and Bun `--help` / `--version`, which do not run
+        // the file. `--not-a-flag` exits on Node and runs on Bun.
+        let denoUnknown = process(
+            20, "deno", argv: ["deno", "run", "-z", "/usr/local/bin/codex"]
+        )
+        let nodeLongHelp = process(
+            20, "node", argv: ["node", "--help", "/usr/local/bin/codex"]
+        )
+        let nodeLongVersion = process(
+            20, "node", argv: ["node", "--version", "/tmp/codex"]
+        )
+        let bunLongHelp = process(
+            20, "bun", argv: ["bun", "--help", "/usr/local/bin/codex"]
+        )
+        let nodeBadLong = process(
+            20, "node", argv: ["node", "--not-a-flag", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, denoUnknown]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeLongHelp]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeLongVersion]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bunLongHelp]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, nodeBadLong]) == 20)
+    }
 }
 
 @Suite("Diagnoser finished vs process-gone")

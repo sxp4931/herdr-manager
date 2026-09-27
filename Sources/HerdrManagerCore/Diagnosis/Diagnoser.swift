@@ -1265,8 +1265,21 @@ private enum ShellForeground {
                 }
                 if let width = valueFlagWidth(arg, runtime: runtimeName) {
                     index += width
+                } else if lettaOptionTakesValue(arg) {
+                    index += 2
+                } else if let short = runtimeShort(
+                    arg,
+                    runtime: runtimeName,
+                    following: index + 1 < argv.count ? argv[index + 1] : nil
+                ) {
+                    switch short {
+                    case .skip(let width):
+                        index += width
+                    case .exits:
+                        return nil
+                    }
                 } else {
-                    index += lettaOptionTakesValue(arg) ? 2 : 1
+                    index += 1
                 }
                 continue
             }
@@ -1536,7 +1549,10 @@ private enum ShellForeground {
     /// (`pythonShort`): an unknown letter, `h`, `V`, `?`, `c`, `m`, or a
     /// lone `-` does not run the path after it, and `-W` / `-X` take a
     /// value. `-qS`, `-bb`, `-OO`, `-vu`, `-R`, and `-t` still name the
-    /// file. Bun, Node, and Deno still consume the long flags they accept.
+    /// file. Node and Bun shorts are `runtimeShort`: an unknown short,
+    /// help, version, and stdin do not name the path. Deno still skips
+    /// an unknown short. Bun still runs the file after an unknown long
+    /// option. Node and Bun still consume the long flags they accept.
     /// Bun's own value flags are not that node rule. `--title --watch`
     /// and `--user-agent --watch` run the file. `--port`, `--shell`,
     /// `--install`, and the other flags in `bunDashRejectedFlags` exit
@@ -1749,7 +1765,19 @@ private enum ShellForeground {
                 index += width
                 continue
             }
+            // Node and Bun shorts that were not claimed above. An unknown
+            // short, help, version, and stdin are not a script. A long
+            // option, and a Deno short, still skip one word.
             if arg.hasPrefix("-") {
+                if let short = runtimeShort(arg, runtime: runtime, following: following) {
+                    switch short {
+                    case .skip(let width):
+                        index += width
+                    case .exits:
+                        return nil
+                    }
+                    continue
+                }
                 index += 1
                 continue
             }
@@ -2422,6 +2450,16 @@ private enum ShellForeground {
             if arg == "--" { return false }
             if matches(arg) { return true }
             if arg.hasPrefix("-") {
+                if !arg.hasPrefix("--"),
+                   let short = bunBareShort(
+                    arg,
+                    following: index + 1 < argv.count ? argv[index + 1] : nil
+                   ) {
+                    if case .skip(let width) = short {
+                        index += width
+                        continue
+                    }
+                }
                 let width = bunFlagWordWidth(arg)
                 if width > 1, index + 1 < argv.count {
                     index += width
@@ -2748,8 +2786,8 @@ private enum ShellForeground {
     /// and `m` end the options, so the program is not a file.
     /// `python3 -z /tmp/codex`, `-qz`, `-qh`, `-J`, `-1`, and a lone `-`
     /// (the program is stdin) do not run the path. A missing word after
-    /// `-W` or `-X` does not either. Node and bun are not this set:
-    /// `node -q` is a bad option, and `python3 -q` is quiet.
+    /// `-W` or `-X` does not either. Node and bun are not this set.
+    /// `node -q` is a bad option (`nodeBareShort`), and `python3 -q` is quiet.
     private static func pythonShort(_ arg: String, following: String?) -> PythonShort? {
         guard arg.hasPrefix("-"), !arg.hasPrefix("--") else { return nil }
         if arg == "-" { return .exits }
@@ -2870,6 +2908,116 @@ private enum ShellForeground {
         guard !port.isEmpty else { return false }
         let after = rest[port.endIndex...]
         return after.isEmpty || after.first == "/"
+    }
+
+    /// How one Node or Bun argv word that starts with a single `-`
+    /// occupies the vector, once the exact flags above have been claimed.
+    /// Nil for a long option and for Deno, which still skips the word.
+    private enum RuntimeShort {
+        /// Words to advance, including the flag.
+        case skip(Int)
+        /// The runtime does not run a file after this word.
+        case exits
+    }
+
+    /// Node 22.23 and Bun 1.4.2 do not share Python's short set.
+    ///
+    /// Node does not cluster. Exactly `-i` still runs the file.
+    /// `-h`, `-v`, a lone `-` (stdin), and every other short, including
+    /// `-z`, `-q`, `-qh`, and `-ii`, exit before the file runs.
+    /// Bun walks the cluster. `b` and `i` are booleans (`-bi`, `-ii`).
+    /// `h` and `v` exit. `c` keeps an optional config path in the rest
+    /// of the word and the next word is the script. `u`, `r`, and `F`
+    /// take the rest of the cluster or the next word. `d` and `l` do
+    /// too, and still require their separator. `e` and `p` are eval.
+    /// Any other letter exits, and so does `-b=1`. A lone `-` is stdin.
+    /// `--not-a-flag` is not this check: Bun still runs the file.
+    private static func runtimeShort(
+        _ arg: String,
+        runtime: String,
+        following: String?
+    ) -> RuntimeShort? {
+        guard arg.hasPrefix("-"), !arg.hasPrefix("--") else { return nil }
+        if isNodeRuntime(runtime) {
+            return nodeBareShort(arg)
+        }
+        if runtime == "bun" {
+            return bunBareShort(arg, following: following)
+        }
+        return nil
+    }
+
+    /// Exactly `-i`. Node 22.23 rejects every other single-dash word
+    /// that the earlier checks did not already consume.
+    private static func nodeBareShort(_ arg: String) -> RuntimeShort {
+        if arg == "-i" { return .skip(1) }
+        return .exits
+    }
+
+    /// `bun -b` / `--bun` and `bun -i` (auto-install). Repeats are the
+    /// same boolean. A letter that is not here is a value or an exit.
+    private static let bunBooleanShorts: Set<Character> = ["b", "i"]
+
+    /// Bun 1.4.2's short cluster, checked on that binary.
+    ///
+    /// `-i`, `-b`, `-bi`, `-ii`, `-ic`, and `-bc` run the file.
+    /// `-uz`, `-u foo`, `-uh`, and `-u=` do too: `u` takes a value, and
+    /// an empty `-u` with no further word prints help. `-h`, `-v`,
+    /// `-hu`, `-z`, `-q`, `-bz`, `-iz`, `-m`, `-b=1`, and a lone `-`
+    /// do not run the file. `-ir preload.js script.js` runs the script,
+    /// and `-id K:1` / `-il .js:jsx` do too. `-id K` and `-il nocolon`
+    /// exit. `-ie code` evals the code. `-iF pkg script.js` is the same
+    /// filter as `-F`: the package may be missing on this machine, and
+    /// the script is still the word after the value.
+    private static func bunBareShort(_ arg: String, following: String?) -> RuntimeShort {
+        if arg == "-" { return .exits }
+        let body = arg.dropFirst()
+        var index = body.startIndex
+        while index < body.endIndex {
+            let character = body[index]
+            let next = body.index(after: index)
+            let rest = body[next...]
+            if bunBooleanShorts.contains(character) {
+                index = next
+                continue
+            }
+            if character == "h" || character == "v" || character == "e" || character == "p" {
+                return .exits
+            }
+            if character == "c" {
+                return .skip(1)
+            }
+            if character == "u" || character == "r" || character == "F" {
+                if rest.isEmpty {
+                    guard following != nil else { return .exits }
+                    return .skip(2)
+                }
+                return .skip(1)
+            }
+            if character == "d" || character == "l" {
+                if rest.isEmpty {
+                    guard let following else { return .exits }
+                    if !bunClusterValueAccepted(character, value: following) { return .exits }
+                    return .skip(2)
+                }
+                var glued = rest
+                if glued.first == "=" {
+                    glued = glued.dropFirst()
+                }
+                if !bunClusterValueAccepted(character, value: String(glued)) { return .exits }
+                return .skip(1)
+            }
+            return .exits
+        }
+        return .skip(1)
+    }
+
+    /// `d` needs `:` or `=` in the value. `l` needs `:`. An empty value,
+    /// including the value left by `-id=` and `-il=`, is not accepted.
+    private static func bunClusterValueAccepted(_ flag: Character, value: String) -> Bool {
+        if value.isEmpty { return false }
+        if flag == "l" { return value.contains(":") }
+        return value.contains(":") || value.contains("=")
     }
 
     /// `--require=mod` and `-rpreload` keep the value in the same word.
