@@ -307,6 +307,47 @@ public final class SecretRedactor: Sendable {
                 "(?<![A-Za-z0-9_])sbp_[a-f0-9]{40}(?![A-Za-z0-9])",
                 "sbp_[REDACTED]"
             ),
+            // Sentry organization auth tokens. The shape is `sntrys_`,
+            // base64 of a JSON object that starts with `{"iat":`, `_`,
+            // and a 43-character secret (`token_bytes(32)` with the
+            // padding stripped). The header is `eyJpYXQiO`. The payload
+            // names `region_url`, and that word's three base64
+            // alignments are the marker. The `eyJ` pattern does not see
+            // this token: its lookbehind treats the underscore in
+            // `sntrys_` as part of the previous word. An assignment
+            // named token already hides `SENTRY_AUTH_TOKEN`. The CLI
+            // prints the token once, with no keyword, and it can upload
+            // source maps. Each payload segment is 10 to 200 characters,
+            // so a short `sntrys_` stays and a longer segment stays
+            // whole. The secret is exactly 43 characters of standard
+            // base64, so a 44th character, including `+`, stays whole
+            // instead of leaving a tail. Zero, one, or two padding
+            // equals may sit before the secret. A letter, digit, or
+            // underscore glued to the front is not the prefix. Standard
+            // base64 has no hyphen or underscore. A hyphen ends the
+            // segment, so the marker cannot be reached and the token
+            // stays whole. This pattern is
+            // above the personal-token one: a payload is not a second
+            // secret.
+            (
+                "(?<![A-Za-z0-9_])sntrys_eyJpYXQiO[A-Za-z0-9+/]{10,200}(?:LCJyZWdpb25fdXJs|InJlZ2lvbl91cmwi|cmVnaW9uX3VybCI6)[A-Za-z0-9+/]{10,200}={0,2}_[A-Za-z0-9+/]{43}(?![A-Za-z0-9+/])",
+                "sntrys_[REDACTED]"
+            ),
+            // Sentry personal auth tokens. The body is exactly 64
+            // lowercase hex characters: that is `token_hex(32)`, and a
+            // shorter floor would take `sntryu_` out of a sentence. The
+            // same assignment already hides `SENTRY_AUTH_TOKEN`.
+            // `sentry-cli` and a pasted token have no keyword, and the
+            // token can read events for every project that user can
+            // open. A shorter body stays, and a longer run stays whole,
+            // so a tail is not left behind. Uppercase hex is not what
+            // Sentry writes. A letter, digit, or underscore glued to
+            // the front is not the prefix. `sntrya_` and `sntryi_` are
+            // different prefixes.
+            (
+                "(?<![A-Za-z0-9_])sntryu_[a-f0-9]{64}(?![A-Za-z0-9])",
+                "sntryu_[REDACTED]"
+            ),
             // Slack app-level tokens (`xapp-1-<app>-<id>-<secret>`). The
             // older `xox[baprs]` pattern does not name this prefix. The
             // version is the single digit Slack issues. Each later

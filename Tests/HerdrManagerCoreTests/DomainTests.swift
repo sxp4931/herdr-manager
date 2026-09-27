@@ -2876,6 +2876,225 @@ struct SecretRedactorTests {
             #expect(result.redactedText == line)
         }
     }
+
+    @Test("A Sentry organization token is redacted once and keeps its prefix")
+    func redactsSentryOrgToken() {
+        let redactor = SecretRedactor()
+        // Public format example: sntrys_, base64 of {"iat":…,"region_url":…},
+        // then a 43-character secret. The payload uses the region_url
+        // alignment cmVnaW9uX3VybCI6 and no padding.
+        let example =
+            "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"
+        let kept = "sntrys_[REDACTED]"
+        let markers = [
+            "LCJyZWdpb25fdXJs",
+            "InJlZ2lvbl91cmwi",
+            "cmVnaW9uX3VybCI6",
+        ]
+        func org(
+            before: String,
+            marker: String,
+            after: String,
+            pad: String = "",
+            secret: String = String(repeating: "A", count: 43)
+        ) -> String {
+            "sntrys_eyJpYXQiO\(before)\(marker)\(after)\(pad)_\(secret)"
+        }
+        let secret = "Ab3+/xyzAb3+/xyzAb3+/xyzAb3+/xyzAb3+/xyzABC"
+        #expect(secret.count == 43)
+
+        let bare = redactor.redact("sentry-cli printed \(example)")
+        #expect(bare.redactedText == "sentry-cli printed \(kept)")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains("eyJpYXQiO"))
+        #expect(!bare.redactedText.contains("NzJkYzA3"))
+        let again = redactor.redact(bare.redactedText)
+        #expect(again.redactedText == bare.redactedText)
+        #expect(again.redactionCount == 0)
+
+        for marker in markers {
+            for pad in ["", "=", "=="] {
+                let token = org(
+                    before: "abc+def/12",
+                    marker: marker,
+                    after: "ABC+DEF/12",
+                    pad: pad,
+                    secret: secret
+                )
+                let result = redactor.redact("upload \(token)")
+                #expect(result.redactedText == "upload \(kept)")
+                #expect(result.redactionCount == 1)
+                #expect(!result.redactedText.contains(secret))
+                #expect(!result.redactedText.contains(marker))
+            }
+        }
+        let longest = org(
+            before: String(repeating: "A", count: 200),
+            marker: markers[0],
+            after: String(repeating: "B", count: 200)
+        )
+        let longestResult = redactor.redact(longest)
+        #expect(longestResult.redactedText == kept)
+        #expect(longestResult.redactionCount == 1)
+
+        // `SENTRY_AUTH_TOKEN` already ends in the assignment keyword.
+        let assigned = redactor.redact("SENTRY_AUTH_TOKEN=\(example)")
+        #expect(assigned.redactedText == "SENTRY_AUTH_TOKEN=\(kept)")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        let quoted = redactor.redact(#"{"token": "\#(example)"}"#)
+        #expect(quoted.redactedText == #"{"token": "\#(kept)"}"#)
+        #expect(quoted.redactionCount == 1)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        let header = redactor.redact("Authorization: Bearer \(example)")
+        #expect(header.redactedText == "Authorization: Bearer \(kept)")
+        #expect(header.redactionCount == 1)
+        let headerAgain = redactor.redact(header.redactedText)
+        #expect(headerAgain.redactionCount == 0)
+        let lower = redactor.redact("authorization: bearer \(example)")
+        #expect(lower.redactedText == "authorization: bearer \(kept)")
+        #expect(lower.redactionCount == 1)
+
+        let remote = redactor.redact("https://ci:\(example)@sentry.io/api/0/projects/")
+        #expect(remote.redactedText == "https://ci:\(kept)@sentry.io/api/0/projects/")
+        #expect(remote.redactionCount == 1)
+        #expect(remote.redactedText.contains("sentry.io/api/0/projects/"))
+        let remoteAgain = redactor.redact(remote.redactedText)
+        #expect(remoteAgain.redactionCount == 0)
+
+        let sentence = redactor.redact("saw \(example). next")
+        #expect(sentence.redactedText == "saw \(kept). next")
+        #expect(sentence.redactionCount == 1)
+        let noted = redactor.redact(example + "-note")
+        #expect(noted.redactedText == kept + "-note")
+        #expect(noted.redactionCount == 1)
+        let hyphen = redactor.redact("my-\(example)")
+        #expect(hyphen.redactedText == "my-\(kept)")
+        #expect(hyphen.redactionCount == 1)
+
+        let other = org(before: String(repeating: "C", count: 10), marker: markers[1], after: String(repeating: "D", count: 10), pad: "=")
+        let pair = redactor.redact("\(example) \(other)")
+        #expect(pair.redactedText == "\(kept) \(kept)")
+        #expect(pair.redactionCount == 2)
+
+        let leftover = redactor.redact("token=\(example)@leftoversecret")
+        #expect(leftover.redactedText == "token=[REDACTED]")
+        #expect(leftover.redactionCount == 2)
+        #expect(!leftover.redactedText.contains("leftoversecret"))
+        #expect(!leftover.redactedText.contains("NzJkYzA3"))
+
+        let keptLines = [
+            "tokens start with sntrys_",
+            "sntrys_eyJpYXQiO",
+            org(before: String(repeating: "A", count: 9), marker: markers[0], after: String(repeating: "B", count: 10)),
+            org(before: String(repeating: "A", count: 201), marker: markers[0], after: String(repeating: "B", count: 10)),
+            org(before: String(repeating: "A", count: 10), marker: markers[0], after: String(repeating: "B", count: 9)),
+            org(before: String(repeating: "A", count: 10), marker: markers[0], after: String(repeating: "B", count: 201)),
+            org(before: String(repeating: "A", count: 10), marker: markers[0], after: String(repeating: "B", count: 10), pad: "==="),
+            org(before: String(repeating: "A", count: 10), marker: markers[0], after: String(repeating: "B", count: 10), secret: String(repeating: "A", count: 42)),
+            org(before: String(repeating: "A", count: 10), marker: markers[0], after: String(repeating: "B", count: 10), secret: String(repeating: "A", count: 43)) + "+",
+            "sntrys_" + String(repeating: "A", count: 80) + "_" + String(repeating: "A", count: 43),
+            "SNTRYS_" + String(example.dropFirst("sntrys_".count)),
+            "x" + example,
+            "_" + example,
+            org(before: "abc_defghi", marker: markers[0], after: String(repeating: "B", count: 10)),
+            "sntrya_" + String(repeating: "ab", count: 32),
+            "sntryi_" + String(repeating: "ab", count: 32),
+        ]
+        for line in keptLines {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line.prefix(80))")
+            #expect(result.redactedText == line)
+        }
+    }
+
+    @Test("A Sentry personal token is redacted once and keeps its prefix")
+    func redactsSentryUserToken() {
+        let redactor = SecretRedactor()
+        let hex = String(repeating: "0123456789abcdef", count: 4)
+        #expect(hex.count == 64)
+        let key = "sntryu_" + hex
+        let kept = "sntryu_[REDACTED]"
+
+        let bare = redactor.redact("sentry-cli printed \(key)")
+        #expect(bare.redactedText == "sentry-cli printed \(kept)")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains(hex))
+        let again = redactor.redact(bare.redactedText)
+        #expect(again.redactedText == bare.redactedText)
+        #expect(again.redactionCount == 0)
+
+        let assigned = redactor.redact("SENTRY_AUTH_TOKEN=\(key)")
+        #expect(assigned.redactedText == "SENTRY_AUTH_TOKEN=\(kept)")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        let quoted = redactor.redact(#"{"token": "\#(key)"}"#)
+        #expect(quoted.redactedText == #"{"token": "\#(kept)"}"#)
+        #expect(quoted.redactionCount == 1)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        let header = redactor.redact("Authorization: Bearer \(key)")
+        #expect(header.redactedText == "Authorization: Bearer \(kept)")
+        #expect(header.redactionCount == 1)
+        let headerAgain = redactor.redact(header.redactedText)
+        #expect(headerAgain.redactionCount == 0)
+        let lower = redactor.redact("authorization: bearer \(key)")
+        #expect(lower.redactedText == "authorization: bearer \(kept)")
+        #expect(lower.redactionCount == 1)
+
+        let remote = redactor.redact("https://ci:\(key)@sentry.io/api/0/projects/")
+        #expect(remote.redactedText == "https://ci:\(kept)@sentry.io/api/0/projects/")
+        #expect(remote.redactionCount == 1)
+        #expect(remote.redactedText.contains("sentry.io/api/0/projects/"))
+        let remoteAgain = redactor.redact(remote.redactedText)
+        #expect(remoteAgain.redactionCount == 0)
+
+        let sentence = redactor.redact("saw \(key). next")
+        #expect(sentence.redactedText == "saw \(kept). next")
+        #expect(sentence.redactionCount == 1)
+        let noted = redactor.redact(key + "-note")
+        #expect(noted.redactedText == kept + "-note")
+        #expect(noted.redactionCount == 1)
+        #expect(!noted.redactedText.contains(hex))
+        let hyphen = redactor.redact("my-\(key)")
+        #expect(hyphen.redactedText == "my-\(kept)")
+        #expect(hyphen.redactionCount == 1)
+
+        let pair = redactor.redact("\(key) \(key)")
+        #expect(pair.redactedText == "\(kept) \(kept)")
+        #expect(pair.redactionCount == 2)
+
+        let leftover = redactor.redact("token=\(key)@leftoversecret")
+        #expect(leftover.redactedText == "token=[REDACTED]")
+        #expect(leftover.redactionCount == 2)
+        #expect(!leftover.redactedText.contains("leftoversecret"))
+        #expect(!leftover.redactedText.contains(hex))
+
+        let keptLines = [
+            "tokens start with sntryu_",
+            "sntryu_" + String(repeating: "a", count: 63),
+            "sntryu_" + String(repeating: "a", count: 65),
+            key + "a",
+            "sntryu_" + String(repeating: "A", count: 64),
+            "SNTRYU_" + hex,
+            "x" + key,
+            "_" + key,
+            "sntryu_" + String(repeating: "a", count: 30) + "-" + String(repeating: "b", count: 34),
+            "sntrya_" + hex,
+            "sntryi_" + hex,
+            String(repeating: "ab", count: 32),
+        ]
+        for line in keptLines {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line.prefix(80))")
+            #expect(result.redactedText == line)
+        }
+    }
 }
 
 // MARK: - DwellTracker Tests
