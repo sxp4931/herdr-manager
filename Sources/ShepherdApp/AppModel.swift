@@ -1121,8 +1121,10 @@ final class AppModel {
     }
 
     /// Derive a stable occupant fingerprint from an Agent. Mirrors
-    /// `DwellTracker.fingerprint(for:)` which is `internal` to Core and
-    /// therefore not directly callable from the app module.
+    /// `DwellTracker.fingerprint(for:)`, which is `internal` to Core and
+    /// therefore not directly callable from the app module. Session
+    /// identity is not part of this string: the two have to stay identical,
+    /// and a settings override is keyed by it.
     private static func fingerprintForAgent(_ agent: Agent) -> String {
         switch agent.kind {
         case .claude: return "claude"

@@ -264,7 +264,11 @@ extension HerdSnapshot {
             cwd: AgentLabel.nonempty(info.foregroundCwd)
                 ?? AgentLabel.nonempty(info.cwd)
                 ?? existing?.cwd
-                ?? ""
+                ?? "",
+            sessionIdentity: SessionIdentity.carried(
+                stored: preservingExistingName ? existing?.sessionIdentity : nil,
+                incoming: info.sessionIdentity
+            )
         )
 
         var kept = agents.filter { row in
@@ -314,6 +318,10 @@ extension HerdSnapshot {
         if let directory = Self.nonempty(info.foregroundCwd) ?? Self.nonempty(info.cwd) {
             agent.cwd = directory
         }
+        agent.sessionIdentity = SessionIdentity.carried(
+            stored: preservingExistingName ? agent.sessionIdentity : nil,
+            incoming: info.sessionIdentity
+        )
         if let workspace = knownLabel(info.workspaceId, in: workspaceNames) {
             agent.workspaceName = workspace
         }

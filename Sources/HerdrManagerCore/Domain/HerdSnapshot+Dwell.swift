@@ -29,16 +29,25 @@ extension HerdSnapshot {
             incomingSessions[info.paneId] = session
         }
         return displayAgents(now: now).map { agent in
+            // The caller's map is the occupant it tracked. A caller that
+            // omitted the map still has the session on the previous row.
+            // A list that leaves the field off is not a new person.
+            let tracked = previousSessions[agent.id.raw]
+            let incoming = incomingSessions[agent.id.raw]
+            let session = SessionIdentity.carried(
+                stored: tracked ?? byId[agent.id]?.sessionIdentity,
+                incoming: incoming
+            )
             guard let old = byId[agent.id],
                   old.status == agent.status,
                   old.stateChangeSeq == agent.stateChangeSeq,
-                  !SessionIdentity.replaced(
-                    stored: previousSessions[agent.id.raw],
-                    incoming: incomingSessions[agent.id.raw]
-                  ) else {
-                return agent
+                  !SessionIdentity.replaced(stored: tracked, incoming: incoming) else {
+                var fresh = agent
+                fresh.sessionIdentity = session
+                return fresh
             }
             var merged = agent
+            merged.sessionIdentity = session
             merged.enteredAt = old.enteredAt
             // The refetch rebuilds the row from herdr's status, which stays
             // working or blocked after the process dies. A crash already
@@ -187,6 +196,10 @@ public struct HerdLiveTable: Sendable {
             if Self.absent(info.foregroundCwd), Self.absent(info.cwd) {
                 updated.cwd = old.cwd
             }
+            updated.sessionIdentity = SessionIdentity.carried(
+                stored: previousSessions[old.id.raw] ?? old.sessionIdentity,
+                incoming: info.sessionIdentity
+            )
             if Self.absent(refreshed.workspaceNames[info.workspaceId]) {
                 updated.workspaceName = old.workspaceName
             }

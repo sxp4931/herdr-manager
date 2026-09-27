@@ -632,6 +632,7 @@ struct HerdLiveTableDwellTests {
         let held = live.agents.first { $0.id.raw == "wA:p1" }
         #expect(held?.enteredAt == started)
         #expect(held?.verdict == .processGone(lastLine: "zsh (pid 1)"))
+        #expect(held?.sessionIdentity == "agent|claude|session|abc")
         #expect(live.agents.first { $0.id.raw == "wA:p2" }?.enteredAt == started)
 
         let later = Date(timeIntervalSince1970: 9_800)
@@ -644,6 +645,7 @@ struct HerdLiveTableDwellTests {
         let opened = live.agents.first { $0.id.raw == "wA:p1" }
         #expect(opened?.enteredAt == later)
         #expect(opened?.verdict.isProcessGone == false)
+        #expect(opened?.sessionIdentity == "agent|claude|session|other")
         #expect(live.agents.first { $0.id.raw == "wA:p2" }?.enteredAt == started)
     }
 
@@ -942,6 +944,7 @@ struct HerdLiveTableDwellTests {
         #expect(omitted.isEmpty)
         #expect(live.agents.first { $0.id.raw == "wA:p1" }?.enteredAt == started)
         #expect(live.agents.first { $0.id.raw == "wA:p1" }?.verdict == .processGone(lastLine: "zsh (pid 1)"))
+        #expect(live.agents.first { $0.id.raw == "wA:p1" }?.sessionIdentity == "agent|claude|session|abc")
 
         let replacedIds = live.noteStatusRefresh(
             snapshot([
@@ -956,6 +959,7 @@ struct HerdLiveTableDwellTests {
         let replaced = live.agents.first { $0.id.raw == "wA:p1" }
         #expect(replaced?.enteredAt == moveAt)
         #expect(replaced?.verdict.isProcessGone == false)
+        #expect(replaced?.sessionIdentity == "agent|claude|session|other")
         #expect(live.agents.first { $0.id.raw == "wA:p2" }?.enteredAt == started)
     }
 

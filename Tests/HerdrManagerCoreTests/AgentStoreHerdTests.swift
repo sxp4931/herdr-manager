@@ -1352,6 +1352,77 @@ struct ApplyRestoredDwellTests {
         #expect(restored?.enteredAt == earlier)
         #expect(restored?.lastOutputAt == later)
     }
+
+    @Test("A restored session is the occupant the next list replaces")
+    @MainActor
+    func restoredSessionOpensTheNextEpisode() throws {
+        let store = AgentStore()
+        let id = AgentID("wA:p1")
+        let seed = store.captureHerdRequest()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5),
+        ]), requestedAtEpoch: seed.epoch, requestedAtSerial: seed.serial)
+        let earlier = Date(timeIntervalSince1970: 1_700_000_000)
+        store.applyRestoredDwell([
+            id: DwellEntry(
+                status: .blocked,
+                enteredAt: earlier,
+                lastOutputAt: nil,
+                occupantFingerprint: "custom:claude",
+                stateChangeSeq: 5,
+                sessionIdentity: "agent|claude|session|abc"
+            )
+        ])
+        let seeded = try #require(store.agents[id])
+        #expect(seeded.enteredAt == earlier)
+        #expect(seeded.sessionIdentity == "agent|claude|session|abc")
+        #expect(store.sessionIdentity(for: id) == "agent|claude|session|abc")
+
+        let same = store.captureHerdRequest()
+        let kept = store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: session("abc")),
+        ]), requestedAtEpoch: same.epoch, requestedAtSerial: same.serial)
+        #expect(kept.isEmpty)
+        #expect(store.agents[id]?.enteredAt == earlier)
+        #expect(store.agents[id]?.sessionIdentity == "agent|claude|session|abc")
+
+        let next = store.captureHerdRequest()
+        let replaced = store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: session("other")),
+        ]), requestedAtEpoch: next.epoch, requestedAtSerial: next.serial)
+        #expect(replaced.count == 1)
+        let row = try #require(store.agents[id])
+        #expect(row.enteredAt != earlier)
+        #expect(row.sessionIdentity == "agent|claude|session|other")
+        #expect(store.sessionIdentity(for: id) == "agent|claude|session|other")
+    }
+
+    @Test("A dwell saved for another session does not move a row that already named one")
+    @MainActor
+    func restoredSessionDoesNotReplaceALiveOne() throws {
+        let store = AgentStore()
+        let id = AgentID("wA:p1")
+        let seed = store.captureHerdRequest()
+        store.applyHerdSnapshot(labeledHerd([
+            makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: session("other")),
+        ]), requestedAtEpoch: seed.epoch, requestedAtSerial: seed.serial)
+        let live = try #require(store.agents[id])
+        let earlier = Date(timeIntervalSince1970: 1_700_000_000)
+        store.applyRestoredDwell([
+            id: DwellEntry(
+                status: .blocked,
+                enteredAt: earlier,
+                lastOutputAt: nil,
+                occupantFingerprint: "custom:claude",
+                stateChangeSeq: 5,
+                sessionIdentity: "agent|claude|session|abc"
+            )
+        ])
+        let row = try #require(store.agents[id])
+        #expect(row.enteredAt == live.enteredAt)
+        #expect(row.sessionIdentity == "agent|claude|session|other")
+        #expect(store.sessionIdentity(for: id) == "agent|claude|session|other")
+    }
 }
 
 // MARK: - pane_created
@@ -2548,6 +2619,7 @@ struct PollBeforeMoveTests {
         #expect(moved.name == "Still Claude")
         #expect(moved.workspaceName == "Beta")
         #expect(moved.tabName == "logs")
+        #expect(moved.sessionIdentity == "agent|claude|session|abc")
         #expect(store.agents[AgentID("wA:p2")]?.enteredAt == otherEntered)
         #expect(store.agents.count == 2)
 
@@ -2567,6 +2639,7 @@ struct PollBeforeMoveTests {
         #expect(store.agents[AgentID("wB:p4")]?.stateChangeSeq == 5)
         #expect(store.agents[AgentID("wB:p4")]?.verdict.isSilent)
         #expect(store.agents[AgentID("wB:p4")]?.workspaceName == "Beta")
+        #expect(store.agents[AgentID("wB:p4")]?.sessionIdentity == "agent|claude|session|abc")
 
         let stale = store.applyHerdSnapshot(labeledHerd([
             makeAgentInfo(paneId: "wA:p1", agentStatus: "blocked", stateChangeSeq: 5, session: occupant),
@@ -3058,6 +3131,7 @@ struct SamePaneSessionTests {
         #expect(store.agents[id]?.enteredAt == entered)
         #expect(store.agents[id]?.verdict.isSilent == true)
         #expect(store.agents[id]?.name == "renamed")
+        #expect(store.agents[id]?.sessionIdentity == identity("abc"))
         #expect(store.sessionIdentity(for: id) == identity("abc"))
     }
 

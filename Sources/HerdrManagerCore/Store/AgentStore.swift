@@ -248,7 +248,11 @@ public final class AgentStore {
                 verdict: verdict,
                 workspaceName: wsName,
                 tabName: tabName,
-                cwd: pane.foregroundCwd ?? pane.cwd ?? ""
+                cwd: pane.foregroundCwd ?? pane.cwd ?? "",
+                sessionIdentity: SessionIdentity.carried(
+                    stored: existing?.sessionIdentity,
+                    incoming: pane.agentSession?.identity
+                )
             )
             newAgents[agentId] = agent
         }
@@ -455,7 +459,11 @@ public final class AgentStore {
                 cwd: AgentLabel.nonempty(info.foregroundCwd)
                     ?? AgentLabel.nonempty(info.cwd)
                     ?? (occupantReplaced ? nil : existing?.cwd)
-                    ?? ""
+                    ?? "",
+                sessionIdentity: SessionIdentity.carried(
+                    stored: occupantReplaced ? nil : (sessionByPane[agentId] ?? existing?.sessionIdentity),
+                    incoming: info.sessionIdentity
+                )
             )
             newAgents[agentId] = agent
             consumeEpisodeContinuation(agentId)
@@ -985,7 +993,11 @@ public final class AgentStore {
                 cwd: AgentLabel.nonempty(info.foregroundCwd)
                     ?? AgentLabel.nonempty(info.cwd)
                     ?? existing?.cwd
-                    ?? ""
+                    ?? "",
+                sessionIdentity: SessionIdentity.carried(
+                    stored: occupantReplaced ? nil : (sessionByPane[agentId] ?? existing?.sessionIdentity),
+                    incoming: info.sessionIdentity
+                )
             )
             agents[agentId] = updated
             carrySession(of: info, from: agentId, to: agentId)
@@ -1154,7 +1166,11 @@ public final class AgentStore {
             cwd: AgentLabel.nonempty(info.foregroundCwd)
                 ?? AgentLabel.nonempty(info.cwd)
                 ?? existing?.cwd
-                ?? ""
+                ?? "",
+            sessionIdentity: SessionIdentity.carried(
+                stored: occupantReplaced ? nil : (storedSession ?? existing?.sessionIdentity),
+                incoming: info.sessionIdentity
+            )
         )
 
         let carriedEpisode: Bool
@@ -1261,18 +1277,41 @@ public final class AgentStore {
 
     /// Apply persisted dwell timestamps back onto the live agents after a
     /// relaunch so displayed and diagnosed dwell time is not reset. Only
-    /// entries the DwellTracker validated (occupant fingerprint + seq match)
-    /// should be passed in. Restored timestamps are applied only when earlier
-    /// than the current value (dwell is never moved forward).
+    /// entries the DwellTracker validated (occupant fingerprint, seq, and
+    /// session when both sides named one) should be passed in. Restored
+    /// timestamps are applied only when earlier than the current value
+    /// (dwell is never moved forward). A file whose session differs from
+    /// the one this pane already has is ignored. A file that names a
+    /// session the live row has not named yet is remembered, so the next
+    /// different session opens a new episode.
     public func applyRestoredDwell(_ restored: [AgentID: DwellEntry]) {
         for (agentId, entry) in restored {
             guard var agent = agents[agentId] else { continue }
+            // The list may have named this pane already. A file from a
+            // different session does not move the clock, and does not
+            // replace that name. A list that left the field off has
+            // neither, so the file's session is the occupant the next
+            // list is compared with.
+            let liveSession = SessionIdentity.carried(
+                stored: sessionByPane[agentId],
+                incoming: agent.sessionIdentity
+            )
+            if SessionIdentity.replaced(stored: entry.sessionIdentity, incoming: liveSession) {
+                continue
+            }
             if entry.enteredAt < agent.enteredAt {
                 agent.enteredAt = entry.enteredAt
             }
             if let restoredOutput = entry.lastOutputAt,
                restoredOutput > (agent.lastOutputAt ?? .distantPast) {
                 agent.lastOutputAt = restoredOutput
+            }
+            if liveSession == nil,
+               let session = SessionIdentity.carried(stored: nil, incoming: entry.sessionIdentity) {
+                agent.sessionIdentity = session
+                sessionByPane[agentId] = session
+            } else if agent.sessionIdentity == nil, let liveSession {
+                agent.sessionIdentity = liveSession
             }
             agents[agentId] = agent
         }

@@ -361,6 +361,108 @@ struct DwellTrackerPersistenceTests {
         try? FileManager.default.removeItem(at: dir)
     }
 
+    @Test("The settings fingerprint does not include the session")
+    func fingerprintIgnoresSession() {
+        let plain = Agent(id: AgentID("wA:p1"), kind: .claude, status: .blocked, stateChangeSeq: 5)
+        let named = Agent(
+            id: AgentID("wA:p1"), kind: .claude, status: .blocked, stateChangeSeq: 5,
+            sessionIdentity: "agent|claude|session|abc"
+        )
+        #expect(DwellTracker.fingerprint(for: plain) == "claude")
+        #expect(DwellTracker.fingerprint(for: named) == DwellTracker.fingerprint(for: plain))
+        let custom = Agent(id: AgentID("wA:p1"), kind: .custom("claude"), status: .blocked, stateChangeSeq: 5)
+        let customNamed = Agent(
+            id: AgentID("wA:p1"), kind: .custom("claude"), status: .blocked, stateChangeSeq: 5,
+            sessionIdentity: "agent|claude|session|abc"
+        )
+        #expect(DwellTracker.fingerprint(for: custom) == "custom:claude")
+        #expect(DwellTracker.fingerprint(for: customNamed) == DwellTracker.fingerprint(for: custom))
+    }
+
+    @Test("A different session does not inherit the saved dwell, and the same one does")
+    func sessionMismatchDiscardsDwell() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("dwell-state.json")
+        let id = AgentID("wA:p1")
+        let earlier = Date(timeIntervalSince1970: 1_700_000_000)
+        let saved = Agent(
+            id: id, kind: .claude, status: .blocked, stateChangeSeq: 5,
+            enteredAt: earlier, sessionIdentity: "agent|claude|session|abc"
+        )
+        let writer = DwellTracker(fileURL: fileURL)
+        writer.sync(liveAgents: [id: saved])
+        writer.save()
+
+        let same = Agent(
+            id: id, kind: .claude, status: .blocked, stateChangeSeq: 5,
+            sessionIdentity: "agent|claude|session|abc"
+        )
+        let restored = DwellTracker(fileURL: fileURL).load(currentAgents: [id: same])
+        #expect(restored[id]?.enteredAt == earlier)
+        #expect(restored[id]?.sessionIdentity == "agent|claude|session|abc")
+        #expect(restored[id]?.occupantFingerprint == "claude")
+
+        let other = Agent(
+            id: id, kind: .claude, status: .blocked, stateChangeSeq: 5,
+            sessionIdentity: "agent|claude|session|other"
+        )
+        let refused = DwellTracker(fileURL: fileURL).load(currentAgents: [id: other])
+        #expect(refused.isEmpty)
+    }
+
+    @Test("A dwell file with no session still matches a row that has one")
+    func missingSessionOnDiskStillRestores() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("dwell-state.json")
+        let id = AgentID("wA:p1")
+        let earlier = Date(timeIntervalSince1970: 1_700_000_000)
+        let saved = Agent(
+            id: id, kind: .claude, status: .blocked, stateChangeSeq: 5, enteredAt: earlier
+        )
+        let writer = DwellTracker(fileURL: fileURL)
+        writer.sync(liveAgents: [id: saved])
+        writer.save()
+        let text = try String(contentsOf: fileURL, encoding: .utf8)
+        #expect(!text.contains("sessionIdentity"))
+
+        let live = Agent(
+            id: id, kind: .claude, status: .blocked, stateChangeSeq: 5,
+            sessionIdentity: "agent|claude|session|abc"
+        )
+        let restored = DwellTracker(fileURL: fileURL).load(currentAgents: [id: live])
+        #expect(restored[id]?.enteredAt == earlier)
+        #expect(restored[id]?.sessionIdentity == nil)
+    }
+
+    @Test("A live row that has not named a session still takes the saved dwell")
+    func omittedLiveSessionStillRestores() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HerdrManagerTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("dwell-state.json")
+        let id = AgentID("wA:p1")
+        let earlier = Date(timeIntervalSince1970: 1_700_000_000)
+        let saved = Agent(
+            id: id, kind: .claude, status: .blocked, stateChangeSeq: 5,
+            enteredAt: earlier, sessionIdentity: "agent|claude|session|abc"
+        )
+        let writer = DwellTracker(fileURL: fileURL)
+        writer.sync(liveAgents: [id: saved])
+        writer.save()
+
+        let live = Agent(id: id, kind: .claude, status: .blocked, stateChangeSeq: 5)
+        let restored = DwellTracker(fileURL: fileURL).load(currentAgents: [id: live])
+        #expect(restored[id]?.enteredAt == earlier)
+        #expect(restored[id]?.sessionIdentity == "agent|claude|session|abc")
+    }
+
     @Test("load ignores an oversized dwell-state file")
     func loadRejectsOversize() throws {
         let dir = FileManager.default.temporaryDirectory

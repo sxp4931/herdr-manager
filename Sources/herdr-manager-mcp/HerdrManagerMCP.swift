@@ -423,7 +423,8 @@ actor MCPServer {
                 verdict: Self.initialVerdict(for: status),
                 workspaceName: wsName,
                 tabName: tabName,
-                cwd: AgentLabel.nonempty(info.foregroundCwd) ?? AgentLabel.nonempty(info.cwd) ?? ""
+                cwd: AgentLabel.nonempty(info.foregroundCwd) ?? AgentLabel.nonempty(info.cwd) ?? "",
+                sessionIdentity: info.sessionIdentity
             )
             agents[agentId] = agent
         }

@@ -308,6 +308,7 @@ public struct Agent: Sendable, Identifiable, Equatable {
             && lhs.workspaceName == rhs.workspaceName
             && lhs.tabName == rhs.tabName
             && lhs.cwd == rhs.cwd
+            && lhs.sessionIdentity == rhs.sessionIdentity
     }
 
     public let id: AgentID
@@ -322,6 +323,10 @@ public struct Agent: Sendable, Identifiable, Equatable {
     public var workspaceName: String
     public var tabName: String
     public var cwd: String
+    /// Who is in this pane, without the pane id. Nil when herdr has not
+    /// named a session. Not part of the settings fingerprint: that string
+    /// is the kind, and a relaunch matches an older dwell file by it.
+    public var sessionIdentity: String?
 
     public init(
         id: AgentID,
@@ -335,7 +340,8 @@ public struct Agent: Sendable, Identifiable, Equatable {
         verdict: Verdict = .unclassifiable(reason: "not yet diagnosed"),
         workspaceName: String = "",
         tabName: String = "",
-        cwd: String = ""
+        cwd: String = "",
+        sessionIdentity: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -349,6 +355,7 @@ public struct Agent: Sendable, Identifiable, Equatable {
         self.workspaceName = workspaceName
         self.tabName = tabName
         self.cwd = cwd
+        self.sessionIdentity = sessionIdentity
     }
 }
 
@@ -523,6 +530,13 @@ public struct HerdrSnapshot: Sendable {
             self.kind = kind
             self.value = value
         }
+
+        /// `source|agent|kind|value`, or nil when `value` is empty. The
+        /// same string as `HerdrAgentInfo.sessionIdentity`.
+        public var identity: String? {
+            guard !value.isEmpty else { return nil }
+            return "\(source)|\(agent)|\(kind)|\(value)"
+        }
     }
 }
 
@@ -626,8 +640,7 @@ public struct HerdrAgentInfo: Sendable, Equatable {
     /// is not an identity: several panes look like that, and matching them
     /// would glue unrelated agents together.
     public var sessionIdentity: String? {
-        guard let session = agentSession, !session.value.isEmpty else { return nil }
-        return "\(session.source)|\(session.agent)|\(session.kind)|\(session.value)"
+        agentSession?.identity
     }
 
     /// Directory a new tab or split should start in. The foreground
@@ -706,6 +719,15 @@ public enum SessionIdentity {
         }
         return stored != incoming
     }
+
+    /// The identity to keep after this observation. A named `incoming`
+    /// wins. A read that leaves the field off keeps `stored`. Empty is
+    /// not an identity, so it does not clear the one already stored.
+    public static func carried(stored: String?, incoming: String?) -> String? {
+        if let incoming, !incoming.isEmpty { return incoming }
+        guard let stored, !stored.isEmpty else { return nil }
+        return stored
+    }
 }
 
 // MARK: - HerdSnapshot
@@ -779,7 +801,8 @@ public struct HerdSnapshot: Sendable {
             verdict: Self.displayVerdict(for: status, now: now),
             workspaceName: workspaceNames[info.workspaceId] ?? info.workspaceId,
             tabName: tabNames[info.tabId] ?? info.tabId,
-            cwd: AgentLabel.nonempty(info.foregroundCwd) ?? AgentLabel.nonempty(info.cwd) ?? ""
+            cwd: AgentLabel.nonempty(info.foregroundCwd) ?? AgentLabel.nonempty(info.cwd) ?? "",
+            sessionIdentity: info.sessionIdentity
         )
     }
 
