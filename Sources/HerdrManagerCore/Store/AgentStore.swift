@@ -101,6 +101,23 @@ public final class AgentStore {
     @ObservationIgnored
     private var paneBasis: [AgentID: PaneBasis] = [:]
 
+    /// Last agent-session identity seen for a pane, without the pane id.
+    /// `HerdrAgentInfo.occupantFingerprint` appends the pane id, so a
+    /// cross-workspace move never compares equal. The session value is what
+    /// stays put. Empty values are not stored: several panes can lack one,
+    /// and matching them would glue unrelated rows together.
+    @ObservationIgnored
+    private var sessionByPane: [AgentID: String] = [:]
+
+    /// Old id → new id for occupants the last *adopted* snapshot carried
+    /// onto a pane id the store had not seen. Empty when that snapshot
+    /// matched no session. A snapshot rejected for an older serial leaves
+    /// this as it was; callers that check the serial do not read it. The
+    /// menu bar follows selection, the silence alert, and the detection
+    /// hash. Not panel state.
+    @ObservationIgnored
+    public private(set) var sessionMoves: [AgentID: AgentID] = [:]
+
     /// Monotonic id of `captureHerdRequest()` calls. Not an event count:
     /// two polls with no event between them still get distinct serials.
     @ObservationIgnored
@@ -253,12 +270,32 @@ public final class AgentStore {
         var transitions: [AgentStatusTransition] = []
         var listed: Set<AgentID> = []
         let basesAtStart = paneBasis
+        // The request socket and the event socket are independent. A poll
+        // captured after a cross-workspace move can be applied before
+        // `pane.moved` is read. The new id is not in the store yet, so the
+        // row would start over and a blocked agent would alert again. The
+        // session value is the same occupant. Kind and title are not: two
+        // agents share those.
+        sessionMoves = [:]
+        let priors = sessionContinuations(
+            in: snapshot,
+            requestedAtEpoch: requestedAtEpoch,
+            basesAtStart: basesAtStart
+        )
+        var continued: Set<AgentID> = []
 
         for info in snapshot.agents {
             guard !info.paneId.isEmpty else { continue }
             let agentId = AgentID(info.paneId)
             listed.insert(agentId)
-            let existing = agents[agentId]
+            // `stored` is the row already published at this id. `prior` is
+            // a different pane whose session this id continues. The basis
+            // guard only looks at `stored`: folding the prior in would
+            // write an agent whose id is not the key, or reject the
+            // continuation because the other pane's seq is ahead.
+            let stored = agents[agentId]
+            let prior = stored == nil ? priors[agentId] : nil
+            let existing = stored ?? prior
             let priorBasis = basesAtStart[agentId]
 
             // Answered before an event that changed this pane: keep what
@@ -271,10 +308,10 @@ public final class AgentStore {
                 let predates = requestedAtEpoch.map { $0 < priorBasis.epoch } ?? true
                 let behindFloor = info.stateChangeSeq < priorBasis.seqFloor
                 let behindStored = requestedAtEpoch != nil
-                    && info.stateChangeSeq < (existing?.stateChangeSeq ?? 0)
+                    && info.stateChangeSeq < (stored?.stateChangeSeq ?? 0)
                 if predates && (behindFloor || behindStored) {
-                    if let existing {
-                        newAgents[agentId] = existing
+                    if let stored {
+                        newAgents[agentId] = stored
                     }
                     if requestedAtEpoch == nil {
                         paneBasis[agentId] = PaneBasis(
@@ -309,8 +346,12 @@ public final class AgentStore {
             // that snapshot has landed, a later seq bump is a new dwell.
             let seqUnchanged = existing?.stateChangeSeq == info.stateChangeSeq
             let statusUnchanged = existing?.status == status
+            // `continuesEpisode` belongs to an event on *this* id. A row
+            // carried from another pane already has its seq on this poll;
+            // borrowing the new id's flag would keep the mover's dwell
+            // across a seq change that belongs to someone who left.
             let sameEpisode = existing != nil && statusUnchanged
-                && (seqUnchanged || priorBasis?.continuesEpisode == true)
+                && (seqUnchanged || (prior == nil && priorBasis?.continuesEpisode == true))
             let enteredAt = sameEpisode ? existing!.enteredAt : Date()
 
             let kind: AgentKind
@@ -345,10 +386,26 @@ public final class AgentStore {
             )
             newAgents[agentId] = agent
             consumeEpisodeContinuation(agentId)
+            if let prior {
+                // The old id is the one a list from before this poll still
+                // names. Tombstone it the way a move event does. Do not mark
+                // the new id as continuing: this poll already has the seq,
+                // and a later bump is a new dwell.
+                sessionMoves[prior.id] = agentId
+                noteReplacedPane(prior.id, seq: info.stateChangeSeq == 0 ? prior.stateChangeSeq : info.stateChangeSeq)
+                continued.insert(prior.id)
+            }
             if existing != nil || hasAppliedHerd,
                let transition = Self.transition(from: existing?.status, to: agent) {
                 transitions.append(transition)
             }
+        }
+
+        // The new id was not published, because a stale basis rejected it.
+        // Keep the occupant on the old id. Dropping it would remove the
+        // only row.
+        for prior in priors.values where !continued.contains(prior.id) && newAgents[prior.id] == nil {
+            newAgents[prior.id] = prior
         }
 
         // A pane an event added or removed that this snapshot does not list.
@@ -382,7 +439,131 @@ public final class AgentStore {
         if newAgents != agents {
             agents = newAgents
         }
+        rememberSessions(from: snapshot, keptIds: newAgents.keys)
         return transitions
+    }
+
+    /// Panes this snapshot introduced whose session value belongs to exactly
+    /// one pane it dropped. Ambiguous values match nothing: two rows with
+    /// the same value must not trade dwell. A pane an earlier event is still
+    /// holding against this snapshot is not a source — the row stays, and
+    /// the new id is someone else.
+    private func sessionContinuations(
+        in snapshot: HerdSnapshot,
+        requestedAtEpoch: UInt64?,
+        basesAtStart: [AgentID: PaneBasis]
+    ) -> [AgentID: Agent] {
+        var listed: Set<AgentID> = []
+        var incoming: [AgentID: String] = [:]
+        for info in snapshot.agents {
+            guard !info.paneId.isEmpty else { continue }
+            guard let agent = info.agent, !agent.isEmpty else { continue }
+            let id = AgentID(info.paneId)
+            listed.insert(id)
+            if let session = Self.sessionIdentity(of: info) {
+                incoming[id] = session
+            }
+        }
+
+        func keptDespiteAbsence(_ id: AgentID) -> Bool {
+            guard let basis = basesAtStart[id], basis.seqFloor > 0 else { return false }
+            let predates = requestedAtEpoch.map { $0 < basis.epoch } ?? true
+            return predates
+        }
+
+        var removedBySession: [String: AgentID] = [:]
+        var removedAmbiguous: Set<String> = []
+        for id in agents.keys where !listed.contains(id) && !keptDespiteAbsence(id) {
+            guard let session = sessionByPane[id] else { continue }
+            if removedBySession[session] != nil || removedAmbiguous.contains(session) {
+                removedAmbiguous.insert(session)
+                removedBySession.removeValue(forKey: session)
+            } else {
+                removedBySession[session] = id
+            }
+        }
+
+        var addedBySession: [String: AgentID] = [:]
+        var addedAmbiguous: Set<String> = []
+        for (id, session) in incoming where agents[id] == nil {
+            if addedBySession[session] != nil || addedAmbiguous.contains(session) {
+                addedAmbiguous.insert(session)
+                addedBySession.removeValue(forKey: session)
+            } else {
+                addedBySession[session] = id
+            }
+        }
+
+        var priors: [AgentID: Agent] = [:]
+        for (session, newId) in addedBySession {
+            guard !addedAmbiguous.contains(session), !removedAmbiguous.contains(session),
+                  let oldId = removedBySession[session],
+                  let agent = agents[oldId] else { continue }
+            priors[newId] = agent
+        }
+        return priors
+    }
+
+    /// Remember who `agent.list` says is in each kept pane. A listed pane
+    /// with no session value forgets any identity it used to have, so a
+    /// later move cannot carry that occupant onto the wrong row. A pane
+    /// held over from an earlier event is not in this list; its identity
+    /// stays until a list names the pane.
+    private func rememberSessions(from snapshot: HerdSnapshot, keptIds: some Sequence<AgentID>) {
+        var incoming: [AgentID: String] = [:]
+        var listed: Set<AgentID> = []
+        for info in snapshot.agents {
+            guard !info.paneId.isEmpty else { continue }
+            let id = AgentID(info.paneId)
+            listed.insert(id)
+            if let session = Self.sessionIdentity(of: info) {
+                incoming[id] = session
+            }
+        }
+        var next: [AgentID: String] = [:]
+        for id in keptIds {
+            if let session = incoming[id] {
+                next[id] = session
+            } else if !listed.contains(id), let kept = sessionByPane[id] {
+                next[id] = kept
+            }
+        }
+        sessionByPane = next
+    }
+
+    /// Session identity without the pane id. `occupantFingerprint` is for
+    /// write revalidation of one pane and includes that id, so it changes
+    /// on a move. The value is herdr's agent-session id; an empty value is
+    /// not an id.
+    nonisolated private static func sessionIdentity(of info: HerdrAgentInfo) -> String? {
+        guard let session = info.agentSession, !session.value.isEmpty else { return nil }
+        return "\(session.source)|\(session.agent)|\(session.kind)|\(session.value)"
+    }
+
+    /// A list captured before this poll still names `paneId`. Keep it from
+    /// being inserted next to the row the poll already continued. The new
+    /// id is not marked as an open episode: the poll carried the real seq.
+    private func noteReplacedPane(_ paneId: AgentID, seq: UInt64) {
+        herdEpoch += 1
+        paneBasis[paneId] = PaneBasis(
+            epoch: herdEpoch,
+            seqFloor: Self.seq(after: seq),
+            continuesEpisode: false
+        )
+    }
+
+    /// The session moves with the row. A move payload often has no
+    /// `agent_session`; the identity the last list stored is the one a
+    /// later poll has to match. A payload that does name a session wins.
+    private func carrySession(of info: HerdrAgentInfo, from previousId: AgentID, to newId: AgentID) {
+        if let incoming = Self.sessionIdentity(of: info) {
+            if previousId != newId {
+                sessionByPane.removeValue(forKey: previousId)
+            }
+            sessionByPane[newId] = incoming
+        } else if previousId != newId, let carried = sessionByPane.removeValue(forKey: previousId) {
+            sessionByPane[newId] = carried
+        }
     }
 
     // MARK: - Events
@@ -509,6 +690,7 @@ public final class AgentStore {
                 cwd: info.foregroundCwd ?? info.cwd ?? existing?.cwd ?? ""
             )
             agents[agentId] = updated
+            carrySession(of: info, from: agentId, to: agentId)
             return Self.transition(from: existing?.status, to: updated)
 
         case .paneFocused:
@@ -655,6 +837,7 @@ public final class AgentStore {
         if next != agents {
             agents = next
         }
+        carrySession(of: info, from: previousId, to: newId)
         notePaneMove(
             from: previousId,
             to: newId,
@@ -692,6 +875,7 @@ public final class AgentStore {
     /// that event from adding it back.
     private func removeAfterEvent(_ agentId: AgentID, seq: UInt64? = nil) {
         guard let removed = agents.removeValue(forKey: agentId) else { return }
+        sessionByPane.removeValue(forKey: agentId)
         noteEventChange(for: agentId, seqFloor: seq ?? Self.seq(after: removed.stateChangeSeq))
     }
 

@@ -214,7 +214,7 @@ final class AppModel {
     /// paint the pre-event row back, and must not replace a read that was
     /// captured later even when no event landed between them. The new-agent
     /// caches follow the store: a dropped snapshot leaves them alone.
-    private func applyHerd(_ snapshot: HerdSnapshot, requestedAt: HerdRequestStamp) {
+    private func applyHerd(_ snapshot: HerdSnapshot, requestedAt: HerdRequestStamp) async {
         let transitions = store.applyHerdSnapshot(
             snapshot,
             requestedAtEpoch: requestedAt.epoch,
@@ -227,11 +227,28 @@ final class AppModel {
             .map { WorkspaceOption(id: $0.key, name: $0.value) }
             .sorted { $0.name < $1.name }
         considerFirstSuccess()
+        // Copied before any await. A later snapshot replaces `sessionMoves`.
+        let moves = store.sessionMoves
+        // The poll adopted the new pane id before `pane.moved`. Follow it
+        // now: a diagnosis pass can run before that event, and it would
+        // otherwise alert the silence again under the new id. Selection
+        // would stay on the id the poll already dropped.
+        for (from, to) in moves {
+            if selectedAgentId == from {
+                selectedAgentId = to
+            }
+            if let agent = store.agents[to], AttentionTriage.isActionablySilent(agent) {
+                silentAlerts.retarget(from: from, to: to)
+            }
+        }
         // When a poll sees a transition before its event, the event finds
         // the status unchanged and reports nothing; this is the only place
         // that transition surfaces. Seen by both, it is reported once.
         for transition in transitions {
             notifyAndDiagnoseIfNeeded(transition)
+        }
+        for (from, to) in moves {
+            await poller.retarget(from: from, to: to)
         }
     }
 
@@ -343,7 +360,7 @@ final class AppModel {
                 do {
                     let (snapshot, requestedAt) = try await self.herdSnapshotForApply()
                     // Probe succeeded -> we are (back) online.
-                    self.applyHerd(snapshot, requestedAt: requestedAt)
+                    await self.applyHerd(snapshot, requestedAt: requestedAt)
                     self.setConnection(.connected)
                     self.setHealth(self.adapter.health())
                     self.updateDwellForAllAgents()
@@ -378,7 +395,7 @@ final class AppModel {
             guard let self else { return }
             do {
                 let (snapshot, requestedAt) = try await self.herdSnapshotForApply()
-                self.applyHerd(snapshot, requestedAt: requestedAt)
+                await self.applyHerd(snapshot, requestedAt: requestedAt)
                 self.setConnection(.connected)
                 self.setHealth(self.adapter.health())
                 self.updateDwellForAllAgents()
@@ -401,7 +418,7 @@ final class AppModel {
         do {
             try await adapter.connect()
             let (snapshot, requestedAt) = try await herdSnapshotForApply()
-            applyHerd(snapshot, requestedAt: requestedAt)
+            await applyHerd(snapshot, requestedAt: requestedAt)
             setConnection(.connected)
             setHealth(adapter.health())
             updateDwellForAllAgents()
@@ -569,7 +586,7 @@ final class AppModel {
                     guard let self else { return }
                     do {
                         let (snapshot, requestedAt) = try await self.herdSnapshotForApply()
-                        self.applyHerd(snapshot, requestedAt: requestedAt)
+                        await self.applyHerd(snapshot, requestedAt: requestedAt)
                         self.setConnection(.connected)
                         self.setHealth(self.adapter.health())
                         self.updateDwellForAllAgents()
@@ -610,7 +627,15 @@ final class AppModel {
             // pane and alert again for the same silence.
             retargetSilentAlert(for: event)
             if let movedHeartbeat, store.agents[movedHeartbeat.to] != nil {
-                await poller.retarget(from: movedHeartbeat.from, to: movedHeartbeat.to)
+                switch movedHeartbeat.kind {
+                case .replace:
+                    await poller.retarget(from: movedHeartbeat.from, to: movedHeartbeat.to)
+                case .fillVacant:
+                    // The poll already published this id and moved the hash.
+                    // A hash that arrived on the new id since then is the
+                    // mover's screen; do not put the older one back.
+                    await poller.retargetVacant(from: movedHeartbeat.from, to: movedHeartbeat.to)
+                }
             }
             if let transition {
                 notifyAndDiagnoseIfNeeded(transition)
@@ -623,22 +648,47 @@ final class AppModel {
         guard !info.paneId.isEmpty, let kind = info.agent, !kind.isEmpty else { return }
         let previous = AgentID(previousPaneId.isEmpty ? info.paneId : previousPaneId)
         let newId = AgentID(info.paneId)
-        guard previous != newId, selectedAgentId == previous, store.agents[previous] != nil else { return }
+        // The poll may already have dropped the old id. Selection still
+        // names it, and the new id is the row that continued.
+        guard previous != newId, selectedAgentId == previous else { return }
+        guard store.agents[previous] != nil || store.agents[newId] != nil else { return }
         selectedAgentId = newId
     }
 
-    /// The tracked pane a move will re-key, before the store drops the old id.
+    /// How a move should treat the detection hash.
+    private struct HeartbeatCarry {
+        enum Kind {
+            /// The old id is still in the store. Its hash replaces whatever
+            /// the destination stored for a previous occupant.
+            case replace
+            /// A poll already adopted the new id, so the old row is gone.
+            /// Fill only when the destination has not been hashed yet.
+            case fillVacant
+        }
+
+        let kind: Kind
+        let from: AgentID
+        let to: AgentID
+    }
+
+    /// The pane a move will re-key, before the store drops the old id.
     ///
-    /// A shell move and a move of a pane the store is not tracking are not
-    /// included: there is no detection hash to carry, and the call after
-    /// apply still requires the row to land on the new id.
-    private func heartbeatRetarget(for event: HerdrEvent) -> (from: AgentID, to: AgentID)? {
+    /// A shell move is not included. A move of a pane the store is not
+    /// tracking is included only when the new id is already a row: the poll
+    /// adopted it, and the hash still needs a chance to follow.
+    private func heartbeatRetarget(for event: HerdrEvent) -> HeartbeatCarry? {
         guard case .paneMoved(let previousPaneId, let info, _, _) = event else { return nil }
         guard !info.paneId.isEmpty, let kind = info.agent, !kind.isEmpty else { return nil }
         let previous = AgentID(previousPaneId.isEmpty ? info.paneId : previousPaneId)
         let newId = AgentID(info.paneId)
-        guard previous != newId, store.agents[previous] != nil else { return nil }
-        return (previous, newId)
+        guard previous != newId else { return nil }
+        if store.agents[previous] != nil {
+            return HeartbeatCarry(kind: .replace, from: previous, to: newId)
+        }
+        if store.agents[newId] != nil {
+            return HeartbeatCarry(kind: .fillVacant, from: previous, to: newId)
+        }
+        return nil
     }
 
     /// Carry a silence already announced onto the id a move just published.
@@ -744,7 +794,7 @@ final class AppModel {
                 if let refusal = PromptAnswerCheck.refusal(answering: agent, in: snapshot) {
                     // Show what herdr reports now, so the row matches the
                     // reason and a retry uses the current episode.
-                    self.applyHerd(snapshot, requestedAt: requestedAt)
+                    await self.applyHerd(snapshot, requestedAt: requestedAt)
                     self.updateDwellForAllAgents()
                     self.setLastError("\(actionName) skipped: \(refusal.message)")
                     return

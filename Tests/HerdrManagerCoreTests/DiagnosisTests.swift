@@ -497,6 +497,69 @@ struct HeartbeatPollerHashTests {
         #expect(await poller.lastOutputDate(for: origin.id) == nil)
         #expect(await poller.lastOutputDate(for: moved.id) != nil)
     }
+
+    @Test("A vacant retarget fills an id that has not been polled")
+    func retargetVacantFillsAnUnpolledId() async {
+        let script = ReadScript(["one", "one", "two"])
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = script
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let moved = Agent(id: AgentID("wB:p4"), status: .working)
+
+        let baseline = await poller.poll(agents: [origin], adapter: adapter)
+        #expect(baseline.isEmpty)
+        await poller.retargetVacant(from: origin.id, to: moved.id)
+
+        let sameScreen = await poller.poll(agents: [moved], adapter: adapter)
+        #expect(sameScreen.isEmpty)
+        #expect(await poller.lastOutputDate(for: origin.id) == nil)
+
+        let changed = await poller.poll(agents: [moved], adapter: adapter)
+        #expect(changed[moved.id] != nil)
+    }
+
+    @Test("A vacant retarget keeps a hash the new id already stored")
+    func retargetVacantKeepsTheDestinationHash() async {
+        let script = ReadScript(["alpha", "alpha", "alpha", "beta"])
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = script
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let moved = Agent(id: AgentID("wB:p4"), status: .working)
+
+        let originBaseline = await poller.poll(agents: [origin], adapter: adapter)
+        #expect(originBaseline.isEmpty)
+        // The poll of the new id landed first and stored the mover's screen.
+        let destinationBaseline = await poller.poll(agents: [moved], adapter: adapter)
+        #expect(destinationBaseline.isEmpty)
+        await poller.retargetVacant(from: origin.id, to: moved.id)
+
+        let sameScreen = await poller.poll(agents: [moved], adapter: adapter)
+        #expect(sameScreen.isEmpty)
+        #expect(await poller.lastOutputDate(for: origin.id) == nil)
+
+        let changed = await poller.poll(agents: [moved], adapter: adapter)
+        #expect(changed[moved.id] != nil)
+    }
+
+    @Test("A vacant retarget does not clear a destination the origin never hashed")
+    func retargetVacantWithoutAHashLeavesTheDestination() async {
+        let script = ReadScript(["other", "other"])
+        var adapter = MockHerdrAdapter()
+        adapter.readScript = script
+        let poller = HeartbeatPoller()
+        let origin = Agent(id: AgentID("wA:p1"), status: .working)
+        let destination = Agent(id: AgentID("wB:p9"), status: .working)
+
+        let baseline = await poller.poll(agents: [destination], adapter: adapter)
+        #expect(baseline.isEmpty)
+        await poller.retargetVacant(from: origin.id, to: destination.id)
+
+        let sameScreen = await poller.poll(agents: [destination], adapter: adapter)
+        #expect(sameScreen.isEmpty)
+        #expect(await poller.lastOutputDate(for: destination.id) != nil)
+    }
 }
 
 // MARK: - Diagnoser silentThreshold Tests

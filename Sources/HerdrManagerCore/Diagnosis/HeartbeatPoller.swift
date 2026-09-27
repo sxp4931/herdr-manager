@@ -94,6 +94,26 @@ public actor HeartbeatPoller {
         }
     }
 
+    /// Move the origin's hash onto `newID` only when that id has none.
+    ///
+    /// A poll applied before `pane.moved` may already have hashed the new
+    /// id: that screen is the mover's, and replacing it would report the
+    /// same screen again. An id that has not been polled yet still needs
+    /// the hash the move carried, or the next read is a first look and
+    /// swallows the screen the pane landed on. An origin that was never
+    /// polled does not clear a hash the destination already stored.
+    public func retargetVacant(from previous: AgentID, to newID: AgentID) {
+        guard previous != newID else { return }
+        let hash = hashes.removeValue(forKey: previous)
+        let date = lastOutputDates.removeValue(forKey: previous)
+        if hashes[newID] == nil, let hash {
+            hashes[newID] = hash
+        }
+        if lastOutputDates[newID] == nil, let date {
+            lastOutputDates[newID] = date
+        }
+    }
+
     /// Remove tracking for an agent (e.g., when it's closed).
     public func remove(agentId: AgentID) {
         hashes.removeValue(forKey: agentId)
