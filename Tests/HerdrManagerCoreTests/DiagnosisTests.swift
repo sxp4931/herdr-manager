@@ -1297,10 +1297,11 @@ struct DiagnoserCpuSamplePidTests {
         _ pid: Int32,
         _ name: String,
         argv: [String]? = nil,
-        argv0: String? = nil
+        argv0: String? = nil,
+        cmdline: String? = nil
     ) -> ForegroundProcess {
         ForegroundProcess(
-            pid: pid, name: name, argv0: argv0, cmdline: nil, cwd: nil, argv: argv
+            pid: pid, name: name, argv0: argv0, cmdline: cmdline, cwd: nil, argv: argv
         )
     }
 
@@ -1372,6 +1373,99 @@ struct DiagnoserCpuSamplePidTests {
         let shell = process(7, "zsh")
         let node = process(8, "MainThread", argv: ["node", "codex"], argv0: "node")
         #expect(Diagnoser.cpuSamplePid([shell, node]) == 8)
+    }
+
+    @Test("The agent binary is the sample, not the shell that launched it")
+    func directAgentOutranksItsShell() {
+        let shell = process(2, "sh", argv: ["sh", "claude"])
+        let claude = process(8, "claude", argv: ["claude"])
+        #expect(Diagnoser.cpuSamplePid([shell, claude]) == 8)
+        #expect(Diagnoser.cpuSamplePid([claude, shell]) == 8)
+        let helper = process(1, "node", argv: ["node", "server.js"])
+        #expect(Diagnoser.cpuSamplePid([helper, shell, claude]) == 8)
+    }
+
+    @Test("A wrapper whose argv0 is the agent outranks a helper runtime")
+    func wrapperArgv0IsTheSample() {
+        let helper = process(3, "node", argv: ["node", "server.js"])
+        let wrapped = process(
+            40,
+            ".codex-wrapped",
+            argv: ["/etc/profiles/per-user/user/bin/codex", "--model", "gpt-5"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, wrapped]) == 40)
+        #expect(Diagnoser.cpuSamplePid([wrapped, helper]) == 40)
+        let shell = process(2, "sh", argv: ["sh", "/etc/profiles/per-user/user/bin/codex"])
+        #expect(Diagnoser.cpuSamplePid([shell, helper, wrapped]) == 40)
+
+        let main = process(
+            15,
+            "MainThread",
+            argv: ["/home/user/.local/share/pnpm/global/node_modules/opencode-ai/bin/opencode.exe"]
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, main]) == 15)
+
+        let fromArgv0 = process(11, "MainThread", argv0: "/nix/store/example/bin/claude-code")
+        #expect(Diagnoser.cpuSamplePid([helper, fromArgv0]) == 11)
+
+        let fromCmdline = process(
+            12,
+            ".codex-wrapped",
+            cmdline: "/etc/profiles/per-user/user/bin/codex --model gpt-5"
+        )
+        #expect(Diagnoser.cpuSamplePid([helper, fromCmdline]) == 12)
+
+        // The basename is not an agent. The helper runtime stays the sample.
+        let other = process(40, ".codex-wrapped", argv: ["/tmp/my-codex-helper"])
+        #expect(Diagnoser.cpuSamplePid([helper, other]) == 3)
+        // Eval is not a script, so a later path does not make this node the agent.
+        let eval = process(9, "node", argv: ["node", "-e", "setTimeout(() => {}, 60000)", "/tmp/codex"])
+        #expect(Diagnoser.cpuSamplePid([eval, wrapped]) == 40)
+    }
+
+    @Test("Windows Cursor's bundled node is the sample, and a lookalike is not")
+    func cursorBundledNodeIsTheSample() {
+        let version = #"C:\Users\user\AppData\Local\cursor-agent\versions\2026.08.11-e8db854"#
+        let cursor = process(
+            30,
+            "node.exe",
+            argv: [version + #"\node.exe"#, version + #"\index.js"#]
+        )
+        let helper = process(4, "node", argv: ["node", "server.js"])
+        #expect(Diagnoser.cpuSamplePid([helper, cursor]) == 30)
+        #expect(Diagnoser.cpuSamplePid([cursor, helper]) == 30)
+
+        let postinstall = process(
+            3,
+            "node.exe",
+            argv: [version + #"\node.exe"#, version + #"\scripts\postinstall.js"#]
+        )
+        let claude = process(12, "claude", argv: ["claude"])
+        #expect(Diagnoser.cpuSamplePid([postinstall, claude]) == 12)
+
+        let lookalike = process(
+            3,
+            "node.exe",
+            argv: [
+                #"C:\Program Files\nodejs\node.exe"#,
+                #"C:\workspace\cursor-agent\versions\test\index.js"#,
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([lookalike, claude]) == 12)
+        let git = process(8, "git", argv: ["git", "status"])
+        #expect(Diagnoser.cpuSamplePid([lookalike, git]) == 3)
+
+        // herdr's bundle check is `node.exe`, not `node`. The script agent wins.
+        let macNode = process(
+            30,
+            "node",
+            argv: [
+                "/Users/user/.local/share/cursor-agent/versions/2026.08.11/node",
+                "/Users/user/.local/share/cursor-agent/versions/2026.08.11/index.js",
+            ]
+        )
+        let script = process(4, "node", argv: ["node", "codex"])
+        #expect(Diagnoser.cpuSamplePid([macNode, script]) == 4)
     }
 }
 

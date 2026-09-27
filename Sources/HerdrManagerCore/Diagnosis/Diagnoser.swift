@@ -999,14 +999,18 @@ private enum ShellForeground {
     /// `proc_listpids` or the procfs walk returned. That is not "the
     /// agent is last". The old sample was `.last`, so a shell that
     /// happened to be last was the pid `ps` read, and the shell is idle
-    /// while the agent runs. A bare shell is not a sample. A `node` or
-    /// `bun` whose script is an agent outranks the shell that launched
-    /// it. A process whose own name is the agent outranks a runtime that
-    /// is not running that script, such as an MCP server in the same
-    /// group. Any other non-shell outranks the shell. The same rank
-    /// prefers a runtime over a shell interpreter, then the lower pid,
-    /// so a helper spawned later does not hide the process that started
-    /// the group.
+    /// while the agent runs. A bare shell is not a sample. The process
+    /// herdr already calls the agent outranks that shell and a helper
+    /// runtime: a `node` or `bun` whose script is an agent, the Windows
+    /// Cursor bundle (`node.exe` and `index.js` in the same
+    /// `cursor-agent/versions/<version>` directory), or a process whose
+    /// name, argv0, or argv[0] is the agent. The last of those is a nix
+    /// wrapper whose comm name is `.codex-wrapped`. A shell that is only
+    /// launching the agent stays below those, so its idle CPU is not the
+    /// reading while the agent is in the group. A plain runtime still
+    /// outranks any other helper. The same rank prefers a runtime over a
+    /// process that is not one, then the lower pid, so a helper spawned
+    /// later does not hide the process that started the group.
     static func cpuSamplePid(_ processes: [ForegroundProcess]) -> Int32? {
         var best: (key: SampleKey, pid: Int32)?
         for process in processes {
@@ -1032,7 +1036,9 @@ private enum ShellForeground {
     private static func sampleKey(_ process: ForegroundProcess) -> SampleKey? {
         let runtime = isGenericRuntime(process)
         let rank: Int
-        if runtime && runtimeScriptIsAgent(process) {
+        if runtime && (runtimeScriptIsAgent(process) || isCursorBundledNode(process)) {
+            rank = 4
+        } else if isDirectAgentProcess(process) {
             rank = 4
         } else if isKnownAgentProcess(process) {
             rank = 3
@@ -1044,6 +1050,73 @@ private enum ShellForeground {
             return nil
         }
         return SampleKey(rank: rank, runtime: runtime, pid: process.pid)
+    }
+
+    /// The comm name, the argv0 field, or argv[0] is an agent program.
+    ///
+    /// herdr reads argv[0] after the comm name fails. A nix wrapper's
+    /// comm name is `.codex-wrapped` and the agent path is that first
+    /// word; `MainThread` with `opencode.exe` there is the same shape.
+    /// A runtime's argv[0] is `node` or `python`, which is not an agent,
+    /// so the script check stays the one that ranks those. A shell's
+    /// argv[0] is the shell, so the interpreter stays at the lower rank.
+    private static func isDirectAgentProcess(_ process: ForegroundProcess) -> Bool {
+        if isKnownAgentProgram(process.name, cwd: process.cwd) { return true }
+        if let argv0 = process.argv0, isKnownAgentProgram(argv0, cwd: process.cwd) { return true }
+        if let program = launchArguments(process)?.first,
+           isKnownAgentProgram(program, cwd: process.cwd) {
+            return true
+        }
+        return false
+    }
+
+    /// Windows Cursor's install is `node.exe` beside `index.js`, under
+    /// `cursor-agent/versions/<version>`. The script basename is not an
+    /// agent, so the ordinary script check leaves it tied with an MCP
+    /// `node`. herdr only accepts `node.exe` for this layout: a plain
+    /// `node` plus `index.js` is a different program.
+    private static func isCursorBundledNode(_ process: ForegroundProcess) -> Bool {
+        guard let argv = launchArguments(process), argv.count >= 2 else { return false }
+        guard pathBase(argv[0]).caseInsensitiveCompare("node.exe") == .orderedSame,
+              pathBase(argv[1]).caseInsensitiveCompare("index.js") == .orderedSame,
+              let runtimeParent = parentPath(argv[0]),
+              let scriptParent = parentPath(argv[1]),
+              runtimeParent.caseInsensitiveCompare(scriptParent) == .orderedSame else {
+            return false
+        }
+        let parts = pathComponents(runtimeParent)
+        guard parts.count >= 3 else { return false }
+        let version = parts[parts.count - 1]
+        let versions = parts[parts.count - 2]
+        let package = parts[parts.count - 3]
+        return package.caseInsensitiveCompare("cursor-agent") == .orderedSame
+            && versions.caseInsensitiveCompare("versions") == .orderedSame
+            && !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Directory containing `path`, with trailing separators removed.
+    /// Nil when the path has no directory. Either slash counts: a remote
+    /// Windows `pane.process_info` uses backslashes.
+    private static func parentPath(_ path: String) -> String? {
+        var lastSeparator: String.Index?
+        for index in path.indices {
+            let character = path[index]
+            if character == "/" || character == "\\" {
+                lastSeparator = index
+            }
+        }
+        guard let lastSeparator else { return nil }
+        let before = path[..<lastSeparator]
+        guard let parentEnd = before.lastIndex(where: { $0 != "/" && $0 != "\\" }) else {
+            return nil
+        }
+        let basename = path[path.index(after: lastSeparator)...]
+        guard !basename.isEmpty else { return nil }
+        return String(path[...parentEnd])
+    }
+
+    private static func pathComponents(_ path: String) -> [String] {
+        path.split(whereSeparator: { $0 == "/" || $0 == "\\" }).map(String.init)
     }
 
     /// `node` / `bun` / `deno` / `python`, including `python3.11` and
@@ -1084,6 +1157,9 @@ private enum ShellForeground {
     /// The process name, argv0, or a shell wrapper already identifies an
     /// agent. A runtime's script is ranked separately, so `node server.js`
     /// does not become Claude because some other argument says so.
+    /// argv[0] on a wrapper whose comm name is not the agent is
+    /// `isDirectAgentProcess`: this check is what keeps the shell that
+    /// launched the agent above a helper, and below the agent itself.
     private static func isKnownAgentProcess(_ process: ForegroundProcess) -> Bool {
         if isKnownAgentProgram(process.name, cwd: process.cwd) { return true }
         if let argv0 = process.argv0, isKnownAgentProgram(argv0, cwd: process.cwd) { return true }
