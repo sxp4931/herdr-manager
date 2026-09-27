@@ -5825,6 +5825,184 @@ struct DiagnoserCpuSamplePidTests {
         )
         #expect(Diagnoser.cpuSamplePid([helper, bun]) == 20)
     }
+
+    @Test("a node secure heap or snapshot limit the runtime rejects is not the agent script")
+    func nodeSecureHeapAndSnapshotLimitAreNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23 exits before the file when `--secure-heap` is
+        // negative or, once it is at least 2, not a power of two.
+        // `--secure-heap-min` is checked only then, after the clamp.
+        // `--heapsnapshot-near-heap-limit` exits when `atoll` is
+        // negative. The last operand wins. `4abc` is 4 and `abc` is 0.
+        let rejected: [(String, [String])] = [
+            ("heap-3", ["node", "--secure-heap", "3", "/usr/local/bin/codex"]),
+            ("heap-eq", ["nodejs", "--secure-heap=3", "/tmp/codex"]),
+            ("heap-tail", ["node.exe", "--secure-heap", "3abc", "/usr/local/bin/codex"]),
+            ("heap-plus", ["node", "--secure-heap", "+3", "/tmp/codex"]),
+            ("heap-space", ["nodejs", "--secure-heap", " 3", "/usr/local/bin/codex"]),
+            ("heap-tab", ["node.exe", "--secure-heap", "\t3", "/tmp/codex"]),
+            ("heap-form", ["node", "--secure-heap", "\u{000C}3", "/usr/local/bin/codex"]),
+            ("heap-neg", ["nodejs", "--secure-heap=-1", "/tmp/codex"]),
+            ("heap-esc", ["node.exe", "--secure-heap", "\\-1", "/usr/local/bin/codex"]),
+            ("heap-min64", ["node", "--secure-heap=-9223372036854775808", "/tmp/codex"]),
+            ("heap-huge", ["nodejs", "--secure-heap", "9223372036854775807", "/usr/local/bin/codex"]),
+            ("heap-last", ["node.exe", "--secure-heap", "4", "--secure-heap", "3", "/tmp/codex"]),
+            ("min", ["node", "--secure-heap", "8", "--secure-heap-min", "3", "/usr/local/bin/codex"]),
+            ("min-6", ["nodejs", "--secure-heap=8", "--secure-heap-min=6", "/tmp/codex"]),
+            ("min-first", ["node.exe", "--secure-heap-min", "4", "--secure-heap", "3", "/usr/local/bin/codex"]),
+            ("min-clamp", [
+                "node", "--secure-heap", "4294967296", "--secure-heap-min", "2147483647",
+                "/tmp/codex",
+            ]),
+            ("near", ["nodejs", "--heapsnapshot-near-heap-limit=-1", "/usr/local/bin/codex"]),
+            ("near-esc", ["node.exe", "--heapsnapshot-near-heap-limit", "\\-1", "/tmp/codex"]),
+            ("near-space", ["node", "--heapsnapshot-near-heap-limit", " -2", "/usr/local/bin/codex"]),
+            ("near-form", ["nodejs", "--heapsnapshot-near-heap-limit=\u{000C}-1", "/tmp/codex"]),
+            ("near-last", [
+                "node.exe", "--heapsnapshot-near-heap-limit=2", "--heapsnapshot-near-heap-limit=-3",
+                "/usr/local/bin/codex",
+            ]),
+            ("near-min64", [
+                "node", "--heapsnapshot-near-heap-limit=-9223372036854775808", "/tmp/codex",
+            ]),
+            ("near-overflow", [
+                "nodejs", "--heapsnapshot-near-heap-limit=-9223372036854775809",
+                "/usr/local/bin/codex",
+            ]),
+            ("near-then-heap", [
+                "node.exe", "--heapsnapshot-near-heap-limit=2", "--secure-heap", "3", "/tmp/codex",
+            ]),
+            ("heap-then-near", [
+                "node", "--secure-heap", "4", "--heapsnapshot-near-heap-limit=-1",
+                "/usr/local/bin/codex",
+            ]),
+            ("title", ["nodejs", "--title", "helper", "--secure-heap", "3", "/tmp/codex"]),
+            ("strict", ["node.exe", "--use-strict", "--secure-heap=3", "/usr/local/bin/codex"]),
+            ("empty-eq", ["node", "--secure-heap=", "/tmp/codex"]),
+            ("near-dash", ["nodejs", "--heapsnapshot-near-heap-limit", "-1", "/usr/local/bin/codex"]),
+        ]
+        for (label, argv) in rejected {
+            let exited = process(4, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(label) ranked the path")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(label) took the sample from the leader slot"
+            )
+        }
+        #expect(
+            Diagnoser.cpuSamplePid([
+                process(4, "node", argv: ["node", "--secure-heap", "3", "/usr/local/bin/codex"])
+            ]) == 4
+        )
+
+        // `0` and `1` leave the heap off. A power of two runs, including
+        // a later `4` that replaces `3`. The minimum is clamped into
+        // the heap, so `6` beside `4` is `4`. A script written first is
+        // already the program.
+        let kept: [(String, [String])] = [
+            ("zero", ["node", "--secure-heap", "0", "/usr/local/bin/codex"]),
+            ("one", ["nodejs", "--secure-heap", "1", "/tmp/codex"]),
+            ("two", ["node.exe", "--secure-heap", "2", "/usr/local/bin/codex"]),
+            ("four", ["node", "--secure-heap=4", "/tmp/codex"]),
+            ("eight", ["nodejs", "--secure-heap", "+8", "/usr/local/bin/codex"]),
+            ("octal", ["node.exe", "--secure-heap", "08", "/tmp/codex"]),
+            ("tail", ["node", "--secure-heap", "4abc", "/usr/local/bin/codex"]),
+            ("hex", ["nodejs", "--secure-heap", "0x10", "/tmp/codex"]),
+            ("space", ["node.exe", "--secure-heap", " 4", "/usr/local/bin/codex"]),
+            ("eq-esc", ["node", "--secure-heap=\\-4", "/tmp/codex"]),
+            ("empty", ["nodejs", "--secure-heap", "", "/usr/local/bin/codex"]),
+            ("last", ["node.exe", "--secure-heap", "3", "--secure-heap", "4", "/tmp/codex"]),
+            ("min-only", ["node", "--secure-heap-min", "3", "/usr/local/bin/codex"]),
+            ("min-off", ["nodejs", "--secure-heap", "0", "--secure-heap-min", "3", "/tmp/codex"]),
+            ("min-clamped", ["node.exe", "--secure-heap", "4", "--secure-heap-min", "6", "/usr/local/bin/codex"]),
+            ("min-larger", ["node", "--secure-heap=4", "--secure-heap-min=16", "/tmp/codex"]),
+            ("min-two", ["nodejs", "--secure-heap", "2", "--secure-heap-min", "3", "/usr/local/bin/codex"]),
+            ("min-intmax", [
+                "node.exe", "--secure-heap", "16", "--secure-heap-min", "2147483647", "/tmp/codex",
+            ]),
+            ("min-neg", [
+                "node", "--secure-heap=8", "--secure-heap-min=-9223372036854775808",
+                "/usr/local/bin/codex",
+            ]),
+            ("megabyte", ["nodejs", "--secure-heap", "1048576", "/tmp/codex"]),
+            ("two-gig", ["node.exe", "--secure-heap", "2147483648", "/usr/local/bin/codex"]),
+            ("near-zero", ["node", "--heapsnapshot-near-heap-limit", "0", "/tmp/codex"]),
+            ("near-one", ["nodejs", "--heapsnapshot-near-heap-limit=1", "/usr/local/bin/codex"]),
+            ("near-abc", ["node.exe", "--heapsnapshot-near-heap-limit", "abc", "/tmp/codex"]),
+            ("near-trunc", ["node", "--heapsnapshot-near-heap-limit", "1.5", "/usr/local/bin/codex"]),
+            ("near-plus", ["nodejs", "--heapsnapshot-near-heap-limit", "+1", "/tmp/codex"]),
+            ("near-neg-zero", ["node.exe", "--heapsnapshot-near-heap-limit=-0", "/usr/local/bin/codex"]),
+            ("near-eq-esc", ["node", "--heapsnapshot-near-heap-limit=\\-1", "/tmp/codex"]),
+            ("near-last", [
+                "nodejs", "--heapsnapshot-near-heap-limit=-1", "--heapsnapshot-near-heap-limit=2",
+                "/usr/local/bin/codex",
+            ]),
+            ("near-overflow", [
+                "node.exe", "--heapsnapshot-near-heap-limit=9223372036854775808", "/tmp/codex",
+            ]),
+            ("script-first", ["node", "/usr/local/bin/codex", "--secure-heap", "3"]),
+            ("flag-after", ["nodejs", "--secure-heap", "4", "/tmp/codex", "--heapsnapshot-near-heap-limit=-1"]),
+            ("title", ["node.exe", "--secure-heap", "4", "--title", "helper", "/usr/local/bin/codex"]),
+        ]
+        for (label, argv) in kept {
+            let running = process(20, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(label) dropped the script")
+        }
+        let leader = process(
+            20,
+            "node",
+            argv: ["node", "--secure-heap", "4", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+
+        let badHeap = process(
+            8, "node", argv: ["node", "--secure-heap", "3", "/tmp/letta"]
+        )
+        let badNear = process(
+            8, "nodejs", argv: ["nodejs", "--heapsnapshot-near-heap-limit=-1", "/tmp/letta"]
+        )
+        let keptLetta = process(
+            40, "node.exe", argv: ["node.exe", "--secure-heap", "4", "/tmp/letta"]
+        )
+        let keptNear = process(
+            40, "node", argv: ["node", "--heapsnapshot-near-heap-limit", "abc", "/tmp/letta"]
+        )
+        let oneShot = process(
+            40,
+            "nodejs",
+            argv: ["nodejs", "--secure-heap", "4", "/tmp/letta", "--prompt"]
+        )
+        #expect(Diagnoser.cpuSamplePid([badHeap, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badHeap, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([badNear, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badNear, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, keptLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, keptNear]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, oneShot]) == 10)
+        #expect(Diagnoser.cpuSamplePid([oneShot, interactive]) == 30)
+
+        // Bun does not take `--secure-heap`'s next word, so `3` is the
+        // script and the codex path is not. An attached snapshot limit
+        // is one word, and the path after it still is the script.
+        // Python exits on the unknown option.
+        let bunHeap = process(
+            20, "bun", argv: ["bun", "--secure-heap", "3", "/usr/local/bin/codex"]
+        )
+        let bunNear = process(
+            20, "bun", argv: ["bun", "--heapsnapshot-near-heap-limit=-1", "/usr/local/bin/codex"]
+        )
+        let python = process(
+            4, "python3", argv: ["python3", "--secure-heap", "3", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([bunHeap]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bunHeap]) == 10)
+        #expect(Diagnoser.cpuSamplePid([helper, bunNear]) == 20)
+        #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
+    }
 }
 
 @Suite("Diagnoser finished vs process-gone")

@@ -1225,6 +1225,12 @@ private enum ShellForeground {
                 // still are. `--watch` without a path still runs
                 // beside `--test`. A later `--no-watch`,
                 // `--no-interactive`, or `--no-test-force-exit` wins.
+                // `--secure-heap` of 3, or any negative, exits before
+                // the file, and so does a `--secure-heap-min` that is
+                // not a power of two once that heap is on. `0`, `1`,
+                // and a power of two still are Letta. A negative
+                // `--heapsnapshot-near-heap-limit` is not; `0` and
+                // `abc` still are.
                 // Bun rejects `-W`,
                 // `-X`, `-S`, `-L`, and `-o`; the path after one is
                 // not Letta. A bun value that starts with `-` is not
@@ -2668,10 +2674,16 @@ private enum ShellForeground {
     /// run; `nope`, `0`, `101`, and `inf` do not).
     /// `--experimental-test-isolation` exits only when `--test` is on
     /// and the last operand is not `none` or `process`. Without
-    /// `--test`, `nope` still runs the file. Bun does not use this
-    /// check: `--title --watch` runs the file, `--not-a-flag` is the
-    /// script, and `--cwd` takes the directory. Python's `-W` and
-    /// `-X` still take the next word.
+    /// `--test`, `nope` still runs the file.
+    /// `--heapsnapshot-near-heap-limit` exits when the last `atoll`
+    /// value is negative (`=-1`, `\-1`). `0` and `abc` still run.
+    /// `--secure-heap` below 0 aborts inside OpenSSL, and a value of
+    /// at least 2 that is not a power of two is `CheckOptions`.
+    /// `--secure-heap-min` is checked only once that heap is on, after
+    /// Node clamps it. `0`, `1`, `4`, and `4abc` still run. Bun does
+    /// not use this check: `--title --watch` runs the file,
+    /// `--not-a-flag` is the script, and `--cwd` takes the directory.
+    /// Python's `-W` and `-X` still take the next word.
     private static func nodeOption(
         _ arg: String,
         following: String?,
@@ -2841,6 +2853,13 @@ private enum ShellForeground {
     /// `--no-test` leaves the file running, including `nope`. A script
     /// written first is not this check. `--test=` is still
     /// `equalsRejected` when the walk reaches that word.
+    /// `--heapsnapshot-near-heap-limit` uses `std::atoll`: a negative
+    /// result exits, and the last operand wins. `abc` is 0 and still
+    /// runs. `--secure-heap` below 0 does not run the file (OpenSSL
+    /// aborts). A heap of at least 2 has to be a power of two.
+    /// `--secure-heap-min` is read only then, after the clamp in
+    /// `PerProcessOptions::CheckOptions`. The last operand of each
+    /// flag wins, so an earlier `3` does not hide a later `4`.
     private static func nodeRejectedOperand(
         name: String,
         value: String,
@@ -2858,6 +2877,15 @@ private enum ShellForeground {
             return NodePercentage.rejects(value)
         }
         let prefix = nodePrefixFlags(argv)
+        if name == "--heapsnapshot-near-heap-limit" {
+            // The last operand, not this word. `=-1` and a separate
+            // `\-1` are negative. `abc` is 0. A separate `-1` never
+            // reaches here: it is a missing argument.
+            return prefix.nearHeapLimit < 0
+        }
+        if name == "--secure-heap" || name == "--secure-heap-min" {
+            return nodeSecureHeapExits(heap: prefix.secureHeap, minimum: prefix.secureHeapMin)
+        }
         if name == "--experimental-test-isolation" {
             // `CheckOptions` reads this only inside `if (test_runner)`.
             // The last operand wins. `none` and `process` are the only
@@ -2948,10 +2976,129 @@ private enum ShellForeground {
         }
     }
 
-    /// Booleans read from the flags before the first positional. A
-    /// later `--no-` wins, and `--flag=false` is still on: Node's
-    /// boolean parser does not read the attached word. `--cpu-prof-name`
-    /// is not `--cpu-prof`.
+    private enum NodeIntegerFlag {
+        case secureHeap
+        case secureHeapMin
+        case nearHeapLimit
+    }
+
+    /// One integer option and the `std::atoll` value Node keeps.
+    private struct NodeIntegerOperand {
+        var flag: NodeIntegerFlag
+        var value: Int64
+        var width: Int
+    }
+
+    /// `--secure-heap`, `--secure-heap-min`, and
+    /// `--heapsnapshot-near-heap-limit`. Nil for every other word.
+    ///
+    /// The minimum is matched before the heap so `--secure-heap-min`
+    /// is not the shorter name. An attached value is `atoll` of the
+    /// text after `=`, backslash included. A separate `\-1` drops that
+    /// backslash first. A missing word is 0; the walk already treats
+    /// that as a missing argument and does not name a script.
+    private static func nodeIntegerOperand(
+        _ arg: String,
+        argv: [String],
+        index: Int
+    ) -> NodeIntegerOperand? {
+        let flags: [(String, NodeIntegerFlag)] = [
+            ("--secure-heap-min", .secureHeapMin),
+            ("--secure-heap", .secureHeap),
+            ("--heapsnapshot-near-heap-limit", .nearHeapLimit),
+        ]
+        for (name, flag) in flags {
+            if arg == name {
+                let raw = index + 1 < argv.count ? argv[index + 1] : ""
+                return NodeIntegerOperand(
+                    flag: flag,
+                    value: nodeAtoll(nodeUnescapedDash(raw)),
+                    width: 2
+                )
+            }
+            let attached = name + "="
+            if arg.hasPrefix(attached) {
+                return NodeIntegerOperand(
+                    flag: flag,
+                    value: nodeAtoll(String(arg.dropFirst(attached.count))),
+                    width: 1
+                )
+            }
+        }
+        return nil
+    }
+
+    /// A separate word `\-1` is the value `-1`. Node only strips that
+    /// prefix when the word was not attached with `=`.
+    private static func nodeUnescapedDash(_ value: String) -> String {
+        guard value.hasPrefix("\\-") else { return value }
+        return String(value.dropFirst())
+    }
+
+    /// `std::atoll`. Leading C whitespace, one optional sign, then
+    /// base-10 digits. The rest of the word is ignored, so `4abc` is 4
+    /// and `0x10` is 0. No digit is 0. A value past `Int64` saturates.
+    private static func nodeAtoll(_ value: String) -> Int64 {
+        let scalars = Array(value.unicodeScalars)
+        var index = 0
+        while index < scalars.count, nodeIsCSpace(scalars[index]) {
+            index += 1
+        }
+        var negative = false
+        if index < scalars.count {
+            let sign = scalars[index].value
+            if sign == 43 || sign == 45 {
+                negative = sign == 45
+                index += 1
+            }
+        }
+        var magnitude: UInt64 = 0
+        var digits = 0
+        var overflow = false
+        while index < scalars.count {
+            let character = scalars[index]
+            guard character.value >= 48, character.value <= 57 else { break }
+            let digit = UInt64(character.value - 48)
+            if magnitude > (UInt64.max - digit) / 10 {
+                overflow = true
+                break
+            }
+            magnitude = magnitude * 10 + digit
+            digits += 1
+            index += 1
+        }
+        if digits == 0 { return 0 }
+        if negative {
+            let limit = UInt64(Int64.max) + 1
+            if overflow || magnitude >= limit { return Int64.min }
+            return -Int64(magnitude)
+        }
+        if overflow || magnitude > UInt64(Int64.max) { return Int64.max }
+        return Int64(magnitude)
+    }
+
+    /// OpenSSL aborts when `--secure-heap` is negative, so the file
+    /// does not run. `CheckOptions` rejects a heap of at least 2 that
+    /// is not a power of two, then clamps the minimum to
+    /// `max(2, min(heap, minimum, INT_MAX))` and requires that to be a
+    /// power of two as well. A heap below 2 is off, and the minimum
+    /// is not read.
+    private static func nodeSecureHeapExits(heap: Int64, minimum: Int64) -> Bool {
+        if heap < 0 { return true }
+        if heap < 2 { return false }
+        if !nodeIsPowerOfTwo(heap) { return true }
+        let clamped = max(Int64(2), min(minimum, min(heap, Int64(Int32.max))))
+        return !nodeIsPowerOfTwo(clamped)
+    }
+
+    private static func nodeIsPowerOfTwo(_ value: Int64) -> Bool {
+        value > 0 && value & (value - 1) == 0
+    }
+
+    /// Booleans and the last integer operands, read from the flags
+    /// before the first positional. A later `--no-` wins, and
+    /// `--flag=false` is still on: Node's boolean parser does not read
+    /// the attached word. `--cpu-prof-name` is not `--cpu-prof`.
     private struct NodePrefix {
         var cpuProf = false
         var heapProf = false
@@ -2984,6 +3131,16 @@ private enum ShellForeground {
         /// script. Nil when that flag was not set. Node keeps the last
         /// one, including an empty word.
         var testIsolation: String?
+        /// Last `--secure-heap` before the script. `std::atoll`. The
+        /// default 0 leaves the secure heap off.
+        var secureHeap: Int64 = 0
+        /// Last `--secure-heap-min`. The default is 2, which is what
+        /// Node uses when the flag is absent. Checked only when
+        /// `secureHeap` is at least 2.
+        var secureHeapMin: Int64 = 2
+        /// Last `--heapsnapshot-near-heap-limit`. The default is 0.
+        /// A negative value exits in `CheckOptions`.
+        var nearHeapLimit: Int64 = 0
 
         /// TLS pair, CA pair, `--test` with `--interactive` / `-i` or
         /// with `--watch-path`, or `--watch` with `--interactive` /
@@ -3067,6 +3224,18 @@ private enum ShellForeground {
                 state.watchPath = true
                 state.watch = true
                 index += arg.hasPrefix("--watch-path=") ? 1 : 2
+                continue
+            }
+            if let integer = nodeIntegerOperand(arg, argv: argv, index: index) {
+                switch integer.flag {
+                case .secureHeap:
+                    state.secureHeap = integer.value
+                case .secureHeapMin:
+                    state.secureHeapMin = integer.value
+                case .nearHeapLimit:
+                    state.nearHeapLimit = integer.value
+                }
+                index += integer.width
                 continue
             }
             let width = arg.contains("=") || !nodeTakesSeparateValue(arg) ? 1 : 2
