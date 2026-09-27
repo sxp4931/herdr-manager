@@ -714,17 +714,24 @@ actor MCPServer {
             // Record the observed episode so the consecutive-answer cap
             // resets when it actually changes. A newer read whose seq went
             // backwards is a herdr restart: that resets too, or the cap
-            // stays stuck on this pane id for the life of the process.
-            // An older in-flight read cannot clear it.
+            // stays stuck for the life of the process. An older in-flight
+            // read cannot clear it. The session is the budget, so a move
+            // to a new pane id is still this episode's cap.
             await policy.recordStatusChange(
                 agentId: agentIdStr,
                 newSeq: currentSeq,
                 observationSerial: readSerial,
-                occupantFingerprint: paneInfo.occupantFingerprint
+                occupantFingerprint: paneInfo.occupantFingerprint,
+                sessionIdentity: paneInfo.sessionIdentity
             )
 
-            // Check policy
-            let policyResult = await policy.checkWriteAllowed(agentId: agentIdStr, tier: .gated)
+            // Check policy. The session has to travel with the pane id:
+            // the cap and the cooldown are stored on it.
+            let policyResult = await policy.checkWriteAllowed(
+                agentId: agentIdStr,
+                tier: .gated,
+                sessionIdentity: paneInfo.sessionIdentity
+            )
             guard policyResult.allowed else {
                 return makeToolError("Policy denied: \(policyResult.reason ?? "unknown")")
             }
@@ -756,8 +763,8 @@ actor MCPServer {
             }
             try await adapter.sendKeys(paneId: paneId, keys: resolvedKeys)
 
-            await policy.recordWrite(agentId: agentIdStr)
-            await policy.recordAnswer(agentId: agentIdStr)
+            await policy.recordWrite(agentId: agentIdStr, sessionIdentity: paneInfo.sessionIdentity)
+            await policy.recordAnswer(agentId: agentIdStr, sessionIdentity: paneInfo.sessionIdentity)
 
             // Capture fingerprint in params for audit trail
             var params: [String: String] = ["agent_id": agentIdStr, "choice": choice]
@@ -813,7 +820,11 @@ actor MCPServer {
             let status = paneInfo.agentStatus
             let tier: AuthorityTier = (status == "idle" || status == "done") ? .gated : .confirm
 
-            let policyResult = await policy.checkWriteAllowed(agentId: agentIdStr, tier: tier)
+            let policyResult = await policy.checkWriteAllowed(
+                agentId: agentIdStr,
+                tier: tier,
+                sessionIdentity: paneInfo.sessionIdentity
+            )
             guard policyResult.allowed else {
                 return makeToolError("Policy denied: \(policyResult.reason ?? "unknown")")
             }
@@ -882,7 +893,10 @@ actor MCPServer {
                             preState: "status=\(status)", error: error
                         )
                     }
-                    await policy.recordWrite(agentId: current.paneId)
+                    await policy.recordWrite(
+                        agentId: current.paneId,
+                        sessionIdentity: current.sessionIdentity
+                    )
                     try? await sharedActionStore.markExecuted(actionId)
 
                     await journal.record(JournalEntry(
@@ -920,7 +934,7 @@ actor MCPServer {
             // Gated tier: auto-allowed
             if let error = await checkWritesEnabled() { return error }
             try await adapter.prompt(paneId: paneId, text: text)
-            await policy.recordWrite(agentId: agentIdStr)
+            await policy.recordWrite(agentId: agentIdStr, sessionIdentity: paneInfo.sessionIdentity)
 
             var params: [String: String] = [
                 "agent_id": agentIdStr,
@@ -1030,7 +1044,10 @@ actor MCPServer {
                         preState: "status=\(paneInfo.agentStatus)", error: error
                     )
                 }
-                await policy.recordWrite(agentId: current.paneId)
+                await policy.recordWrite(
+                    agentId: current.paneId,
+                    sessionIdentity: current.sessionIdentity
+                )
                 try? await sharedActionStore.markExecuted(actionId)
 
                 await journal.record(JournalEntry(
@@ -1139,7 +1156,10 @@ actor MCPServer {
                         keepForever: true
                     )
                 }
-                await policy.recordWrite(agentId: current.paneId)
+                await policy.recordWrite(
+                    agentId: current.paneId,
+                    sessionIdentity: current.sessionIdentity
+                )
                 try? await sharedActionStore.markExecuted(actionId)
 
                 await journal.record(JournalEntry(
@@ -2193,7 +2213,7 @@ actor MCPServer {
         // MARK: Write Tools
         [
             "name": "agent.answer",
-            "description": "Reply to a blocked agent's prompt with a bounded choice. Requires status=blocked. Maps choice to key sequences: approve→enter, deny→esc, accept_once→down+enter, select→arrows+enter, cancel→esc. Max 3 consecutive answers without status change.",
+            "description": "Reply to a blocked agent's prompt with a bounded choice. Requires status=blocked. Maps choice to key sequences: approve→enter, deny→esc, accept_once→down+enter, select→arrows+enter, cancel→esc. Max 3 consecutive answers without a status change. The same agent session keeps that cap when its pane id changes.",
             "inputSchema": [
                 "type": "object",
                 "properties": [

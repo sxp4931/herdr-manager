@@ -1119,6 +1119,219 @@ struct PolicyEngineTests {
         let stillBlocked = await engine.checkWriteAllowed(agentId: "w1:p1", tier: .gated)
         #expect(!stillBlocked.allowed)
     }
+
+    @Test("The answer cap follows a session onto the pane id it moved to")
+    func answerCapFollowsSession() async {
+        let engine = PolicyEngine()
+        let session = "agent|claude|session|abc"
+        await engine.recordStatusChange(
+            agentId: "wA:p1", newSeq: 5, observationSerial: 1,
+            occupantFingerprint: fingerprint(session, pane: "wA:p1"),
+            sessionIdentity: session
+        )
+        await fillCap(engine, pane: "wA:p1", session: session)
+
+        // The pane the answers named still refuses a check that has no
+        // session. The new id does too, once this read has seen it.
+        let origin = await engine.checkWriteAllowed(agentId: "wA:p1", tier: .gated)
+        #expect(!origin.allowed)
+        await engine.recordStatusChange(
+            agentId: "wB:p4", newSeq: 5, observationSerial: 2,
+            occupantFingerprint: fingerprint(session, pane: "wB:p4"),
+            sessionIdentity: session
+        )
+        let moved = await engine.checkWriteAllowed(
+            agentId: "wB:p4", tier: .gated, sessionIdentity: session
+        )
+        #expect(!moved.allowed)
+        #expect(moved.reason?.contains("Consecutive") == true)
+        let movedWithoutSession = await engine.checkWriteAllowed(agentId: "wB:p4", tier: .gated)
+        #expect(!movedWithoutSession.allowed)
+
+        // The next occupant of the new id is not stuck with that cap.
+        // The session that moved still is.
+        let successor = "agent|claude|session|next"
+        let nextOccupant = await engine.checkWriteAllowed(
+            agentId: "wB:p4", tier: .gated, sessionIdentity: successor
+        )
+        #expect(nextOccupant.allowed)
+        await engine.recordStatusChange(
+            agentId: "wB:p4", newSeq: 5, observationSerial: 3,
+            occupantFingerprint: fingerprint(successor, pane: "wB:p4"),
+            sessionIdentity: successor
+        )
+        let successorAfterObserve = await engine.checkWriteAllowed(
+            agentId: "wB:p4", tier: .gated, sessionIdentity: successor
+        )
+        #expect(successorAfterObserve.allowed)
+        let originalStillCapped = await engine.checkWriteAllowed(
+            agentId: "wC:p8", tier: .gated, sessionIdentity: session
+        )
+        #expect(!originalStillCapped.allowed)
+    }
+
+    @Test("A longer session value does not inherit a shorter session's cap")
+    func sessionPrefixDoesNotMatch() async {
+        let engine = PolicyEngine()
+        let session = "agent|claude|session|abc"
+        let longer = "agent|claude|session|abcd"
+        await engine.recordStatusChange(
+            agentId: "wA:p1", newSeq: 5, observationSerial: 1,
+            occupantFingerprint: fingerprint(session, pane: "wA:p1"),
+            sessionIdentity: session
+        )
+        await fillCap(engine, pane: "wA:p1", session: session)
+
+        await engine.recordStatusChange(
+            agentId: "wB:p4", newSeq: 5, observationSerial: 2,
+            occupantFingerprint: fingerprint(longer, pane: "wB:p4"),
+            sessionIdentity: longer
+        )
+        let other = await engine.checkWriteAllowed(
+            agentId: "wB:p4", tier: .gated, sessionIdentity: longer
+        )
+        #expect(other.allowed)
+        let stillCapped = await engine.checkWriteAllowed(
+            agentId: "wA:p1", tier: .gated, sessionIdentity: session
+        )
+        #expect(!stillCapped.allowed)
+    }
+
+    @Test("A fingerprint from a different session resets the cap at the same seq")
+    func foreignFingerprintResetsSessionCap() async {
+        let engine = PolicyEngine()
+        let session = "agent|claude|session|abc"
+        let longer = "agent|claude|session|abcd"
+        await engine.recordStatusChange(
+            agentId: "wA:p1", newSeq: 5, observationSerial: 1,
+            occupantFingerprint: fingerprint(session, pane: "wA:p1"),
+            sessionIdentity: session
+        )
+        await fillCap(engine, pane: "wA:p1", session: session)
+        await engine.recordStatusChange(
+            agentId: "wA:p1", newSeq: 5, observationSerial: 2,
+            occupantFingerprint: fingerprint(longer, pane: "wA:p1"),
+            sessionIdentity: session
+        )
+        let reset = await engine.checkWriteAllowed(
+            agentId: "wA:p1", tier: .gated, sessionIdentity: session
+        )
+        #expect(reset.allowed)
+    }
+
+    @Test("A herdr restart on the new pane id resets the session cap")
+    func restartOnMovedPaneResetsCap() async {
+        let engine = PolicyEngine()
+        let session = "agent|claude|session|abc"
+        await engine.recordStatusChange(
+            agentId: "wA:p1", newSeq: 9, observationSerial: 1,
+            occupantFingerprint: fingerprint(session, pane: "wA:p1"),
+            sessionIdentity: session
+        )
+        await fillCap(engine, pane: "wA:p1", session: session)
+        await engine.recordStatusChange(
+            agentId: "wB:p4", newSeq: 1, observationSerial: 2,
+            occupantFingerprint: fingerprint(session, pane: "wB:p4"),
+            sessionIdentity: session
+        )
+        let reset = await engine.checkWriteAllowed(
+            agentId: "wB:p4", tier: .gated, sessionIdentity: session
+        )
+        #expect(reset.allowed)
+    }
+
+    @Test("A stale read of the moved pane does not reset the session cap")
+    func staleReadOfMovedPaneKeepsCap() async {
+        let engine = PolicyEngine()
+        let session = "agent|claude|session|abc"
+        await engine.recordStatusChange(
+            agentId: "wA:p1", newSeq: 5, observationSerial: 2,
+            occupantFingerprint: fingerprint(session, pane: "wA:p1"),
+            sessionIdentity: session
+        )
+        await fillCap(engine, pane: "wA:p1", session: session)
+        await engine.recordStatusChange(
+            agentId: "wB:p4", newSeq: 1, observationSerial: 1,
+            occupantFingerprint: fingerprint(session, pane: "wB:p4"),
+            sessionIdentity: session
+        )
+        let stillCapped = await engine.checkWriteAllowed(
+            agentId: "wB:p4", tier: .gated, sessionIdentity: session
+        )
+        #expect(!stillCapped.allowed)
+    }
+
+    @Test("An empty session identity stays on the pane id")
+    func emptySessionDoesNotAliasPanes() async {
+        let engine = PolicyEngine()
+        await fillCap(engine, pane: "wA:p1", session: "")
+        let origin = await engine.checkWriteAllowed(
+            agentId: "wA:p1", tier: .gated, sessionIdentity: ""
+        )
+        #expect(!origin.allowed)
+        let other = await engine.checkWriteAllowed(
+            agentId: "wB:p4", tier: .gated, sessionIdentity: ""
+        )
+        #expect(other.allowed)
+    }
+
+    @Test("A write's cooldown follows the session onto the pane it moved to")
+    func cooldownFollowsSession() async {
+        let engine = PolicyEngine()
+        let session = "agent|claude|session|abc"
+        await engine.recordWrite(agentId: "wA:p1", sessionIdentity: session)
+
+        let moved = await engine.checkWriteAllowed(
+            agentId: "wB:p4", tier: .confirm, sessionIdentity: session
+        )
+        #expect(!moved.allowed)
+        #expect(moved.reason?.contains("Per-agent") == true)
+
+        // The pane that was written stays in cooldown for a check that
+        // has no session, and for a different session now in that pane.
+        let origin = await engine.checkWriteAllowed(agentId: "wA:p1", tier: .confirm)
+        #expect(!origin.allowed)
+        let otherSessionSamePane = await engine.checkWriteAllowed(
+            agentId: "wA:p1", tier: .confirm, sessionIdentity: "agent|claude|session|other"
+        )
+        #expect(!otherSessionSamePane.allowed)
+
+        let elsewhere = await engine.checkWriteAllowed(
+            agentId: "wC:p8", tier: .confirm, sessionIdentity: "agent|claude|session|other"
+        )
+        #expect(elsewhere.allowed)
+    }
+
+    @Test("A session-keyed write counts once toward the global limit")
+    func sessionWriteCountsOnceGlobally() async {
+        let engine = PolicyEngine()
+        let session = "agent|claude|session|abc"
+        for pane in ["wA:p1", "wA:p2", "wA:p3"] {
+            await engine.recordWrite(agentId: pane, sessionIdentity: session)
+        }
+        let afterThree = await engine.checkWriteAllowed(
+            agentId: "wB:p9", tier: .confirm, sessionIdentity: "agent|claude|session|other"
+        )
+        #expect(afterThree.allowed)
+        for pane in ["wA:p4", "wA:p5", "wA:p6"] {
+            await engine.recordWrite(agentId: pane, sessionIdentity: session)
+        }
+        let afterSix = await engine.checkWriteAllowed(
+            agentId: "wB:p9", tier: .confirm, sessionIdentity: "agent|claude|session|other"
+        )
+        #expect(!afterSix.allowed)
+        #expect(afterSix.reason?.contains("Global") == true)
+    }
+
+    private func fingerprint(_ session: String, pane: String) -> String {
+        "session|\(session)|\(pane)"
+    }
+
+    private func fillCap(_ engine: PolicyEngine, pane: String, session: String) async {
+        for _ in 0..<3 {
+            await engine.recordAnswer(agentId: pane, sessionIdentity: session)
+        }
+    }
 }
 
 // MARK: - SharedActionStore concurrency (single process / actor serialization)

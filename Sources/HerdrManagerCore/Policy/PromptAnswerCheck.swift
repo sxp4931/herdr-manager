@@ -128,10 +128,12 @@ public enum PromptAnswerCheck: Sendable {
 /// same occupant as the read that authorized the answer.
 ///
 /// A move to a new pane id refuses, including when the same session is
-/// still blocked there. The answer cap was recorded against the id this
-/// read authorized. Confirm-tier writes follow that session
-/// (`ConfirmedPaneFollow`); they do not spend the cap, and their wait is
-/// long enough for the move to be the common case.
+/// still blocked there. `explain` was addressed to the pane this read
+/// authorized. After the move that id can be a shell, and the block kind
+/// that justified the keys is not a reading of the new pane. The
+/// consecutive-answer cap follows the session (`PolicyEngine`), so a
+/// later answer addressed to the new id still counts against it.
+/// Confirm-tier writes follow the session. They do not explain a screen.
 public enum AnswerSendCheck: Sendable {
 
     public enum Refusal: Equatable, Sendable {
