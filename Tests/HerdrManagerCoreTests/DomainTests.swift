@@ -1865,6 +1865,140 @@ struct SecretRedactorTests {
         let bothAgain = redactor.redact(both.redactedText)
         #expect(bothAgain.redactionCount == 0)
     }
+
+    @Test("An npm publish token and a PyPI upload token are redacted once and keep their prefix")
+    func redactsPackagePublishTokens() {
+        let redactor = SecretRedactor()
+        let npmBody = "0123456789abcdefghijABCDEFGHIJkl6789"
+        #expect(npmBody.count == 36)
+        let npm = "npm_" + npmBody
+        let npmKept = "npm_[REDACTED]"
+
+        let bare = redactor.redact("published with \(npm)")
+        #expect(bare.redactedText == "published with \(npmKept)")
+        #expect(bare.redactionCount == 1)
+        #expect(!bare.redactedText.contains(npmBody))
+        let bareAgain = redactor.redact(bare.redactedText)
+        #expect(bareAgain.redactedText == bare.redactedText)
+        #expect(bareAgain.redactionCount == 0)
+
+        // `NPM_TOKEN` and `:_authToken` already end in the assignment
+        // keyword. The prefix stays, and the placeholder is not a second
+        // secret. The `.npmrc` line has no scheme.
+        let assigned = redactor.redact("NPM_TOKEN=\(npm)")
+        #expect(assigned.redactedText == "NPM_TOKEN=\(npmKept)")
+        #expect(assigned.redactionCount == 1)
+        let assignedAgain = redactor.redact(assigned.redactedText)
+        #expect(assignedAgain.redactionCount == 0)
+        let npmrc = redactor.redact("//registry.npmjs.org/:_authToken=\(npm)")
+        #expect(npmrc.redactedText == "//registry.npmjs.org/:_authToken=\(npmKept)")
+        #expect(npmrc.redactionCount == 1)
+        let npmrcAgain = redactor.redact(npmrc.redactedText)
+        #expect(npmrcAgain.redactionCount == 0)
+        let quoted = redactor.redact(#"{"token": "\#(npm)"}"#)
+        #expect(quoted.redactedText == #"{"token": "\#(npmKept)"}"#)
+        #expect(quoted.redactionCount == 1)
+        let quotedAgain = redactor.redact(quoted.redactedText)
+        #expect(quotedAgain.redactionCount == 0)
+
+        let remote = redactor.redact("https://oauth2:\(npm)@registry.npmjs.org/org/pkg")
+        #expect(remote.redactedText == "https://oauth2:\(npmKept)@registry.npmjs.org/org/pkg")
+        #expect(remote.redactionCount == 1)
+        #expect(remote.redactedText.contains("registry.npmjs.org/org/pkg"))
+        let remoteAgain = redactor.redact(remote.redactedText)
+        #expect(remoteAgain.redactionCount == 0)
+
+        // `@` is still not the end of an ordinary assignment. The tail
+        // after a recognized token is not published.
+        let leftover = redactor.redact("token=\(npm)@leftoversecret")
+        #expect(leftover.redactedText == "token=[REDACTED]")
+        #expect(leftover.redactionCount == 2)
+        #expect(!leftover.redactedText.contains("leftoversecret"))
+        #expect(!leftover.redactedText.contains(npmBody))
+
+        let sentence = redactor.redact("saw \(npm). next")
+        #expect(sentence.redactedText == "saw \(npmKept). next")
+        #expect(sentence.redactionCount == 1)
+        let query = redactor.redact(npm + "?x=1")
+        #expect(query.redactedText == npmKept + "?x=1")
+        #expect(query.redactionCount == 1)
+        // A hyphen is not part of the token. The body is gone and the note stays.
+        let noted = redactor.redact(npm + "-note")
+        #expect(noted.redactedText == npmKept + "-note")
+        #expect(noted.redactionCount == 1)
+        #expect(!noted.redactedText.contains(npmBody))
+
+        let pypiPrefix = "pypi-" + "AgEIcHlwaS5vcmc"
+        let pypiBody = String(repeating: "A", count: 20) + String(repeating: "b", count: 20) + "-_" + String(repeating: "9", count: 8)
+        #expect(pypiBody.count == 50)
+        let pypi = pypiPrefix + pypiBody
+        let pypiKept = "pypi-[REDACTED]"
+
+        let uploaded = redactor.redact("twine upload \(pypi)")
+        #expect(uploaded.redactedText == "twine upload \(pypiKept)")
+        #expect(uploaded.redactionCount == 1)
+        #expect(!uploaded.redactedText.contains(pypiBody))
+        #expect(!uploaded.redactedText.contains("AgEIcHlwaS5vcmc"))
+        let uploadedAgain = redactor.redact(uploaded.redactedText)
+        #expect(uploadedAgain.redactedText == uploaded.redactedText)
+        #expect(uploadedAgain.redactionCount == 0)
+
+        let pypirc = redactor.redact("password = \(pypi)")
+        #expect(pypirc.redactedText == "password = \(pypiKept)")
+        #expect(pypirc.redactionCount == 1)
+        let pypircAgain = redactor.redact(pypirc.redactedText)
+        #expect(pypircAgain.redactionCount == 0)
+        let pypiJSON = redactor.redact(#"{"password": "\#(pypi)"}"#)
+        #expect(pypiJSON.redactedText == #"{"password": "\#(pypiKept)"}"#)
+        #expect(pypiJSON.redactionCount == 1)
+        let pypiJSONAgain = redactor.redact(pypiJSON.redactedText)
+        #expect(pypiJSONAgain.redactionCount == 0)
+        let pypiURL = redactor.redact("https://user:\(pypi)@upload.pypi.org/legacy/")
+        #expect(pypiURL.redactedText == "https://user:\(pypiKept)@upload.pypi.org/legacy/")
+        #expect(pypiURL.redactionCount == 1)
+        #expect(pypiURL.redactedText.contains("upload.pypi.org/legacy/"))
+        let pypiURLAgain = redactor.redact(pypiURL.redactedText)
+        #expect(pypiURLAgain.redactionCount == 0)
+        let pypiSentence = redactor.redact("saw \(pypi). next")
+        #expect(pypiSentence.redactedText == "saw \(pypiKept). next")
+        #expect(pypiSentence.redactionCount == 1)
+
+        let pair = redactor.redact("\(npm) \(pypi)")
+        #expect(pair.redactedText == "\(npmKept) \(pypiKept)")
+        #expect(pair.redactionCount == 2)
+        let pairAgain = redactor.redact(pair.redactedText)
+        #expect(pairAgain.redactedText == pair.redactedText)
+        #expect(pairAgain.redactionCount == 0)
+
+        let maxBody = String(repeating: "c", count: 1000)
+        #expect(redactor.redact(pypiPrefix + maxBody).redactedText == pypiKept)
+        let kept = [
+            "tokens start with npm_ and pypi-AgEIcHlwaS5vcmc",
+            "npm_" + String(repeating: "a", count: 35),
+            "npm_" + String(repeating: "a", count: 37),
+            "NPM_" + npmBody,
+            "x" + npm,
+            "_" + npm,
+            "npm_" + String(repeating: "a", count: 20) + "-" + String(repeating: "b", count: 16),
+            pypiPrefix,
+            pypiPrefix + String(repeating: "a", count: 49),
+            pypiPrefix + String(repeating: "a", count: 1001),
+            pypiPrefix + String(repeating: "a", count: 20) + "." + String(repeating: "b", count: 40),
+            "x" + pypi,
+            "_" + pypi,
+        ]
+        for line in kept {
+            let result = redactor.redact(line)
+            #expect(result.redactionCount == 0, "redacted \(line.prefix(80))")
+            #expect(result.redactedText == line)
+        }
+        // A dot after a long enough body ends the match. The tail stays.
+        let dotted = pypiPrefix + String(repeating: "a", count: 50) + ".tailsecret"
+        let dottedResult = redactor.redact(dotted)
+        #expect(dottedResult.redactedText == pypiKept + ".tailsecret")
+        #expect(dottedResult.redactionCount == 1)
+        #expect(dottedResult.redactedText.contains("tailsecret"))
+    }
 }
 
 // MARK: - DwellTracker Tests

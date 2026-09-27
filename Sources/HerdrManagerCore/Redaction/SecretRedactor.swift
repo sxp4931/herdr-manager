@@ -93,6 +93,35 @@ public final class SecretRedactor: Sendable {
             ("glimt-[A-Za-z0-9_-]{20,}", "glimt-[REDACTED]"),
             ("glft-[A-Za-z0-9_-]{20,}", "glft-[REDACTED]"),
             ("gltok-[A-Za-z0-9_-]{20,}", "gltok-[REDACTED]"),
+            // npm publish tokens. Classic and granular access tokens are
+            // `npm_` plus 36 base62 characters: that is the example on
+            // the create-token response and the shape the delete path
+            // accepts. An assignment named token already hides
+            // `NPM_TOKEN=…` and `:_authToken=…`. A pane log and `npm
+            // token` output print the token with no keyword, and that
+            // token can publish packages. Thirty-six is the length npm
+            // documents. A shorter body stays, and a longer one stays
+            // whole, so a tail is not left behind. A letter, digit, or
+            // underscore glued to the front is not the prefix. The
+            // prefix is the lowercase form npm issues. A hyphen is not
+            // in this alphabet.
+            (
+                "(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{36}(?![A-Za-z0-9])",
+                "npm_[REDACTED]"
+            ),
+            // PyPI upload tokens. The value is a macaroon whose header
+            // is the fixed base64 `AgEIcHlwaS5vcmc` (`pypi.org`). An
+            // assignment named password already hides `.pypirc`. Twine
+            // and a pasted token have no keyword, and the token can
+            // upload releases. Fifty characters is the floor under the
+            // documented body. A shorter body stays. A body longer than
+            // 1000 stays whole. `.` and `=` are not in the alphabet. A
+            // letter, digit, or underscore glued to the front is not
+            // the prefix.
+            (
+                "(?<![A-Za-z0-9_])pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,1000}(?![A-Za-z0-9_-])",
+                "pypi-[REDACTED]"
+            ),
             // xAI API keys
             ("xai-[A-Za-z0-9]{20,}", "xai-[REDACTED]"),
             // Slack app-level tokens (`xapp-1-<app>-<id>-<secret>`). The
