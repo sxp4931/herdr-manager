@@ -7,19 +7,17 @@
 /// class is that engine's unicodeSets grammar: union, range, `&&`, `--`,
 /// and `\q`. `\p` and `\P` use the Unicode 17 aliases that engine accepts.
 /// A property of strings is legal only with `v`, and a negated class that
-/// still contains one throws. Two throws are still not decided. A scalar
-/// above U+FFFF is a surrogate pair in the legacy parser, so that pattern
-/// is not decided. A class nested more than 64 deep is not decided: the
-/// file stays the script.
+/// still contains one throws. The source is UTF-16. With `u` or `v` a
+/// surrogate pair is one code point; without those flags each unit is a
+/// character, so a scalar above U+FFFF can put a legacy range out of
+/// order. A class nested more than 64 deep is not decided: the file
+/// stays the script.
 enum NodeTestPattern {
     private static let quantifierInfinity = 2_147_483_647
 
     static func rejects(_ raw: String) -> Bool {
         let (pattern, flags) = parts(raw)
         if flagsReject(flags) { return true }
-        if pattern.unicodeScalars.contains(where: { $0.value > 0xFFFF }) {
-            return false
-        }
         var parser = Parser(
             text: pattern,
             unicode: flags.contains("u") || flags.contains("v"),
@@ -94,9 +92,33 @@ enum NodeTestPattern {
         }
 
         init(text: String, unicode: Bool, sets: Bool) {
-            scalars = text.unicodeScalars.map(\.value)
+            scalars = Self.sourceUnits(text, unicode: unicode)
             self.unicode = unicode
             self.sets = sets
+        }
+
+        /// V8 reads the pattern as UTF-16 code units. `u` and `v` combine
+        /// a lead and a trail into one code point, which is the scalar
+        /// Swift already stores. A legacy pattern does not combine them,
+        /// so U+1F600 is U+D83D then U+DE00. A Swift string has no lone
+        /// surrogate, so this is every non-BMP scalar the operand can hold.
+        private static func sourceUnits(_ text: String, unicode: Bool) -> [UInt32] {
+            if unicode {
+                return text.unicodeScalars.map(\.value)
+            }
+            var units: [UInt32] = []
+            units.reserveCapacity(text.unicodeScalars.count)
+            for scalar in text.unicodeScalars {
+                let value = scalar.value
+                if value <= 0xFFFF {
+                    units.append(value)
+                    continue
+                }
+                let adjusted = value - 0x10000
+                units.append(0xD800 + (adjusted >> 10))
+                units.append(0xDC00 + (adjusted & 0x3FF))
+            }
+            return units
         }
 
         mutating func fails() -> Bool {

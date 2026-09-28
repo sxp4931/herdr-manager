@@ -6692,9 +6692,10 @@ struct DiagnoserCpuSamplePidTests {
         for raw in kept {
             #expect(!NodeTestPattern.rejects(raw), "\(raw) was dropped")
         }
-        // A source scalar above U+FFFF is still not decided, even when
-        // the property name is one Node rejects.
-        #expect(!NodeTestPattern.rejects("/\\p{NotAThing}\u{1F600}/u"))
+        // A source scalar above U+FFFF is one code point under `u`, so
+        // the unknown property still throws. The surrogate-pair cases
+        // are the next test.
+        #expect(NodeTestPattern.rejects("/\\p{NotAThing}\u{1F600}/u"))
 
         let rejectedArgv: [(String, [String])] = [
             ("unknown", ["node", "--test", "--test-name-pattern", "/\\p{NotAThing}/u", "/usr/local/bin/codex"]),
@@ -6775,6 +6776,201 @@ struct DiagnoserCpuSamplePidTests {
         )
         let python = process(
             4, "python3", argv: ["python3", "--test", "--test-name-pattern", "/\\p{NotAThing}/u", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([bun]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)
+        #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
+    }
+
+    @Test("a source scalar above U+FFFF is not the agent script when Node rejects that pattern")
+    func nodeNonBMPPatternIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23 reads the pattern as UTF-16. `u` and `v` combine a
+        // surrogate pair into one code point, so an unknown property, an
+        // identity escape, and an out-of-order code-point range throw.
+        // Without those flags the pair is two characters: `[😀-😀]` is a
+        // range from the trail to the lead and throws, and `[😀-U+FFFD]`
+        // runs because that trail-to-FFFD range is in order.
+        let rejected = [
+            "/\\p{NotAThing}\u{1F600}/u",
+            "/\\p{NotAThing}\u{1F600}/v",
+            "/[\\p{NotAThing}\u{1F600}]/v",
+            "/[\u{1F600}-\u{1F600}]/",
+            "/[\u{1F600}-\u{1F601}]/",
+            "/[\u{1F600}-A]/u",
+            "/[\u{1F600}-A]/v",
+            "/[\u{1F600}-A]/",
+            "/[\u{1F600}-\u{FFFD}]/u",
+            "/[\u{1F600}-\u{D7FF}]/",
+            "/[\u{1F600}-\u{D7FF}]/u",
+            "/\\\u{1F600}/u",
+            "/\\\u{1F600}/v",
+            "/[\\\u{1F600}]/u",
+            "/\u{1F600}{/u",
+            "/\u{1F600}{2,1}/",
+            "/\u{1F600}{2,1}/u",
+            "/\\p{L\u{1F600}}/u",
+            "/\\p{\u{1F600}}/u",
+            "/\\p{RGI_Emoji}\u{1F600}/u",
+            "/[\u{1F300}-\u{1F600}]/",
+            "/[\u{1F600}-\u{1F300}]/u",
+            "/[\u{1F600}-\u{1F600}]/i",
+            "/[\u{1F600}-\u{1F600}]/d",
+            "/[\u{10FFFF}-\u{10000}]/u",
+            "/[\u{10FFFF}-\u{10000}]/",
+            "/[\u{10000}-\u{10FFFF}]/",
+            "/[\u{FFFD}-\u{1F600}]/",
+        ]
+        for raw in rejected {
+            #expect(NodeTestPattern.rejects(raw), "\(raw) stayed the script")
+        }
+
+        let kept = [
+            "/\\p{L}\u{1F600}/u",
+            "/\u{1F600}/u",
+            "/\u{1F600}/v",
+            "/\u{1F600}/",
+            "\u{1F600}",
+            "/[\u{1F600}]/u",
+            "/[\u{1F600}]/v",
+            "/[\u{1F600}]/",
+            "/[\u{1F600}-\u{1F600}]/u",
+            "/[\u{1F600}-\u{1F600}]/v",
+            "/[A-\u{1F600}]/",
+            "/[A-\u{1F600}]/u",
+            "/[\u{1F600}-\u{FFFD}]/",
+            "/[\u{1F600}-\u{E000}]/",
+            "/[\u{FFFD}-\u{1F600}]/u",
+            "/\\\u{1F600}/",
+            "/\u{1F600}*/u",
+            "/\u{1F600}*/",
+            "/\u{1F600}{2}/u",
+            "/\u{1F600}{/",
+            "/[\u{1F600}-]/",
+            "/[-\u{1F600}]/",
+            "/[^\u{1F600}]/v",
+            "/[\u{1F600}&&A]/v",
+            "/[\\q{\u{1F600}}]/v",
+            "/[\\q{\u{1F600}a}]/v",
+            "\\p{NotAThing}\u{1F600}",
+            "/\\p{NotAThing}\u{1F600}/",
+            "/\u{1F600}\u{1F601}/u",
+            "/[\u{1F600}\u{1F601}]/",
+            "/[\u{1F600}-\u{1F601}]/u",
+            "/\\c\u{1F600}/",
+            "/[\u{1F300}-\u{1F600}]/u",
+            "/[\\\u{1F600}]/",
+            "/[\\q{\u{1F600}|\u{1F601}}]/v",
+            "/[]\u{1F600}/u",
+            "/foo/\u{1F600}",
+            "/\u{1F600}/U",
+            "/\\p{Script=Latin}\u{1F600}/u",
+            "/\\p{RGI_Emoji}\u{1F600}/v",
+            "/\u{1F600}/iu",
+            "/[\u{1F600}]/iv",
+            "/[\u{10000}-\u{10FFFF}]/u",
+            "/[\\q{\u{1F600}}--a]/v",
+            "/\u{1F600}?/u",
+            "/[\\p{L}\u{1F600}]/v",
+            "/[^\u{1F600}&&\\p{RGI_Emoji}]/v",
+            // Node rejects a name that is not ID_Start. This check still
+            // accepts every non-ASCII scalar, the same as `\u{1F600}`.
+            "/(?<\u{1F600}>a)/u",
+            "/(?<\u{1F600}>a)/",
+            "/\\u{1F600}/u",
+        ]
+        for raw in kept {
+            #expect(!NodeTestPattern.rejects(raw), "\(raw) was dropped")
+        }
+        // Past 64 nested `v` classes the walk stops. Node 22.23 still
+        // compiles one thousands deep, so a non-BMP scalar there is not
+        // reported as an exit.
+        let nested = String(repeating: "[", count: 65) + "\u{1F600}" + String(repeating: "]", count: 65)
+        #expect(!NodeTestPattern.rejects("/" + nested + "/v"))
+
+        let rejectedArgv: [(String, [String])] = [
+            ("unknown", ["node", "--test", "--test-name-pattern", "/\\p{NotAThing}\u{1F600}/u", "/usr/local/bin/codex"]),
+            ("unknown-eq", ["nodejs", "--test", "--test-name-pattern=/\\p{NotAThing}\u{1F600}/v", "/tmp/codex"]),
+            ("legacy-range", ["node.exe", "--test", "--test-skip-pattern", "/[\u{1F600}-\u{1F600}]/", "/usr/local/bin/codex"]),
+            ("order", ["node", "--test", "--test-name-pattern", "/[\u{1F600}-\u{1F601}]/", "/tmp/codex"]),
+            ("escape", ["nodejs", "--test", "--test-name-pattern", "/\\\u{1F600}/u", "/usr/local/bin/codex"]),
+            ("later", [
+                "node.exe", "--test", "--test-name-pattern", "/\u{1F600}/u",
+                "--test-skip-pattern", "/\\p{NotAThing}\u{1F600}/u", "/tmp/codex",
+            ]),
+        ]
+        for (label, argv) in rejectedArgv {
+            let exited = process(4, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(label) ranked the path")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(label) took the sample from the leader slot"
+            )
+        }
+        #expect(
+            Diagnoser.cpuSamplePid([
+                process(4, "node", argv: ["node", "--test", "--test-name-pattern", "/\\p{NotAThing}\u{1F600}/u", "/usr/local/bin/codex"])
+            ]) == 4
+        )
+
+        let keptArgv: [(String, [String])] = [
+            ("literal", ["node", "--test", "--test-name-pattern", "/\u{1F600}/u", "/usr/local/bin/codex"]),
+            ("property", ["nodejs", "--test", "--test-name-pattern", "/\\p{L}\u{1F600}/u", "/tmp/codex"]),
+            ("in-order", ["node.exe", "--test", "--test-name-pattern", "/[\u{1F600}-\u{FFFD}]/", "/usr/local/bin/codex"]),
+            ("same", ["node", "--test", "--test-name-pattern", "/[\u{1F600}-\u{1F600}]/u", "/tmp/codex"]),
+            ("legacy-prop", ["nodejs", "--test", "--test-name-pattern", "\\p{NotAThing}\u{1F600}", "/usr/local/bin/codex"]),
+            ("off", ["node", "--test-name-pattern", "/\\p{NotAThing}\u{1F600}/u", "/usr/local/bin/codex"]),
+            ("no-test", ["nodejs", "--test", "--no-test", "--test-name-pattern", "/\\p{NotAThing}\u{1F600}/u", "/tmp/codex"]),
+            ("script-first", ["node.exe", "/usr/local/bin/codex", "--test", "--test-name-pattern", "/\\p{NotAThing}\u{1F600}/u"]),
+        ]
+        for (label, argv) in keptArgv {
+            let running = process(20, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(label) dropped the script")
+        }
+        let leader = process(
+            20,
+            "node",
+            argv: ["node", "--test", "--test-name-pattern", "/[\u{1F600}-\u{FFFD}]/", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+
+        let badName = process(
+            8, "node", argv: ["node", "--test", "--test-name-pattern", "/\\p{NotAThing}\u{1F600}/u", "/tmp/letta"]
+        )
+        let badRange = process(
+            8, "nodejs", argv: ["nodejs", "--test", "--test-name-pattern", "/[\u{1F600}-\u{1F600}]/", "/tmp/letta"]
+        )
+        let keptLetta = process(
+            40, "node.exe", argv: ["node.exe", "--test", "--test-name-pattern", "/\u{1F600}/u", "/tmp/letta"]
+        )
+        let keptRange = process(
+            40, "node", argv: ["node", "--test", "--test-name-pattern", "/[\u{1F600}-\u{FFFD}]/", "/tmp/letta"]
+        )
+        let oneShot = process(
+            40,
+            "nodejs",
+            argv: ["nodejs", "--test", "--test-name-pattern", "/\\p{L}\u{1F600}/u", "/tmp/letta", "--prompt"]
+        )
+        #expect(Diagnoser.cpuSamplePid([badName, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badName, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([badRange, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badRange, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, keptLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, keptRange]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, oneShot]) == 10)
+        #expect(Diagnoser.cpuSamplePid([oneShot, interactive]) == 30)
+
+        // Bun does not take the pattern's next word, so the text is the
+        // script. Python exits on the unknown option.
+        let bun = process(
+            20, "bun", argv: ["bun", "--test", "--test-name-pattern", "/\\p{NotAThing}\u{1F600}/u", "/usr/local/bin/codex"]
+        )
+        let python = process(
+            4, "python3", argv: ["python3", "--test", "--test-name-pattern", "/\\p{NotAThing}\u{1F600}/u", "/usr/local/bin/codex"]
         )
         #expect(Diagnoser.cpuSamplePid([bun]) == 20)
         #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)

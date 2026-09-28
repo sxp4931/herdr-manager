@@ -1237,8 +1237,13 @@ private enum ShellForeground {
                 // are. A `--test-name-pattern` or `--test-skip-pattern`
                 // that Node's regexp parser rejects is not Letta,
                 // including a `v` class the unicodeSets grammar rejects.
-                // `ok`, `/foo/i`, and `/[a--b]/v` still are. `--no-test`
-                // leaves a bad shard and `(` as Letta.
+                // A source scalar above U+FFFF is part of that parse:
+                // `u` and `v` read one code point, and a legacy pattern
+                // reads the surrogate pair. `/\p{NotAThing}😀/u` and
+                // `/[😀-😀]/` are not Letta. `/😀/u` and a legacy
+                // `/[😀-U+FFFD]/` still are. `ok`, `/foo/i`, and
+                // `/[a--b]/v` still are. `--no-test` leaves a bad shard
+                // and `(` as Letta.
                 // Bun rejects `-W`,
                 // `-X`, `-S`, `-L`, and `-o`; the path after one is
                 // not Letta. A bun value that starts with `-` is not
@@ -2883,8 +2888,10 @@ private enum ShellForeground {
     /// the test runner, and only when the final `--test` state is on.
     /// A pattern throws when `convertStringToRegExp` throws. A `v`
     /// class the unicodeSets grammar rejects does too. An unknown
-    /// `\p` name, a property that contains strings, and a scalar
-    /// above U+FFFF are not that decision.
+    /// `\p` name and a property that contains strings do too. A
+    /// source scalar above U+FFFF is one code point when `u` or `v`
+    /// is set, and a lead/trail pair otherwise, so a legacy range
+    /// across that pair is the same check.
     private static func nodeRejectedOperand(
         name: String,
         value: String,
