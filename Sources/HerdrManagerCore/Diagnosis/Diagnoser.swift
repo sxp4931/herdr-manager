@@ -1241,7 +1241,12 @@ private enum ShellForeground {
                 // `u` and `v` read one code point, and a legacy pattern
                 // reads the surrogate pair. `/\p{NotAThing}😀/u` and
                 // `/[😀-😀]/` are not Letta. `/😀/u` and a legacy
-                // `/[😀-U+FFFD]/` still are. `ok`, `/foo/i`, and
+                // `/[😀-U+FFFD]/` still are. A 4-digit `\u` lead and a
+                // 4-digit `\u` trail are that same code point when `u`
+                // or `v` is set, so `/[\uD83D\uDE00-\uD83D\uDE00]/u`
+                // still is Letta. A lone `\uD83D` is a character. A
+                // braced `\u{D800}` does not pair, and a legacy class
+                // still reads two units. `ok`, `/foo/i`, and
                 // `/[a--b]/v` still are. `--no-test` leaves a bad shard
                 // and `(` as Letta.
                 // Bun rejects `-W`,

@@ -10,10 +10,12 @@
 /// still contains one throws. The source is UTF-16. With `u` or `v` a
 /// surrogate pair is one code point; without those flags each unit is a
 /// character, so a scalar above U+FFFF can put a legacy range out of
-/// order. A capture name is an IdentifierName. The name production
-/// forces Unicode, so a surrogate pair in the name is one code point
-/// even without `u` or `v`. A class nested more than 64 deep is not
-/// decided: the file stays the script.
+/// order. A 4-digit `\u` lead followed by a 4-digit `\u` trail is that
+/// same pair when `u` or `v` is set. A braced `\u{...}` does not pair,
+/// and a lone surrogate is a character. A capture name is an IdentifierName.
+/// The name production forces Unicode, so a surrogate pair in the name
+/// is one code point even without `u` or `v`. A class nested more than
+/// 64 deep is not decided: the file stays the script.
 enum NodeTestPattern {
     private static let quantifierInfinity = 2_147_483_647
 
@@ -426,13 +428,7 @@ enum NodeTestPattern {
             let braced = matches(current, "{")
             guard let value = unicodeEscape(forceBraces: true) else { return nil }
             if braced || !isLeadSurrogate(value) { return value }
-            guard matches(current, "\\"), matches(nextScalar, "u") else { return value }
-            let saved = index
-            advance(2)
-            if let trail = hexEscape(length: 4), isTrailSurrogate(trail) {
-                return combineSurrogate(value, trail)
-            }
-            index = saved
+            if let paired = trailSurrogatePair(lead: value) { return paired }
             return value
         }
 
@@ -446,6 +442,27 @@ enum NodeTestPattern {
 
         private func combineSurrogate(_ lead: UInt32, _ trail: UInt32) -> UInt32 {
             0x10000 + (lead - 0xD800) * 0x400 + (trail - 0xDC00)
+        }
+
+        /// The trail half of a surrogate pair: `\u` and four hex digits.
+        /// A `{` after that `\u` is a braced escape and does not pair.
+        /// A miss leaves the reader where it was. Capture names use this
+        /// even without `u` or `v`, because that production forces
+        /// Unicode. An atom or a class pairs only when `u` or `v` is set,
+        /// and a lead that does not pair stays the surrogate it names.
+        private mutating func trailSurrogatePair(lead: UInt32) -> UInt32? {
+            guard matches(current, "\\"), matches(nextScalar, "u") else { return nil }
+            let saved = index
+            advance(2)
+            if matches(current, "{") {
+                index = saved
+                return nil
+            }
+            if let trail = hexEscape(length: 4), isTrailSurrogate(trail) {
+                return combineSurrogate(lead, trail)
+            }
+            index = saved
+            return nil
         }
 
         /// One operand of a `v` class. A range is only produced inside
@@ -1155,7 +1172,14 @@ enum NodeTestPattern {
             }
             if matches(scalar, "u") {
                 advance()
-                if let value = unicodeEscape(forceBraces: false) { return value }
+                let openedBrace = matches(current, "{")
+                if let value = unicodeEscape(forceBraces: false) {
+                    if unicode, !openedBrace, isLeadSurrogate(value),
+                       let paired = trailSurrogatePair(lead: value) {
+                        return paired
+                    }
+                    return value
+                }
                 if unicode {
                     failed = true
                     return 0

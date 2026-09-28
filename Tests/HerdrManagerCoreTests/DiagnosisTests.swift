@@ -7155,6 +7155,201 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)
         #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
     }
+
+    @Test("a 4-digit unicode surrogate pair Node rejects is not the agent script")
+    func nodeSurrogatePairEscapeIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23 pairs a 4-digit `\u` lead with a following 4-digit
+        // `\u` trail when `u` or `v` is set, in an atom and in a class.
+        // `/[\uD83D\uDE00-\uD83D\uDE00]/u` is one code point on both
+        // ends and runs. The same text without those flags is a range
+        // from the trail back to the lead and throws. A lone surrogate
+        // is a character. A braced `\u{D800}` does not pair, so two
+        // of them inside `\q` are a string.
+        let rejected = [
+            "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/",
+            "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/d",
+            "/[\\uD83D\\uDE01-\\uD83D\\uDE00]/u",
+            "/[\\uD83D\\uDE01-\\uD83D\\uDE00]/v",
+            "/[\\uD83D\\uDE00-\\uD83C\\uDFFF]/u",
+            "/[\\uDBFF\\uDFFF-\\uD800\\uDC00]/u",
+            "/[\\u{10FFFF}-\\uD83D\\uDE00]/u",
+            "/[\\u{1F601}-\\uD83D\\uDE00]/u",
+            "/[\\uD83D\\uDE00-\\u{D83D}\\u{DE00}]/u",
+            "/[\\uD83D\\uDE00-a]/u",
+            "/[\\uD83D\\uDE00-a]/v",
+            "/[\\uD83D\\uDE00-a]/",
+            "/[\\uDE00-\\uD83D]/u",
+            "/[\\uDE00-\\uD83D]/",
+            "/[^\\q{\\u{D800}\\uDC00}]/v",
+            "/[^\\q{\\uD800\\u{DC00}}]/v",
+            "/[^\\q{\\uD83D\\uDE00\\uD83D\\uDE00}]/v",
+            "/[^\\q{\\uD83D\\uDE00a}]/v",
+            "/\\uD83D\\uDE0/u",
+            "/\\uD83D\\UDE00/u",
+            "/\\uD83D\\uDE00/uv",
+            "/\\uD83D\\uDE00{2,1}/u",
+            "/\\uD83D\\uDE00{/u",
+            "/[\u{1F600}-\\uDE00]/u",
+        ]
+        for raw in rejected {
+            #expect(NodeTestPattern.rejects(raw), "\(raw) stayed the script")
+        }
+
+        let kept = [
+            "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/u",
+            "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/v",
+            "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/iu",
+            "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/iv",
+            "/[\\ud83d\\ude00-\\ud83d\\ude00]/u",
+            "/[\\uD83D\\uDE00-\\uD83D\\uDE01]/u",
+            "/[\\uD83C\\uDFFF-\\uD83D\\uDE00]/u",
+            "/[\\u{1F600}-\\uD83D\\uDE00]/u",
+            "/[\\uD83D\\uDE00-\\u{1F600}]/u",
+            "/[\u{1F600}-\\uD83D\\uDE00]/u",
+            "/[\\u0000-\\uD83D\\uDE00]/u",
+            "/[\\uD83D\\uDE00-\\u{10FFFF}]/u",
+            "/[\\uD800\\uDC00-\\uDBFF\\uDFFF]/u",
+            "/[\\uD800\\uDC00-\\uD800\\uDC00]/u",
+            "/[\\uDBFF\\uDFFF-\\uDBFF\\uDFFF]/u",
+            "/[\\uD83D\\uDE00]/u",
+            "/[\\uD83D\\uDE00]/v",
+            "/[\\uD83D\\uDE00]/",
+            "/\\uD83D\\uDE00/u",
+            "/\\uD83D\\uDE00/v",
+            "/\\uD83D\\uDE00/",
+            "/\\uD83D/u",
+            "/[\\uD83D]/u",
+            "/\\uDE00/u",
+            "/[\\uDE00]/u",
+            "/[\\uD83D-\\uDE00]/u",
+            "/[\\uD83D-\\uDE00]/v",
+            "/[\\uD83D-\\uDE00]/",
+            "/\\u{D800}/u",
+            "/[\\u{D800}]/u",
+            "/[\\u{D800}-\\u{DFFF}]/u",
+            "/\\u{D800}\\uDC00/u",
+            "/\\uD800\\u{DC00}/u",
+            "/\\uD83D\\u{DE00}/u",
+            "/\\u{D83D}\\uDE00/u",
+            "/\\u{D83D}\\u{DE00}/u",
+            "/[\\u{D83D}\\u{DE00}-\\u{1F600}]/u",
+            "/[^\\q{\\uD83D\\uDE00}]/v",
+            "/[^\\q{\\uD800\\uDC00}]/v",
+            "/[\\q{\\uD83D}]/v",
+            "/[^\\q{\\uD83D}]/v",
+            "/[\\uD83D\\uDE00&&\\uD83D\\uDE00]/v",
+            "/[\\uD83D\\uDE00--a]/v",
+            "/[a--\\uD83D\\uDE00]/v",
+            "/[\\uD83D\\uDE00-]/u",
+            "/[-\\uD83D\\uDE00]/u",
+            "/[a-\\uD83D\\uDE00]/u",
+            "/[a-\\uD83D\\uDE00]/",
+            "/\\uD83D\\uDE00*/u",
+            "/\\uD83D\\uDE00{2}/u",
+            "/\\uD83D\\uDE00{/",
+            "/\\uD83D\\uDE00\\uD83D\\uDE00/u",
+            "/[\\uD83D\\uDE00\\uD83D\\uDE00]/u",
+            "/[\\uD83D\\uDE00\\uD83D\\uDE00-\\uD83D\\uDE01]/u",
+            "/\\uD83D \\uDE00/u",
+            "/\\uD83D\\u0041/u",
+            "/\\uD800\\uD800/u",
+            "\\uD83D\\uDE00",
+            "/[^\\uD83D]/u",
+            "/\\uD83D*/u",
+            "/(?<\\uD840\\uDC00>a)/",
+        ]
+        for raw in kept {
+            #expect(!NodeTestPattern.rejects(raw), "\(raw) was dropped")
+        }
+
+        let rejectedArgv: [(String, [String])] = [
+            ("legacy", ["node", "--test", "--test-name-pattern", "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/", "/usr/local/bin/codex"]),
+            ("order-eq", ["nodejs", "--test", "--test-name-pattern=/[\\uD83D\\uDE01-\\uD83D\\uDE00]/u", "/tmp/codex"]),
+            ("order-v", ["node.exe", "--test", "--test-skip-pattern", "/[\\uD83D\\uDE01-\\uD83D\\uDE00]/v", "/usr/local/bin/codex"]),
+            ("braced", ["node", "--test", "--test-name-pattern", "/[^\\q{\\u{D800}\\uDC00}]/v", "/tmp/codex"]),
+            ("string", ["nodejs", "--test", "--test-name-pattern", "/[^\\q{\\uD83D\\uDE00\\uD83D\\uDE00}]/v", "/usr/local/bin/codex"]),
+            ("later", [
+                "node.exe", "--test", "--test-name-pattern", "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/u",
+                "--test-skip-pattern", "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/", "/tmp/codex",
+            ]),
+        ]
+        for (label, argv) in rejectedArgv {
+            let exited = process(4, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(label) ranked the path")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(label) took the sample from the leader slot"
+            )
+        }
+        #expect(
+            Diagnoser.cpuSamplePid([
+                process(4, "node", argv: ["node", "--test", "--test-name-pattern", "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/", "/usr/local/bin/codex"])
+            ]) == 4
+        )
+
+        let keptArgv: [(String, [String])] = [
+            ("pair", ["node", "--test", "--test-name-pattern", "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/u", "/usr/local/bin/codex"]),
+            ("sets", ["nodejs", "--test", "--test-name-pattern", "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/v", "/tmp/codex"]),
+            ("lone", ["node.exe", "--test", "--test-name-pattern", "/\\uD83D/u", "/usr/local/bin/codex"]),
+            ("q", ["node", "--test", "--test-name-pattern", "/[^\\q{\\uD800\\uDC00}]/v", "/tmp/codex"]),
+            ("off", ["nodejs", "--test-name-pattern", "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/", "/usr/local/bin/codex"]),
+            ("no-test", ["node", "--test", "--no-test", "--test-name-pattern", "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/", "/tmp/codex"]),
+            ("script-first", ["node.exe", "/usr/local/bin/codex", "--test", "--test-name-pattern", "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/"]),
+        ]
+        for (label, argv) in keptArgv {
+            let running = process(20, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(label) dropped the script")
+        }
+        let leader = process(
+            20,
+            "node",
+            argv: ["node", "--test", "--test-name-pattern", "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/u", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+
+        let badLegacy = process(
+            8, "node", argv: ["node", "--test", "--test-name-pattern", "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/", "/tmp/letta"]
+        )
+        let badOrder = process(
+            8, "nodejs", argv: ["nodejs", "--test", "--test-name-pattern", "/[\\uD83D\\uDE00-a]/u", "/tmp/letta"]
+        )
+        let keptLetta = process(
+            40, "node.exe", argv: ["node.exe", "--test", "--test-name-pattern", "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/u", "/tmp/letta"]
+        )
+        let keptLone = process(
+            40, "node", argv: ["node", "--test", "--test-name-pattern", "/\\uD83D/u", "/tmp/letta"]
+        )
+        let oneShot = process(
+            40,
+            "nodejs",
+            argv: ["nodejs", "--test", "--test-name-pattern", "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/u", "/tmp/letta", "--prompt"]
+        )
+        #expect(Diagnoser.cpuSamplePid([badLegacy, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badLegacy, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([badOrder, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badOrder, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, keptLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, keptLone]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, oneShot]) == 10)
+        #expect(Diagnoser.cpuSamplePid([oneShot, interactive]) == 30)
+
+        // Bun does not take the pattern's next word, so the text is the
+        // script. Python exits on the unknown option.
+        let bun = process(
+            20, "bun", argv: ["bun", "--test", "--test-name-pattern", "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/u", "/usr/local/bin/codex"]
+        )
+        let pythonPair = process(
+            4, "python3", argv: ["python3", "--test", "--test-name-pattern", "/[\\uD83D\\uDE00-\\uD83D\\uDE00]/u", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([bun]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)
+        #expect(Diagnoser.cpuSamplePid([pythonPair, claude]) == 12)
+    }
 }
 
 @Suite("Diagnoser finished vs process-gone")
