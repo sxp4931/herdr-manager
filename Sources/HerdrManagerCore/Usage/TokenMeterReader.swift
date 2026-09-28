@@ -28,11 +28,14 @@ import SQLite3
 ///   from its last complete line with the parser state saved there, so a
 ///   live transcript costs only its new bytes per refresh. A log that
 ///   shrank, or whose 64 bytes before that point changed, is read from the
-///   start. An edit further back in an otherwise growing log is not seen,
-///   and a Claude message whose repeated usage lines straddle a read that
-///   also crossed a week or month start can count twice. Grok, Cursor, and
-///   opencode still re-read a changed file whole: Grok's events depend on
-///   sidecars, the Cursor log is small, and SQLite is not append-only.
+///   start. An edit of a line behind that resume point is not seen. The
+///   last usage event stays unfolded, so a Claude message that keeps
+///   appending its usage line still replaces that event after a week or
+///   month boundary folds the older lines. A repeat of an earlier message,
+///   after a newer one was logged, can still be folded and counted again.
+///   Grok, Cursor, and opencode still re-read a changed file whole: Grok's
+///   events depend on sidecars, the Cursor log is small, and SQLite is not
+///   append-only.
 /// - The herd is not a cache input. A Claude transcript's project directory
 ///   attributes the events it logged no cwd for when the scan aggregates,
 ///   so an agent starting or stopping there does not re-read its logs.
@@ -1207,7 +1210,7 @@ public actor LocalTokenMeter {
         refolded.events = TokenUsageCompaction.compact(
             cached.events,
             before: compactionCutoff,
-            keeping: cached.resume?.tailEventID
+            keeping: preservedEventIDs(cached.resume)
         )
         refolded.compactedBefore = compactionCutoff
         fileEventCache[key] = refolded
@@ -1248,12 +1251,18 @@ public actor LocalTokenMeter {
                UInt64(max(fingerprint.size, 0)) >= resume.point.offset,
                JSONLLineReader.signature(of: url, endingAt: resume.point.offset) == resume.signature,
                let appended = readAppendOnlyLog(url, from: resume.point, state: state, parse: parse) {
+                // No usage line in the append: the event a later copy
+                // replaces is still the one from the previous read.
+                var storedResume = appended.resume
+                if storedResume.lastEventID == nil {
+                    storedResume.lastEventID = resume.lastEventID
+                }
                 return storeAppendOnlyEvents(
                     key: key,
                     fingerprint: fingerprint,
                     extra: extra,
                     events: TokenUsageEventLog.merging(cached.events, with: appended.events),
-                    resume: appended.resume
+                    resume: storedResume
                 )
             }
         }
@@ -1281,12 +1290,19 @@ public actor LocalTokenMeter {
         // state must not include it.
         var stateBeforeTail: State?
         var tailEventID: String?
+        // File order, including a line that replaced an earlier event.
+        // Compaction reorders the array, so the id is stored on the resume
+        // rather than read back from the compacted events.
+        var lastEventID: String?
         var parsed = TokenUsageEventLog()
         let read = autoreleasepool {
             JSONLLineReader.forEachLine(in: url, resumingAt: start) { lineNumber, line, terminated in
                 if !terminated { stateBeforeTail = state }
                 let event = parse(&state, lineNumber, line)
-                if let event { parsed.add(event) }
+                if let event {
+                    parsed.add(event)
+                    lastEventID = event.id
+                }
                 if !terminated { tailEventID = event?.id }
             }
         }
@@ -1301,7 +1317,8 @@ public actor LocalTokenMeter {
                 point: read.resumePoint,
                 signature: signature,
                 state: stateBeforeTail ?? state,
-                tailEventID: tailEventID
+                tailEventID: tailEventID,
+                lastEventID: lastEventID
             )
         )
     }
@@ -1316,7 +1333,7 @@ public actor LocalTokenMeter {
         let compacted = TokenUsageCompaction.compact(
             events,
             before: compactionCutoff,
-            keeping: resume.tailEventID
+            keeping: preservedEventIDs(resume)
         )
         fileEventCache[key] = CachedFileEvents(
             fingerprint: fingerprint,
@@ -1371,6 +1388,17 @@ private struct AppendOnlyResume {
     /// The event parsed from an unterminated last line. That line is read
     /// again and its event replaced by id, so it is never folded.
     var tailEventID: String?
+    /// The last usage event in file order. It stays unfolded so a later
+    /// copy of that Claude message replaces it.
+    var lastEventID: String?
+}
+
+/// Ids a later read may replace. Both stay out of the history fold.
+private func preservedEventIDs(_ resume: AppendOnlyResume?) -> Set<String> {
+    var ids: Set<String> = []
+    if let id = resume?.tailEventID { ids.insert(id) }
+    if let id = resume?.lastEventID { ids.insert(id) }
+    return ids
 }
 
 private struct ClaudeTranscriptState {
@@ -1452,19 +1480,20 @@ enum TokenUsageCompaction {
             .min() ?? now
     }
 
-    /// - Parameter keptID: An event that is never folded, because a later
-    ///   read may replace it by id.
+    /// - Parameter keeping: Event ids a later read may replace. Folding
+    ///   several events into one group replaces their ids with one new id,
+    ///   so the next copy of a kept event would be counted again.
     static func compact(
         _ events: [TokenUsageEvent],
         before cutoff: Date,
-        keeping keptID: String? = nil
+        keeping keptIDs: Set<String> = []
     ) -> [TokenUsageEvent] {
         var kept: [TokenUsageEvent] = []
         var groups: [Key: Group] = [:]
         var order: [Key] = []
 
         for event in events {
-            guard event.date < cutoff, isLinearlyPriced(event.usage), event.id != keptID else {
+            guard event.date < cutoff, isLinearlyPriced(event.usage), !keptIDs.contains(event.id) else {
                 kept.append(event)
                 continue
             }
@@ -1620,13 +1649,11 @@ struct TokenMeterAggregator {
             (window: window, start: window.startDate(now: now, calendar: calendar))
         }
         self.candidates = agents.map { agent in
-            AgentCandidate(
+            let matchesAnyProvider = TokenMeterProvider.matchesAnyUsageProvider(agent.kind)
+            return AgentCandidate(
                 id: agent.id,
-                // opencode is one CLI that can run deepseek/qwen/local
-                // models, so it matches any priced event whose working
-                // directory matches, regardless of the event's provider.
-                provider: agent.kind == .opencode ? nil : TokenMeterProvider(agentKind: agent.kind),
-                matchesAnyProvider: agent.kind == .opencode,
+                provider: matchesAnyProvider ? nil : TokenMeterProvider(agentKind: agent.kind),
+                matchesAnyProvider: matchesAnyProvider,
                 cwd: Self.normalizedAgentCWD(agent.cwd)
             )
         }

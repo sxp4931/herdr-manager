@@ -12,6 +12,9 @@ final class FakeHerdrServer: @unchecked Sendable {
         case protocolVersion(Int)
         /// Every request gets a JSON-RPC error with this message.
         case error(String)
+        /// The first request succeeds. Every later request is a JSON-RPC
+        /// error, so `prompt`'s text write can return and its Enter can fail.
+        case succeedThenFail
     }
 
     struct SetupError: Error {
@@ -24,6 +27,7 @@ final class FakeHerdrServer: @unchecked Sendable {
     private let listenFd: Int32
     private let lock = NSLock()
     private var stopped = false
+    private var requestsAnswered = 0
     private let finished = DispatchSemaphore(value: 0)
 
     /// A short `/tmp` path: `sun_path` is 104 bytes on macOS.
@@ -109,7 +113,14 @@ final class FakeHerdrServer: @unchecked Sendable {
     private func answerOneRequest(on client: Int32) {
         var request = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
+        // Poll, rather than block in `read`. A failed write reconnects and
+        // then sends nothing, and `stop()` has to be able to finish.
         while !request.contains(0x0A) {
+            if isStopped { return }
+            var pfd = pollfd(fd: client, events: Int16(POLLIN), revents: 0)
+            let ready = Darwin.poll(&pfd, 1, 50)
+            if ready == 0 { continue }
+            guard ready > 0 else { return }
             let n = Darwin.read(client, &buffer, buffer.count)
             guard n > 0 else { return }
             request.append(contentsOf: buffer[0..<n])
@@ -119,6 +130,11 @@ final class FakeHerdrServer: @unchecked Sendable {
               let dict = object as? [String: Any] else {
             return
         }
+        lock.lock()
+        requestsAnswered += 1
+        let answered = requestsAnswered
+        lock.unlock()
+
         var response: [String: Any] = ["id": dict["id"] ?? NSNull()]
         switch reply {
         case .protocolVersion(let version):
@@ -128,6 +144,12 @@ final class FakeHerdrServer: @unchecked Sendable {
             )
         case .error(let message):
             response["error"] = ["code": -32603, "message": message] as [String: Any]
+        case .succeedThenFail:
+            if answered == 1 {
+                response["result"] = ["type": "ok"] as [String: Any]
+            } else {
+                response["error"] = ["code": -32603, "message": "enter rejected"] as [String: Any]
+            }
         }
         guard var line = try? JSONSerialization.data(withJSONObject: response) else { return }
         line.append(0x0A)

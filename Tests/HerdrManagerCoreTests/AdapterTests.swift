@@ -76,6 +76,70 @@ struct ParseSnapshotTests {
         #expect(snap.panes.first?.stateChangeSeq == 42)
         #expect(snap.focusedWorkspaceId == "w1")
         #expect(snap.focusedPaneId == "w1:p1")
+        #expect(snap.panes.first?.label == nil)
+    }
+
+    @Test("A pane rename is the label, and an empty one is a clear")
+    func paneRenameLabel() throws {
+        let jsonString = """
+        {
+            "version": "0.1.0",
+            "protocol": 17,
+            "workspaces": [],
+            "tabs": [],
+            "panes": [
+                {"pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "t1", "agent_status": "working", "label": "api"},
+                {"pane_id": "w1:p2", "workspace_id": "w1", "tab_id": "t1", "agent_status": "idle", "label": ""},
+                {"pane_id": "w1:p3", "workspace_id": "w1", "tab_id": "t1", "agent_status": "idle", "label": " "},
+                {"pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "t1", "agent_status": "working", "label": "web"}
+            ]
+        }
+        """
+        let data = jsonString.data(using: .utf8)!
+        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let snap = try LiveHerdrAdapter.parseSnapshot(json)
+        let indexed = LiveHerdrAdapter.paneLabelIndex(in: snap.panes)
+        #expect(indexed.ids == Set(["w1:p1", "w1:p2", "w1:p3"]))
+        #expect(indexed.labels["w1:p1"] == "web")
+        #expect(indexed.labels["w1:p2"] == nil)
+        #expect(indexed.labels["w1:p3"] == " ")
+
+        let updated = LiveHerdrAdapter.parseEvent([
+            "event": "pane_updated",
+            "data": [
+                "type": "pane_updated",
+                "pane": [
+                    "pane_id": "w1:p1",
+                    "workspace_id": "w1",
+                    "tab_id": "t1",
+                    "agent": "claude",
+                    "agent_status": "working",
+                    "label": "api"
+                ] as [String: Any]
+            ] as [String: Any]
+        ])
+        guard case .paneUpdated(let info) = updated else {
+            Issue.record("Expected pane_updated, got \(updated)")
+            return
+        }
+        #expect(info.paneLabel == "api")
+
+        let cleared = LiveHerdrAdapter.parseEvent([
+            "event": "pane.updated",
+            "data": [
+                "pane": [
+                    "pane_id": "w1:p1",
+                    "agent": "claude",
+                    "agent_status": "working",
+                    "label": ""
+                ] as [String: Any]
+            ] as [String: Any]
+        ])
+        guard case .paneUpdated(let empty) = cleared else {
+            Issue.record("Expected pane_updated, got \(cleared)")
+            return
+        }
+        #expect(empty.paneLabel == nil)
     }
 
     @Test("Missing protocol defaults to 0")
@@ -430,17 +494,73 @@ struct ParseEventTests {
         }
     }
 
-    @Test("workspace_focused (real wire format) yields .workspacesChanged")
-    func workspaceFocusedRealWireFormat() {
+    @Test("workspace_renamed and tab_renamed carry the new label")
+    func renameEventsCarryTheLabel() throws {
+        let workspace = """
+        {"event":"workspace_renamed","data":{"type":"workspace_renamed","workspace_id":"wA","label":"Proj"}}
+        """
+        let workspaceEvent = LiveHerdrAdapter.parseEvent(
+            try JSONSerialization.jsonObject(with: Data(workspace.utf8)) as! [String: Any]
+        )
+        if case .workspaceRenamed(let id, let label) = workspaceEvent {
+            #expect(id == "wA")
+            #expect(label == "Proj")
+        } else {
+            Issue.record("Expected .workspaceRenamed, got \(workspaceEvent)")
+        }
+
+        let tab = """
+        {"event":"tab.renamed","data":{"tab_id":"wA:t9","workspace_id":"wA","label":"suite"}}
+        """
+        let tabEvent = LiveHerdrAdapter.parseEvent(
+            try JSONSerialization.jsonObject(with: Data(tab.utf8)) as! [String: Any]
+        )
+        if case .tabRenamed(let id, let label) = tabEvent {
+            #expect(id == "wA:t9")
+            #expect(label == "suite")
+        } else {
+            Issue.record("Expected .tabRenamed, got \(tabEvent)")
+        }
+
+        let empty = LiveHerdrAdapter.parseEvent([
+            "event": "workspace_renamed",
+            "data": ["workspace_id": "wA", "label": ""] as [String: Any]
+        ])
+        if case .ignored = empty {
+            // An empty label must not become a refetch either.
+        } else {
+            Issue.record("Expected .ignored for an empty rename label, got \(empty)")
+        }
+    }
+
+    @Test("workspace_focused is not a layout change")
+    func workspaceFocusedIsNotALayoutChange() {
         let dict: [String: Any] = [
             "event": "workspace_focused",
             "data": ["type": "workspace_focused", "workspace_id": "wE"] as [String: Any]
         ]
         let event = LiveHerdrAdapter.parseEvent(dict)
-        if case .workspacesChanged = event {
-            // pass
-        } else {
-            Issue.record("Expected .workspacesChanged, got \(event)")
+        guard case .ignored = event else {
+            Issue.record("Expected .ignored for workspace_focused, got \(event)")
+            return
+        }
+
+        let created = LiveHerdrAdapter.parseEvent([
+            "event": "workspace_created",
+            "data": ["workspace_id": "wE", "label": "proj"] as [String: Any]
+        ])
+        guard case .workspacesChanged = created else {
+            Issue.record("Expected .workspacesChanged for workspace_created, got \(created)")
+            return
+        }
+
+        let tab = LiveHerdrAdapter.parseEvent([
+            "event": "tab.focused",
+            "data": ["tab_id": "wE:t1", "workspace_id": "wE"] as [String: Any]
+        ])
+        guard case .ignored = tab else {
+            Issue.record("Expected .ignored for tab.focused, got \(tab)")
+            return
         }
     }
 
@@ -496,7 +616,7 @@ struct ParseEventTests {
         }
     }
 
-    @Test("Dotted pane.focused / pane.exited / workspace.focused match subscribe types")
+    @Test("Dotted pane.focused and pane.exited parse, and workspace.focused does not refetch")
     func dottedLifecycleEvents() {
         let focused = LiveHerdrAdapter.parseEvent([
             "event": "pane.focused",
@@ -523,10 +643,106 @@ struct ParseEventTests {
             "event": "workspace.focused",
             "data": ["workspace_id": "w1"] as [String: Any]
         ])
-        if case .workspacesChanged = ws {
+        guard case .ignored = ws else {
+            Issue.record("Expected .ignored for workspace.focused, got \(ws)")
+            return
+        }
+    }
+
+    @Test("pane_moved carries the previous id, the new pane, and a created workspace label")
+    func paneMovedRealWireFormat() throws {
+        let jsonString = """
+        {
+            "event": "pane_moved",
+            "data": {
+                "type": "pane_moved",
+                "previous_pane_id": "wA:p1",
+                "previous_workspace_id": "wA",
+                "previous_tab_id": "wA:t1",
+                "pane": {
+                    "pane_id": "wB:p4",
+                    "workspace_id": "wB",
+                    "tab_id": "wB:t1",
+                    "agent": "claude",
+                    "agent_status": "blocked",
+                    "state_change_seq": 9,
+                    "title": "Claude"
+                },
+                "created_workspace": {
+                    "workspace_id": "wB",
+                    "label": "proj",
+                    "focused": true,
+                    "pane_count": 1,
+                    "tab_count": 1,
+                    "number": 2,
+                    "active_tab_id": "wB:t1",
+                    "agent_status": "blocked"
+                },
+                "created_tab": {
+                    "tab_id": "wB:t1",
+                    "workspace_id": "wB",
+                    "label": "main"
+                }
+            }
+        }
+        """
+        let data = jsonString.data(using: .utf8)!
+        let dict = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let event = LiveHerdrAdapter.parseEvent(dict)
+        if case .paneMoved(let previous, let info, let workspace, let tab) = event {
+            #expect(previous == "wA:p1")
+            #expect(info.paneId == "wB:p4")
+            #expect(info.workspaceId == "wB")
+            #expect(info.tabId == "wB:t1")
+            #expect(info.agent == "claude")
+            #expect(info.agentStatus == "blocked")
+            #expect(info.stateChangeSeq == 9)
+            #expect(workspace == "proj")
+            #expect(tab == "main")
+        } else {
+            Issue.record("Expected .paneMoved, got \(event)")
+        }
+    }
+
+    @Test("A flat pane.moved with no previous id is the same pane")
+    func flatPaneMovedKeepsTheOnlyId() {
+        let event = LiveHerdrAdapter.parseEvent([
+            "event": "pane.moved",
+            "data": [
+                "pane_id": "w1:p1",
+                "workspace_id": "w1",
+                "tab_id": "w1:t2",
+                "agent": "codex",
+                "agent_status": "working",
+                "state_change_seq": 3
+            ] as [String: Any]
+        ])
+        if case .paneMoved(let previous, let info, let workspace, let tab) = event {
+            #expect(previous.isEmpty)
+            #expect(info.paneId == "w1:p1")
+            #expect(info.tabId == "w1:t2")
+            #expect(info.agentStatus == "working")
+            #expect(info.stateChangeSeq == 3)
+            #expect(workspace == nil)
+            #expect(tab == nil)
+        } else {
+            Issue.record("Expected .paneMoved for flat pane.moved, got \(event)")
+        }
+    }
+
+    @Test("pane_moved with an empty new pane id is ignored")
+    func emptyMovedPaneIdIsIgnored() {
+        let event = LiveHerdrAdapter.parseEvent([
+            "event": "pane_moved",
+            "data": [
+                "previous_pane_id": "wA:p1",
+                "pane": ["pane_id": ""]
+            ] as [String: Any]
+        ])
+        if case .ignored = event {
             // pass
         } else {
-            Issue.record("Expected .workspacesChanged, got \(ws)")
+            Issue.record("Expected .ignored for empty moved pane id, got \(event)")
         }
     }
 
@@ -647,6 +863,27 @@ struct SubscriptionParamsTests {
     func includesPaneUpdated() {
         #expect(LiveHerdrAdapter.globalSubscriptionTypes.contains("pane.updated"))
         #expect(!LiveHerdrAdapter.globalSubscriptionTypes.isEmpty)
+    }
+
+    @Test("pane.moved is subscribed so a cross-workspace id change is delivered")
+    func includesPaneMoved() {
+        // herdr's Subscription::PaneMoved carries no pane_id. Omitting it
+        // leaves the re-key path dead: the move is not a close plus a create.
+        #expect(LiveHerdrAdapter.globalSubscriptionTypes.contains("pane.moved"))
+        #expect(LiveHerdrAdapter.globalSubscriptionTypes.filter { $0 == "pane.moved" }.count == 1)
+    }
+
+    @Test("Focus subscriptions are not requested")
+    func omitsFocusSubscriptions() {
+        // A focus does not change the herd. Subscribing to workspace.focused
+        // made herdmgr refetch on every click.
+        let types = LiveHerdrAdapter.globalSubscriptionTypes
+        #expect(!types.contains("pane.focused"))
+        #expect(!types.contains("workspace.focused"))
+        #expect(!types.contains("tab.focused"))
+        #expect(types.contains("workspace.created"))
+        #expect(types.contains("tab.created"))
+        #expect(types.contains("pane.agent_detected"))
     }
 }
 
@@ -800,6 +1037,47 @@ struct ResponseEnvelopeTests {
         #expect(info.foregroundProcesses.count == 1)
         #expect(info.foregroundProcesses.first?.pid == 72004)
         #expect(info.foregroundProcesses.first?.name == "codex")
+        #expect(info.foregroundProcesses.first?.argv == nil)
+    }
+
+    @Test("pane.process_info keeps argv, and a non-string element drops the field")
+    func processInfoArgv() throws {
+        let response: [String: Any] = [
+            "process_info": [
+                "shell_pid": 1,
+                "foreground_processes": [
+                    [
+                        "pid": 2,
+                        "name": "sh",
+                        "argv0": "/bin/sh",
+                        "argv": ["/bin/sh", "/tmp/test-bin/pi"],
+                        "cmdline": "/bin/sh /tmp/test-bin/pi",
+                    ] as [String: Any],
+                ],
+            ] as [String: Any],
+        ]
+        let info = LiveHerdrAdapter.parseProcessInfo(response)
+        #expect(info.foregroundProcesses.first?.argv == ["/bin/sh", "/tmp/test-bin/pi"])
+
+        let mixed: [String: Any] = [
+            "foreground_processes": [
+                [
+                    "pid": 3,
+                    "name": "sh",
+                    "argv": ["/bin/sh", 1] as [Any],
+                ] as [String: Any],
+            ],
+        ]
+        let dropped = LiveHerdrAdapter.parseProcessInfo(mixed)
+        #expect(dropped.foregroundProcesses.first?.argv == nil)
+        #expect(dropped.foregroundProcesses.first?.name == "sh")
+
+        let empty: [String: Any] = [
+            "foreground_processes": [
+                ["pid": 4, "name": "bash", "argv": [String]()] as [String: Any],
+            ],
+        ]
+        #expect(LiveHerdrAdapter.parseProcessInfo(empty).foregroundProcesses.first?.argv == nil)
     }
 
     @Test("pane.process_info still accepts a flat result")
@@ -808,6 +1086,40 @@ struct ResponseEnvelopeTests {
         let info = LiveHerdrAdapter.parseProcessInfo(response)
         #expect(info.shellPid == 42)
         #expect(info.foregroundProcesses.isEmpty)
+        #expect(info.foregroundProcessGroupId == nil)
+    }
+
+    @Test("pane.process_info keeps a positive foreground process group id")
+    func processInfoGroupId() throws {
+        let response: [String: Any] = [
+            "process_info": [
+                "shell_pid": 1,
+                "foreground_process_group_id": 42,
+                "foreground_processes": [] as [[String: Any]],
+            ] as [String: Any],
+        ]
+        #expect(LiveHerdrAdapter.parseProcessInfo(response).foregroundProcessGroupId == 42)
+
+        let flat: [String: Any] = ["foreground_process_group_id": 7]
+        #expect(LiveHerdrAdapter.parseProcessInfo(flat).foregroundProcessGroupId == 7)
+
+        let missing: [String: Any] = ["process_info": ["shell_pid": 1] as [String: Any]]
+        #expect(LiveHerdrAdapter.parseProcessInfo(missing).foregroundProcessGroupId == nil)
+
+        let zero: [String: Any] = ["foreground_process_group_id": 0]
+        #expect(LiveHerdrAdapter.parseProcessInfo(zero).foregroundProcessGroupId == nil)
+
+        let negative: [String: Any] = ["foreground_process_group_id": -5]
+        #expect(LiveHerdrAdapter.parseProcessInfo(negative).foregroundProcessGroupId == nil)
+
+        let fraction: [String: Any] = ["foreground_process_group_id": 42.5]
+        #expect(LiveHerdrAdapter.parseProcessInfo(fraction).foregroundProcessGroupId == nil)
+
+        let flag: [String: Any] = ["foreground_process_group_id": true]
+        #expect(LiveHerdrAdapter.parseProcessInfo(flag).foregroundProcessGroupId == nil)
+
+        let overflow: [String: Any] = ["foreground_process_group_id": 2_147_483_648]
+        #expect(LiveHerdrAdapter.parseProcessInfo(overflow).foregroundProcessGroupId == nil)
     }
 }
 
@@ -841,6 +1153,31 @@ struct PaneReadAndSplitTests {
         #expect(params["direction"] as? String == "right")
         #expect(params["focus"] as? Bool == true)
         #expect(params["cwd"] as? String == "/tmp/project")
+    }
+
+    @Test("pane.split and tab.create omit an empty cwd")
+    func emptyCwdIsOmitted() {
+        let split = LiveHerdrAdapter.splitPaneParams(targetPaneId: "wE:p1", cwd: "")
+        #expect(split["target_pane_id"] as? String == "wE:p1")
+        #expect(split["cwd"] == nil)
+        let splitMissing = LiveHerdrAdapter.splitPaneParams(targetPaneId: "wE:p1", cwd: nil)
+        #expect(splitMissing["cwd"] == nil)
+
+        let tab = LiveHerdrAdapter.createTabParams(
+            workspaceId: "w1", cwd: "", label: "Claude", focus: true
+        )
+        #expect(tab["workspace_id"] as? String == "w1")
+        #expect(tab["label"] as? String == "Claude")
+        #expect(tab["focus"] as? Bool == true)
+        #expect(tab["cwd"] == nil)
+
+        let withCwd = LiveHerdrAdapter.createTabParams(
+            workspaceId: nil, cwd: "/work", label: nil, focus: false
+        )
+        #expect(withCwd["cwd"] as? String == "/work")
+        #expect(withCwd["workspace_id"] == nil)
+        #expect(withCwd["label"] == nil)
+        #expect(withCwd["focus"] as? Bool == false)
     }
 
     @Test("pane.split unwraps the returned pane_info envelope")
@@ -966,6 +1303,35 @@ struct ProtocolReadingResetTests {
         "/tmp/herdr-missing-\(UUID().uuidString.prefix(8)).sock"
     }
 
+    @Test("An earlier herd-read serial cannot put an older protocol back")
+    func earlierReadSerialDoesNotClobberProtocol() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        adapter.setLatestProtocol(18, readSerial: 2)
+        adapter.setLatestProtocol(17, readSerial: 1)
+        #expect(adapter.health().protocolVersion == 18)
+
+        adapter.setLatestProtocol(19, readSerial: 3)
+        #expect(adapter.health().protocolVersion == 19)
+
+        // A connect failure clears the reading. The serial it carries has
+        // to outrank the earlier success, and that success must not return.
+        do {
+            _ = try await adapter.herdSnapshot(readSerial: 4)
+            Issue.record("Expected the snapshot to fail with no herdr listening")
+        } catch {
+            #expect(error is NDJSONClientError)
+        }
+        #expect(adapter.health().protocolVersion == 0)
+        adapter.setLatestProtocol(19, readSerial: 3)
+        #expect(adapter.health().protocolVersion == 0)
+
+        // The next read, and any caller that does not pass a serial, records.
+        adapter.setLatestProtocol(17)
+        #expect(adapter.health().protocolVersion == 17)
+        adapter.setLatestProtocol(18, readSerial: 5)
+        #expect(adapter.health().protocolVersion == 18)
+    }
+
     @Test("A request that cannot reach herdr forgets the old protocol reading")
     func connectFailureClearsReading() async {
         let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
@@ -1061,6 +1427,431 @@ struct ProtocolReadingResetTests {
         #expect(!health.writesEnabled)
         #expect(health.reason?.contains(path) == true)
         #expect(adapter.health().reason == "protocol unknown")
+    }
+
+    @Test("A connect failure on an earlier herd-read serial leaves a newer protocol in place")
+    func earlierConnectFailureDoesNotClearNewerProtocol() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        adapter.setLatestProtocol(18, readSerial: 5)
+        #expect(adapter.health().writesEnabled)
+
+        do {
+            _ = try await adapter.herdSnapshot(readSerial: 4)
+            Issue.record("Expected the snapshot to fail with no herdr listening")
+        } catch {
+            #expect(error is NDJSONClientError)
+        }
+
+        // Captured before the reading already on the gate, so the failed
+        // connect must not wipe it.
+        #expect(adapter.health().protocolVersion == 18)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("An earlier herd snapshot does not put an older protocol back")
+    func earlierHerdSnapshotDoesNotClobberProtocol() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(16))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        adapter.setLatestProtocol(18, readSerial: 5)
+
+        let herd = try await adapter.herdSnapshot(readSerial: 4)
+        #expect(herd.protocol == 16)
+        #expect(adapter.health().protocolVersion == 18)
+        #expect(adapter.health().writesEnabled)
+
+        _ = try await adapter.herdSnapshot(readSerial: 6)
+        #expect(adapter.health().protocolVersion == 16)
+        #expect(!adapter.health().writesEnabled)
+    }
+
+    @Test("An earlier snapshot does not put an older protocol back")
+    func earlierSnapshotDoesNotClobberProtocol() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(16))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        adapter.setLatestProtocol(18, readSerial: 5)
+
+        let snap = try await adapter.snapshot(readSerial: 4)
+        #expect(snap.protocol == 16)
+        #expect(adapter.health().protocolVersion == 18)
+
+        _ = try await adapter.snapshot(readSerial: 6)
+        #expect(adapter.health().protocolVersion == 16)
+
+        // A caller that does not pass a serial still records, which is the
+        // CLI and any one-shot reader that is alone on the adapter.
+        adapter.setLatestProtocol(18, readSerial: 7)
+        _ = try await adapter.snapshot()
+        #expect(adapter.health().protocolVersion == 16)
+    }
+
+    @Test("An earlier refresh failure does not clear a newer protocol")
+    func earlierRefreshFailureDoesNotClearNewerProtocol() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        adapter.setLatestProtocol(18, readSerial: 5)
+
+        let health = await adapter.refreshHealth(readSerial: 4)
+        #expect(!health.writesEnabled)
+        #expect(health.reason?.contains("protocol unknown") == true)
+        #expect(adapter.health().protocolVersion == 18)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("A newer refresh that cannot reach herdr forgets the old protocol")
+    func newerRefreshFailureClearsProtocol() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        adapter.setLatestProtocol(18, readSerial: 5)
+
+        let health = await adapter.refreshHealth(readSerial: 6)
+        #expect(!health.writesEnabled)
+        #expect(adapter.health().protocolVersion == 0)
+        #expect(!adapter.health().writesEnabled)
+    }
+
+    @Test("An earlier refresh that herdr answers with an error leaves a newer protocol in place")
+    func earlierRefreshErrorDoesNotClearNewerProtocol() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .error("snapshot unavailable"))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        adapter.setLatestProtocol(18, readSerial: 5)
+
+        let health = await adapter.refreshHealth(readSerial: 4)
+        #expect(!health.writesEnabled)
+        #expect(health.reason?.contains("snapshot unavailable") == true)
+        #expect(adapter.health().protocolVersion == 18)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("A refresh that loses the serial race returns the newer gate, not its own protocol")
+    func staleRefreshReturnsTheNewerGate() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(18))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        // A later read already saw the downgrade. This refresh still gets
+        // a snapshot — protocol 18, writes on — and must not hand that to
+        // the caller.
+        adapter.setLatestProtocol(16, readSerial: 5)
+
+        let health = await adapter.refreshHealth(readSerial: 4)
+        #expect(health.protocolVersion == 16)
+        #expect(!health.writesEnabled)
+        #expect(adapter.health().protocolVersion == 16)
+    }
+
+    @Test("A herd snapshot records its enqueue epoch, so an earlier one cannot replace it")
+    func herdSnapshotRecordsEnqueueEpoch() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(17))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        let earlier = adapter.issueProtocolEpoch()
+
+        _ = try await adapter.herdSnapshot()
+        #expect(adapter.health().protocolVersion == 17)
+
+        // A read that was already in flight when this snapshot started.
+        adapter.setLatestProtocol(18, readSerial: 9, epoch: earlier)
+        #expect(adapter.health().protocolVersion == 17)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("A session snapshot records its enqueue epoch, so an earlier one cannot replace it")
+    func snapshotRecordsEnqueueEpoch() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(17))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        let earlier = adapter.issueProtocolEpoch()
+
+        _ = try await adapter.snapshot()
+        #expect(adapter.health().protocolVersion == 17)
+
+        adapter.setLatestProtocol(18, epoch: earlier)
+        #expect(adapter.health().protocolVersion == 17)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("A pane read that cannot connect is not undone by an earlier herd read")
+    func paneReadConnectFailureIsNotUndoneByAnEarlierEpoch() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        let earlier = adapter.issueProtocolEpoch()
+        adapter.setLatestProtocol(17, readSerial: 9, epoch: earlier)
+        #expect(adapter.health().writesEnabled)
+
+        do {
+            _ = try await adapter.read(paneId: "w1:p1", source: .visible)
+            Issue.record("Expected the read to fail with no herdr listening")
+        } catch {
+            #expect(error is NDJSONClientError)
+        }
+
+        #expect(adapter.health().protocolVersion == 0)
+        #expect(!adapter.health().writesEnabled)
+
+        // The in-flight herd read had a newer serial and no reason to lose
+        // on that gate. It still must not turn writes back on: it started
+        // before the socket refused the read.
+        adapter.setLatestProtocol(17, readSerial: 10, epoch: earlier)
+        #expect(adapter.health().protocolVersion == 0)
+
+        let later = adapter.issueProtocolEpoch()
+        adapter.setLatestProtocol(17, readSerial: 11, epoch: later)
+        #expect(adapter.health().protocolVersion == 17)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("An earlier connect failure does not wipe a protocol recorded later")
+    func earlierEpochDoesNotWipeANewerProtocol() {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        let earlier = adapter.issueProtocolEpoch()
+        let later = adapter.issueProtocolEpoch()
+        adapter.setLatestProtocol(18, readSerial: 4, epoch: later)
+
+        adapter.setLatestProtocol(0, epoch: earlier)
+        #expect(adapter.health().protocolVersion == 18)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("A dropped subscription is not undone by a herd read that already started")
+    func droppedSubscriptionIsNotUndoneByAnEarlierEpoch() {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        let earlier = adapter.issueProtocolEpoch()
+        adapter.setLatestProtocol(17, readSerial: 4, epoch: earlier)
+        #expect(adapter.health().writesEnabled)
+
+        adapter.clearProtocolReading()
+        #expect(adapter.health().protocolVersion == 0)
+        #expect(!adapter.health().writesEnabled)
+
+        adapter.setLatestProtocol(17, readSerial: 8, epoch: earlier)
+        #expect(adapter.health().protocolVersion == 0)
+
+        let later = adapter.issueProtocolEpoch()
+        adapter.setLatestProtocol(16, epoch: later)
+        #expect(adapter.health().protocolVersion == 16)
+        #expect(!adapter.health().writesEnabled)
+    }
+
+    @Test("A refresh herdr answers with an error is not undone by an earlier read")
+    func refreshErrorIsNotUndoneByAnEarlierEpoch() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .error("snapshot unavailable"))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        let earlier = adapter.issueProtocolEpoch()
+        adapter.setLatestProtocol(17, readSerial: 2, epoch: earlier)
+
+        let health = await adapter.refreshHealth()
+        #expect(!health.writesEnabled)
+        #expect(health.reason?.contains("snapshot unavailable") == true)
+        #expect(adapter.health().protocolVersion == 0)
+
+        // Nil serial, and a serial newer than the one this refresh carried.
+        // Neither is allowed to put protocol 17 back: the refresh started
+        // after that reading.
+        adapter.setLatestProtocol(17, epoch: earlier)
+        adapter.setLatestProtocol(17, readSerial: 9, epoch: earlier)
+        #expect(adapter.health().protocolVersion == 0)
+        #expect(!adapter.health().writesEnabled)
+    }
+}
+
+@Suite("Mutations obey the write gate on the I/O queue")
+struct WriteGateOnIOQueueTests {
+    private func unreachableSocketPath() -> String {
+        "/tmp/herdr-missing-\(UUID().uuidString.prefix(8)).sock"
+    }
+
+    /// A closed gate must refuse before connect. `connectFailed` means the
+    /// call got past the gate and tried the socket.
+    private func expectRefused(
+        _ name: String,
+        reasonContains: String,
+        _ operation: () async throws -> Void
+    ) async {
+        do {
+            try await operation()
+            Issue.record("\(name): expected the write to be refused")
+        } catch let error as NDJSONClientError {
+            guard case .writesDisabled(let reason) = error else {
+                Issue.record("\(name): expected writesDisabled, got \(error)")
+                return
+            }
+            #expect(reason.contains(reasonContains))
+            if !reason.contains(reasonContains) {
+                Issue.record("\(name): \(reason)")
+            }
+        } catch {
+            Issue.record("\(name): unexpected error \(error)")
+        }
+    }
+
+    @Test("An older protocol refuses every mutation and leaves that reading in place")
+    func olderProtocolRefusesMutations() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        adapter.setLatestProtocol(16)
+        #expect(!adapter.health().writesEnabled)
+
+        await expectRefused("sendKeys", reasonContains: "16") {
+            try await adapter.sendKeys(paneId: "w1:p1", keys: ["enter"])
+        }
+        await expectRefused("prompt", reasonContains: "16") {
+            try await adapter.prompt(paneId: "w1:p1", text: "hello")
+        }
+        await expectRefused("closePane", reasonContains: "16") {
+            try await adapter.closePane(paneId: "w1:p1")
+        }
+        await expectRefused("focus", reasonContains: "16") {
+            try await adapter.focus(paneId: "w1:p1")
+        }
+        await expectRefused("focusWorkspace", reasonContains: "16") {
+            try await adapter.focusWorkspace("w1")
+        }
+        await expectRefused("focusTab", reasonContains: "16") {
+            try await adapter.focusTab("w1:t1")
+        }
+        await expectRefused("focusPane", reasonContains: "16") {
+            try await adapter.focusPane("w1:p1")
+        }
+        await expectRefused("createWorkspace", reasonContains: "16") {
+            _ = try await adapter.createWorkspace(cwd: "/tmp", label: "scratch")
+        }
+        await expectRefused("createTab", reasonContains: "16") {
+            _ = try await adapter.createTab(workspaceId: "w1", cwd: nil, label: nil, focus: true)
+        }
+        await expectRefused("splitPane", reasonContains: "16") {
+            _ = try await adapter.splitPane(targetPaneId: "w1:p1", cwd: nil)
+        }
+        await expectRefused("startAgent", reasonContains: "16") {
+            try await adapter.startAgent(paneId: "w1:p1", kind: "claude", name: "claude")
+        }
+        await expectRefused("reportMetadata", reasonContains: "16") {
+            try await adapter.reportMetadata(
+                paneId: "w1:p1",
+                source: "shepherd",
+                tokens: ["stuck_for": "1m"],
+                ttlMs: 1000
+            )
+        }
+
+        // A refusal never connects, so the connect-failure path must not
+        // clear the older reading.
+        #expect(adapter.health().protocolVersion == 16)
+        #expect(!adapter.health().writesEnabled)
+    }
+
+    @Test("An unknown protocol refuses a write and does not pretend to have connected")
+    func unknownProtocolRefusesWrite() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        await expectRefused("prompt", reasonContains: "unknown") {
+            try await adapter.prompt(paneId: "w1:p1", text: "hello")
+        }
+        #expect(adapter.health().protocolVersion == 0)
+        #expect(adapter.health().reason == "protocol unknown")
+    }
+
+    @Test("A herd read that records an older protocol blocks the write that follows it")
+    func downgradeRecordedByHerdReadBlocksTheNextWrite() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(16))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        // The gate still says the previous build. This is the reading a
+        // confirm-time refresh stored before revalidation's herd read.
+        adapter.setLatestProtocol(17)
+        #expect(adapter.health().writesEnabled)
+
+        let herd = try await adapter.herdSnapshot()
+        #expect(herd.protocol == 16)
+        #expect(adapter.health().protocolVersion == 16)
+
+        // The fake answers any method with success. A write that reached
+        // the socket would return, not throw.
+        await expectRefused("sendKeys", reasonContains: "16") {
+            try await adapter.sendKeys(paneId: "w1:p1", keys: ["enter"])
+        }
+        #expect(adapter.health().protocolVersion == 16)
+        #expect(!adapter.health().writesEnabled)
+    }
+
+    @Test("A verified protocol still sends the write")
+    func verifiedProtocolSendsTheWrite() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(17))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        adapter.setLatestProtocol(17)
+
+        try await adapter.sendKeys(paneId: "w1:p1", keys: ["enter"])
+        try await adapter.prompt(paneId: "w1:p1", text: "hello")
+        try await adapter.closePane(paneId: "w1:p1")
+        // The write does not record a protocol. The verified reading stays.
+        #expect(adapter.health().protocolVersion == 17)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("Enter failing after the text write is not a rejected prompt")
+    func promptEnterFailureIsItsOwnError() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .succeedThenFail)
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        adapter.setLatestProtocol(17)
+
+        do {
+            try await adapter.prompt(paneId: "w1:p1", text: "hello")
+            Issue.record("expected Enter to fail after the text write")
+        } catch NDJSONClientError.promptEnterFailed {
+            // The text write returned. Enter's rejection is not attached,
+            // and this is not the invalidResponse a rejected text write throws.
+        } catch {
+            Issue.record("expected promptEnterFailed, got \(error)")
+        }
+
+        // Enter's failure is not a connect failure, so the reading stays.
+        #expect(adapter.health().protocolVersion == 17)
+        #expect(adapter.health().writesEnabled)
+    }
+
+    @Test("A verified write that cannot connect still clears the reading")
+    func verifiedWriteConnectFailureClearsReading() async {
+        let adapter = LiveHerdrAdapter(socketPath: unreachableSocketPath())
+        adapter.setLatestProtocol(17)
+        #expect(adapter.health().writesEnabled)
+
+        do {
+            try await adapter.closePane(paneId: "w1:p1")
+            Issue.record("Expected connect to fail with no herdr listening")
+        } catch let error as NDJSONClientError {
+            guard case .connectFailed = error else {
+                Issue.record("Expected connectFailed, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Unexpected error \(error)")
+        }
+
+        #expect(adapter.health().protocolVersion == 0)
+        #expect(!adapter.health().writesEnabled)
+    }
+
+    @Test("A read is still attempted when writes are off")
+    func readIsNotGated() async throws {
+        let path = FakeHerdrServer.temporaryPath()
+        let server = try FakeHerdrServer(path: path, reply: .protocolVersion(16))
+        defer { server.stop() }
+        let adapter = LiveHerdrAdapter(socketPath: path)
+        adapter.setLatestProtocol(16)
+
+        let herd = try await adapter.herdSnapshot()
+        #expect(herd.protocol == 16)
+        let snap = try await adapter.snapshot()
+        #expect(snap.protocol == 16)
     }
 }
 
@@ -1328,6 +2119,84 @@ struct NDJSONResponseUnwrapTests {
     }
 }
 
+/// `agent.wait` succeeds as `agent_info`. A timeout is an error whose
+/// message is exactly `timed out waiting for agent status`, not
+/// `settled: false`. Treating that error as a thrown failure made
+/// `agent.say` report `wait_failed` and made a spawn brief skip the
+/// herd list.
+@Suite("agent.wait result")
+struct AgentWaitResultTests {
+    private func object(_ json: String) throws -> [String: Any] {
+        let parsed = try JSONSerialization.jsonObject(with: Data(json.utf8))
+        guard let object = parsed as? [String: Any] else {
+            Issue.record("Expected an object")
+            return [:]
+        }
+        return object
+    }
+
+    @Test("A matching agent_info is settled, and any other status is not")
+    func agentInfoEnvelope() throws {
+        let idle = try object(#"{"type":"agent_info","agent":{"agent_status":"idle","pane_id":"w1:p1"}}"#)
+        #expect(LiveHerdrAdapter.agentWaitSettled(idle, until: ["idle", "done", "blocked"]))
+        #expect(!LiveHerdrAdapter.agentWaitSettled(idle, until: ["done"]))
+        #expect(!LiveHerdrAdapter.agentWaitSettled(idle, until: ["Idle"]))
+
+        let working = try object(#"{"type":"agent_info","agent":{"agent_status":"working"}}"#)
+        #expect(LiveHerdrAdapter.agentWaitSettled(working, until: ["working"]))
+        #expect(!LiveHerdrAdapter.agentWaitSettled(working, until: ["idle"]))
+    }
+
+    @Test("The agent record wins over a settled flag on the same object")
+    func agentRecordWins() throws {
+        let working = try object(#"{"settled":true,"agent":{"agent_status":"working"}}"#)
+        #expect(!LiveHerdrAdapter.agentWaitSettled(working, until: ["idle"]))
+        #expect(LiveHerdrAdapter.agentWaitSettled(working, until: ["working"]))
+    }
+
+    @Test("A result with no agent record still accepts settled or a top-level status")
+    func legacyShapes() throws {
+        let settled = try object(#"{"settled":true}"#)
+        #expect(LiveHerdrAdapter.agentWaitSettled(settled, until: ["idle"]))
+        let other = try object(#"{"settled":false,"status":"working"}"#)
+        #expect(!LiveHerdrAdapter.agentWaitSettled(other, until: ["idle"]))
+        #expect(LiveHerdrAdapter.agentWaitSettled(other, until: ["working"]))
+        let bare = try object(#"{"type":"ok"}"#)
+        #expect(!LiveHerdrAdapter.agentWaitSettled(bare, until: ["idle"]))
+    }
+
+    @Test("herdr's status timeout is unsettled, and a different failure is not")
+    func timeoutIsUnsettled() throws {
+        let response: [String: Any] = [
+            "id": "7",
+            "error": [
+                "code": "timeout",
+                "message": LiveHerdrAdapter.agentWaitTimeoutDetail
+            ] as [String: Any]
+        ]
+        do {
+            _ = try NDJSONClient.unwrapResponse(response)
+            Issue.record("Expected the timeout error to throw")
+        } catch {
+            #expect(LiveHerdrAdapter.agentWaitTimedOut(error))
+        }
+
+        #expect(!LiveHerdrAdapter.agentWaitTimedOut(
+            NDJSONClientError.invalidResponse("timed out waiting for output match")
+        ))
+        #expect(!LiveHerdrAdapter.agentWaitTimedOut(
+            NDJSONClientError.invalidResponse("timed out waiting for agent status now")
+        ))
+        #expect(!LiveHerdrAdapter.agentWaitTimedOut(
+            NDJSONClientError.invalidResponse("agent is not running")
+        ))
+        #expect(!LiveHerdrAdapter.agentWaitTimedOut(NDJSONClientError.timeout))
+        #expect(!LiveHerdrAdapter.agentWaitTimedOut(
+            NDJSONClientError.connectFailed("/tmp/herdr.sock", 2)
+        ))
+    }
+}
+
 /// Shepherd and MCP render failures with `error.localizedDescription`.
 /// For an enum that is only CustomStringConvertible that bridges to
 /// "The operation couldn't be completed. (…Error error 4.)", so "Connect
@@ -1343,6 +2212,15 @@ struct CoreErrorDescriptionTests {
         let connect: Error = NDJSONClientError.connectFailed("/tmp/herdr.sock", 2)
         #expect(connect.localizedDescription.contains("/tmp/herdr.sock"))
         #expect(connect.localizedDescription.contains("errno 2"))
+
+        let gated: Error = NDJSONClientError.writesDisabled("herdr protocol 16 is older than the minimum verified 17; writes disabled")
+        #expect(gated.localizedDescription.contains("writes disabled"))
+        #expect(gated.localizedDescription.contains("protocol 16"))
+
+        let entered: Error = NDJSONClientError.promptEnterFailed
+        #expect(entered.localizedDescription == "text was inserted, but Enter failed")
+        #expect(!entered.localizedDescription.contains("\""))
+        #expect(!entered.localizedDescription.contains("invalid response"))
     }
 
     @Test("SharedActionStoreError carries the store failure")

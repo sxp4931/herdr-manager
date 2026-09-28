@@ -118,6 +118,21 @@ actor MCPServer {
     private let actionStore = ActionStore()
     private let sharedActionStore = SharedActionStore()
 
+    /// Capture ids for herd reads and write-gate refreshes. Taken before
+    /// the read starts, so a slower earlier read keeps the lower id and
+    /// cannot move the protocol gate.
+    private var nextHerdReadSerial: UInt64 = 0
+
+    /// Clocks for "blocked since" and silence. A fresh agent on every
+    /// tool call would start both at that call.
+    private var episodes = DiagnosisEpisodeLedger()
+    private let outputPoller = HeartbeatPoller()
+    /// When each working pane's detection screen was last read. Inside
+    /// `outputPollInterval` the stored hash is reused.
+    private var lastOutputPoll: [AgentID: Date] = [:]
+    /// Same cadence as Shepherd's heartbeat.
+    private let outputPollInterval: TimeInterval = 10
+
     // nonisolated(unsafe): only accessed from nonisolated writeResponse/writeRaw
     // which serialize via the lock.
     nonisolated(unsafe) private var stdoutLock = NSLock()
@@ -261,6 +276,113 @@ actor MCPServer {
 
     // MARK: - Herd → Agent Builder
 
+    /// Agents for one diagnosis, with clocks this process already recorded.
+    ///
+    /// `buildAgents` stamps `enteredAt` at the call. A blocked agent then
+    /// reads as newly blocked on every overview, and a working agent can
+    /// never go quiet. The ledger keeps the episode. The detection hash
+    /// moves with a session so a cross-workspace move does not make the
+    /// next read a first look. A working pane with no baseline is treated
+    /// as having just produced output: a failed screen read is not silence.
+    ///
+    /// `readSerial` is the id captured before this herd request. Tool calls
+    /// overlap, and the slower response is often the earlier herd. A serial
+    /// that loses does not observe, poll, or prune: observing would rewind
+    /// the episode, and pruning would delete the detection baseline the
+    /// later read just stored. That call still reports a clock the ledger
+    /// already has for the same status and seq.
+    private func agentsForDiagnosis(
+        from herd: HerdSnapshot,
+        readSerial: UInt64
+    ) async -> [AgentID: Agent] {
+        let now = Date()
+        guard let observed = episodes.observeIfCurrent(herd.agents, readSerial: readSerial, now: now) else {
+            return await agentsKeepingClocks(from: herd)
+        }
+        // Note the serial on the poller before any later await returns an
+        // older pane.read into it. A move does that inside the retarget.
+        // A herd with no move still has to note it, or a poll that is
+        // already waiting stores the earlier screen over this one.
+        if !observed.moves.isEmpty {
+            _ = await outputPoller.retarget(replacing: observed.moves, herdSerial: readSerial)
+        } else {
+            await outputPoller.noteHerdSerial(readSerial)
+        }
+        var agents = buildAgents(from: herd)
+        for (id, enteredAt) in observed.enteredAt {
+            agents[id]?.enteredAt = enteredAt
+        }
+
+        // The retarget await can let a newer serial adopt. Polling this
+        // snapshot then hashes panes that read already replaced, and the
+        // prune below would drop the baseline it stored.
+        if episodes.isLatestHerd(readSerial) {
+            let due = agents.values.filter { agent in
+                guard agent.status == .working else { return false }
+                if let last = lastOutputPoll[agent.id], now.timeIntervalSince(last) < outputPollInterval {
+                    return false
+                }
+                return true
+            }
+            if !due.isEmpty {
+                _ = await outputPoller.poll(agents: due, adapter: adapter, herdSerial: readSerial)
+                // After the read. A newer serial noted during it drops
+                // these bytes, and stamping the cadence beforehand would
+                // make that newer herd skip the screen for ten seconds.
+                if episodes.isLatestHerd(readSerial) {
+                    let polledAt = Date()
+                    for agent in due {
+                        lastOutputPoll[agent.id] = polledAt
+                    }
+                }
+            }
+        }
+        agents = await stampDetectionOutput(agents)
+
+        if episodes.isLatestHerd(readSerial) {
+            let live = Set(agents.keys)
+            lastOutputPoll = lastOutputPoll.filter { live.contains($0.key) }
+            await outputPoller.prune(keeping: live)
+        }
+        return agents
+    }
+
+    /// The herd read lost the serial race. Report clocks already stored
+    /// for the same episode, and do not move the ledger or the poller.
+    private func agentsKeepingClocks(from herd: HerdSnapshot) async -> [AgentID: Agent] {
+        var agents = buildAgents(from: herd)
+        for id in Array(agents.keys) {
+            guard var agent = agents[id],
+                  let enteredAt = episodes.enteredAt(matching: agent) else { continue }
+            agent.enteredAt = enteredAt
+            agents[id] = agent
+        }
+        return await stampDetectionOutput(agents)
+    }
+
+    /// `lastOutputAt` from the detection baseline. The dictionary is copied
+    /// back after the reads: writing it while it is being iterated, and
+    /// holding that write across an await, is a trap.
+    private func stampDetectionOutput(_ agents: [AgentID: Agent]) async -> [AgentID: Agent] {
+        let stamped = Date()
+        var outputs: [AgentID: Date] = [:]
+        for (id, agent) in agents {
+            let baseline = await outputPoller.lastOutputDate(for: id)
+            if let output = DiagnosisEpisodeLedger.outputDate(
+                for: agent.status,
+                baseline: baseline,
+                now: stamped
+            ) {
+                outputs[id] = output
+            }
+        }
+        var stampedAgents = agents
+        for (id, output) in outputs {
+            stampedAgents[id]?.lastOutputAt = output
+        }
+        return stampedAgents
+    }
+
     /// Build the MCP inventory from the same authoritative merged view
     /// Shepherd uses: `agent.list` supplies real agents and state sequences,
     /// while `session.snapshot` supplies workspace/tab labels.
@@ -275,18 +397,15 @@ actor MCPServer {
             let wsName = herd.workspaceNames[info.workspaceId] ?? info.workspaceId
             let tabName = herd.tabNames[info.tabId] ?? info.tabId
 
-            let kind: AgentKind
-            if let session = info.agentSession {
-                kind = AgentKind.custom(session.agent)
-            } else {
-                kind = AgentKind.custom(agentKind)
-            }
+            let kind = AgentKind.resolved(sessionAgent: info.agentSession?.agent, detected: agentKind)
 
-            let name = info.title
-                ?? info.name
-                ?? info.terminalTitleStripped
-                ?? info.displayAgent
-                ?? agentKind
+            let name = AgentLabel.preferred(
+                title: info.title,
+                displayAgent: info.displayAgent,
+                name: info.name,
+                terminalTitleStripped: info.terminalTitleStripped,
+                paneLabel: herd.paneLabels[info.paneId]
+            ) ?? agentKind
 
             let agent = Agent(
                 id: agentId,
@@ -300,7 +419,8 @@ actor MCPServer {
                 verdict: Self.initialVerdict(for: status),
                 workspaceName: wsName,
                 tabName: tabName,
-                cwd: info.foregroundCwd ?? info.cwd ?? ""
+                cwd: AgentLabel.nonempty(info.foregroundCwd) ?? AgentLabel.nonempty(info.cwd) ?? "",
+                sessionIdentity: info.sessionIdentity
             )
             agents[agentId] = agent
         }
@@ -309,64 +429,22 @@ actor MCPServer {
     }
 
     /// Resolve a stable pane ID or a human description such as an agent title,
-    /// workspace, tab, or repository directory. Query resolution is read-only;
-    /// write tools continue to require an exact agent ID.
+    /// workspace, tab, or repository directory. Used by the read tools.
+    /// A unique local suffix (`p1` of `w1:p1`) is accepted because that is
+    /// what an older overview printed. Write tools still require the full id.
     private func resolveAgent(
         arguments: [String: Any],
         herd: HerdSnapshot
     ) -> Result<HerdrAgentInfo, AgentResolutionError> {
-        if let agentId = arguments["agent_id"] as? String, !agentId.isEmpty {
-            guard let info = herd.agents.first(where: { $0.paneId == agentId }) else {
-                return .failure(AgentResolutionError(description: "Agent not found: \(agentId)"))
-            }
+        switch herd.resolveAgent(
+            agentId: arguments["agent_id"] as? String,
+            query: arguments["query"] as? String
+        ) {
+        case .found(let info):
             return .success(info)
+        case .failure(let description):
+            return .failure(AgentResolutionError(description: description))
         }
-
-        guard let query = arguments["query"] as? String,
-              !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return .failure(AgentResolutionError(
-                description: "Missing required parameter: provide agent_id or query"
-            ))
-        }
-
-        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let matches = herd.agents.filter { info in
-            let fields = [
-                info.paneId,
-                info.agent ?? "",
-                info.displayAgent ?? "",
-                info.name ?? "",
-                info.title ?? "",
-                info.terminalTitleStripped ?? "",
-                herd.workspaceNames[info.workspaceId] ?? info.workspaceId,
-                herd.tabNames[info.tabId] ?? info.tabId,
-                info.foregroundCwd ?? info.cwd ?? ""
-            ]
-            return fields.contains { $0.lowercased().contains(needle) }
-        }
-
-        if matches.count == 1, let match = matches.first {
-            return .success(match)
-        }
-        if matches.isEmpty {
-            return .failure(AgentResolutionError(
-                description: "No agent matches query '\(query)'"
-            ))
-        }
-
-        let candidates = matches.prefix(8).map { info in
-            let title = info.title
-                ?? info.name
-                ?? info.terminalTitleStripped
-                ?? info.agent
-                ?? "unknown"
-            let workspace = herd.workspaceNames[info.workspaceId] ?? info.workspaceId
-            let tab = herd.tabNames[info.tabId] ?? info.tabId
-            return "\(info.paneId) (\(title), \(workspace) / \(tab))"
-        }.joined(separator: "; ")
-        return .failure(AgentResolutionError(
-            description: "Query '\(query)' is ambiguous. Matches: \(candidates)"
-        ))
     }
 
     private static func initialVerdict(for status: AgentStatus) -> Verdict {
@@ -387,10 +465,11 @@ actor MCPServer {
     private func handleHerdOverview() async -> [String: Any] {
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
-            var agents = buildAgents(from: herd)
+            let (herd, herdSerial) = try await readNumberedHerd()
+            var agents = await agentsForDiagnosis(from: herd, readSerial: herdSerial)
 
-            // Diagnose non-idle agents
+            // Diagnose non-idle agents. The episode clock and the detection
+            // baseline come from earlier calls in this process.
             for agent in agents.values where agent.status != .idle {
                 let verdict = await diagnoser.diagnose(agent: agent, adapter: adapter)
                 if var current = agents[agent.id] {
@@ -399,7 +478,7 @@ actor MCPServer {
                 }
             }
 
-            let text = Self.formatOverview(
+            let text = HerdReport.overview(
                 agents: Array(agents.values),
                 workspaceNames: herd.workspaceNames
             )
@@ -413,12 +492,32 @@ actor MCPServer {
     // MARK: - agent.list
 
     private func handleAgentList(arguments: [String: Any]) async -> [String: Any] {
+        // An unknown word used to be ignored, which returned the whole
+        // herd. `gone` and `silent` are the marks the overview prints;
+        // they are not herdr statuses. `working` stays herdr's status,
+        // so a crash is still included. Check this before any socket call.
+        let statusFilter: AgentListFilter.Status
+        if let statusStr = arguments["status"] as? String {
+            switch AgentListFilter.parseStatus(statusStr) {
+            case .parsed(let parsed):
+                statusFilter = parsed
+            case .unrecognized(let text):
+                return makeToolError(
+                    "Invalid status '\(text)'. Must be one of: \(AgentListFilter.statusWords)"
+                )
+            }
+        } else {
+            statusFilter = .any
+        }
+        let workspaceQuery = arguments["workspace"] as? String ?? ""
+
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
-            var agents = buildAgents(from: herd)
+            let (herd, herdSerial) = try await readNumberedHerd()
+            var agents = await agentsForDiagnosis(from: herd, readSerial: herdSerial)
 
-            // Diagnose non-idle agents
+            // Diagnose non-idle agents. The episode clock and the detection
+            // baseline come from earlier calls in this process.
             for agent in agents.values where agent.status != .idle {
                 let verdict = await diagnoser.diagnose(agent: agent, adapter: adapter)
                 if var current = agents[agent.id] {
@@ -429,34 +528,24 @@ actor MCPServer {
 
             var agentList = Array(agents.values)
 
-            // Apply filters
-            if let statusStr = arguments["status"] as? String,
-               let filterStatus = AgentStatus(rawValue: statusStr) {
-                agentList = agentList.filter { $0.status == filterStatus }
+            agentList = agentList.filter { agent in
+                AgentListFilter.matchesStatus(agent, status: statusFilter)
+                    && AgentListFilter.matchesWorkspace(
+                        agent,
+                        query: workspaceQuery,
+                        workspaceNames: herd.workspaceNames
+                    )
             }
-            if let workspace = arguments["workspace"] as? String {
-                agentList = agentList.filter { agent in
-                    let wsName = herd.workspaceNames[agent.id.workspaceId] ?? agent.id.workspaceId
-                    return wsName.lowercased().contains(workspace.lowercased()) ||
-                           agent.id.workspaceId.lowercased().contains(workspace.lowercased())
-                }
-            }
-            if let query = arguments["query"] as? String, !query.isEmpty {
-                let needle = query.lowercased()
-                agentList = agentList.filter { agent in
-                    [
-                        agent.id.raw,
-                        agent.name,
-                        agent.displayName,
-                        agent.workspaceName,
-                        agent.tabName,
-                        agent.cwd,
-                        Self.agentKindString(agent.kind)
-                    ].contains { $0.lowercased().contains(needle) }
-                }
+            // Same fields as inspect, tail, and diagnose. The collapsed
+            // row name hid a pane label or a terminal title those tools
+            // still found, and the session kind this list prints did not
+            // resolve there. A blank query is not a filter.
+            if let query = arguments["query"] as? String,
+               let ids = herd.paneIds(matchingQuery: query) {
+                agentList = agentList.filter { ids.contains($0.id.raw) }
             }
 
-            let text = Self.formatAgentList(
+            let text = HerdReport.agentList(
                 agents: agentList,
                 workspaceNames: herd.workspaceNames
             )
@@ -472,7 +561,7 @@ actor MCPServer {
     private func handleAgentInspect(arguments: [String: Any]) async -> [String: Any] {
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
+            let (herd, herdSerial) = try await readNumberedHerd()
             let info: HerdrAgentInfo
             switch resolveAgent(arguments: arguments, herd: herd) {
             case .success(let resolved):
@@ -488,7 +577,7 @@ actor MCPServer {
                 return makeToolError("Rate limit exceeded. Try again in \(retry) seconds.")
             }
 
-            var agents = buildAgents(from: herd)
+            var agents = await agentsForDiagnosis(from: herd, readSerial: herdSerial)
 
             // Diagnose
             var verdict: Verdict = .unclassifiable(reason: "agent not found")
@@ -535,7 +624,8 @@ actor MCPServer {
                 procInfo: procInfo,
                 recentOutput: readResult?.text,
                 workspaceNames: herd.workspaceNames,
-                tabNames: herd.tabNames
+                tabNames: herd.tabNames,
+                paneLabel: herd.paneLabels[info.paneId]
             )
             let redacted = redactor.redact(text)
             return makeToolResult(redacted.redactedText)
@@ -549,19 +639,24 @@ actor MCPServer {
     private func handleAgentTail(arguments: [String: Any]) async -> [String: Any] {
         let lineCount = min(max(JSONNumber.int(arguments["lines"]) ?? 50, 1), 200)
 
-        let sourceStr = arguments["source"] as? String ?? "detection"
+        // An unknown word used to be read as detection, so a caller that
+        // asked for scrollback received the screen herdr classifies on.
+        // A missing argument is still that default. Blank is not.
+        // Check this before any socket call. A non-string value is the
+        // missing-argument path.
         let source: PaneReadSource
-        switch sourceStr {
-        case "visible": source = .visible
-        case "recent": source = .recent
-        case "recent_unwrapped": source = .recentUnwrapped
-        case "detection": source = .detection
-        default: source = .detection
+        switch PaneReadSource.parseArgument(arguments["source"] as? String) {
+        case .parsed(let parsed):
+            source = parsed
+        case .unrecognized(let text):
+            return makeToolError(
+                "Invalid source '\(text)'. Must be one of: \(PaneReadSource.wireNames)"
+            )
         }
 
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
+            let herd = try await readHerd()
             let info: HerdrAgentInfo
             switch resolveAgent(arguments: arguments, herd: herd) {
             case .success(let resolved):
@@ -605,7 +700,7 @@ actor MCPServer {
     private func handleAgentDiagnose(arguments: [String: Any]) async -> [String: Any] {
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
+            let (herd, herdSerial) = try await readNumberedHerd()
             let info: HerdrAgentInfo
             switch resolveAgent(arguments: arguments, herd: herd) {
             case .success(let resolved):
@@ -619,7 +714,7 @@ actor MCPServer {
                 return makeToolError("Rate limit exceeded. Try again in \(retry) seconds.")
             }
 
-            let agents = buildAgents(from: herd)
+            let agents = await agentsForDiagnosis(from: herd, readSerial: herdSerial)
             let agentId = AgentID(info.paneId)
             guard let agent = agents[agentId] else {
                 return makeToolError("Agent not found: \(info.paneId)")
@@ -686,7 +781,10 @@ actor MCPServer {
 
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
+            // Before the await, so two answers in flight keep capture order
+            // even when the slower read returns last.
+            let readSerial = captureHerdReadSerial()
+            let herd = try await adapter.herdSnapshot(readSerial: readSerial)
             let paneId = agentIdStr
 
             guard let paneInfo = herd.agents.first(where: { $0.paneId == paneId }) else {
@@ -703,17 +801,30 @@ actor MCPServer {
                 return makeToolError("Stale state_change_seq: provided \(providedSeq), current \(currentSeq). Re-diagnose and retry.")
             }
 
-            // Record the observed status sequence so the consecutive-answer
-            // protection RESETS when the agent's status episode actually
-            // advances. Without this, three answers would permanently block
-            // further answers for this agent for the process lifetime.
-            await policy.recordStatusChange(agentId: agentIdStr, newSeq: currentSeq)
+            // Record the observed episode so the consecutive-answer cap
+            // resets when it actually changes. A newer read whose seq went
+            // backwards is a herdr restart: that resets too, or the cap
+            // stays stuck for the life of the process. An older in-flight
+            // read cannot clear it. The session is the budget, so a move
+            // to a new pane id is still this episode's cap.
+            await policy.recordStatusChange(
+                agentId: agentIdStr,
+                newSeq: currentSeq,
+                observationSerial: readSerial,
+                occupantFingerprint: paneInfo.occupantFingerprint,
+                sessionIdentity: paneInfo.sessionIdentity
+            )
 
-            // Check policy
-            let policyResult = await policy.checkWriteAllowed(agentId: agentIdStr, tier: .gated)
-            guard policyResult.allowed else {
-                return makeToolError("Policy denied: \(policyResult.reason ?? "unknown")")
-            }
+            // Check policy. The session has to travel with the pane id:
+            // the cap and the cooldown are stored on it.
+            // Does not take the slot. explain is still ahead, and a
+            // refusal here has not sent anything.
+            let policyResult = await policy.checkWriteAllowed(
+                agentId: agentIdStr,
+                tier: .gated,
+                sessionIdentity: paneInfo.sessionIdentity
+            )
+            if let error = policyDenial(policyResult) { return error }
 
             // Detect the block kind so we only answer RECOGNIZED prompts.
             // Unknown or merely-probable blocks stay read-only — we never send
@@ -726,10 +837,31 @@ actor MCPServer {
             }
 
             if let error = await checkWritesEnabled() { return error }
+
+            // explain and the protocol re-read are awaits. The prompt we
+            // checked can be answered or replaced before the keys go out.
+            let confirmSerial = captureHerdReadSerial()
+            let confirmed = try await adapter.herdSnapshot(readSerial: confirmSerial)
+            if let refusal = AnswerSendCheck.refusal(sendingTo: paneInfo, in: confirmed) {
+                return refusedAnswer(refusal, agentId: agentIdStr, providedSeq: providedSeq)
+            }
+            // The confirm read is the protocol reading too. A downgrade it
+            // just recorded has writes off; don't send on the earlier gate.
+            let health = adapter.health()
+            if !health.writesEnabled {
+                return makeToolError("Writes not enabled: \(health.reason ?? "herdr protocol not verified for writes")")
+            }
+            // The check before explain did not take the slot. Another
+            // write can land in that gap. Take it now, before the keys.
+            let reserved = await policy.reserveWrite(
+                agentId: agentIdStr,
+                tier: .gated,
+                sessionIdentity: paneInfo.sessionIdentity
+            )
+            if let error = policyDenial(reserved) { return error }
             try await adapter.sendKeys(paneId: paneId, keys: resolvedKeys)
 
-            await policy.recordWrite(agentId: agentIdStr)
-            await policy.recordAnswer(agentId: agentIdStr)
+            await policy.recordAnswer(agentId: agentIdStr, sessionIdentity: paneInfo.sessionIdentity)
 
             // Capture fingerprint in params for audit trail
             var params: [String: String] = ["agent_id": agentIdStr, "choice": choice]
@@ -760,6 +892,18 @@ actor MCPServer {
     // MARK: - agent.say
 
     private func handleAgentSay(arguments: [String: Any]) async -> [String: Any] {
+        // Checked before the write gate. A status herdr will not settle
+        // on, or a timeout the request socket cannot outlast, used to be
+        // forwarded only after the prompt had already submitted Enter.
+        // A non-string wait_for is the missing-argument path.
+        let waitDecision = SayWait.decide(
+            status: arguments["wait_for"] as? String,
+            timeoutMs: JSONNumber.int(arguments["timeout_ms"])
+        )
+        if let rejection = SayWait.rejection(waitDecision) {
+            return makeToolError(rejection)
+        }
+
         // Write-gate: reject if herdr protocol not verified for writes
         if let error = await checkWritesEnabled() { return error }
 
@@ -775,7 +919,7 @@ actor MCPServer {
 
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
+            let herd = try await readHerd()
             let paneId = agentIdStr
 
             guard let paneInfo = herd.agents.first(where: { $0.paneId == paneId }) else {
@@ -783,12 +927,18 @@ actor MCPServer {
             }
 
             let status = paneInfo.agentStatus
-            let tier: AuthorityTier = (status == "idle" || status == "done") ? .gated : .confirm
+            // Idle and done auto-send. The gated path re-reads before the
+            // text, because `prompt` also submits Enter.
+            let tier: AuthorityTier = GatedSayFollow.acceptsAutoSend(status: status) ? .gated : .confirm
 
-            let policyResult = await policy.checkWriteAllowed(agentId: agentIdStr, tier: tier)
-            guard policyResult.allowed else {
-                return makeToolError("Policy denied: \(policyResult.reason ?? "unknown")")
-            }
+            // Does not take the slot. A confirm-tier say still has the
+            // approval wait ahead of it; the send reserves.
+            let policyResult = await policy.checkWriteAllowed(
+                agentId: agentIdStr,
+                tier: tier,
+                sessionIdentity: paneInfo.sessionIdentity
+            )
+            if let error = policyDenial(policyResult) { return error }
 
             // Capture fingerprint info for revalidation after confirmation wait
             let fpOccupant = occupantFingerprint(from: paneInfo)
@@ -830,39 +980,70 @@ actor MCPServer {
                         return error
                     }
 
-                    // Revalidate pane occupant + status episode after the wait
+                    // Revalidate pane occupant + status episode after the wait.
+                    // A move during the wait addresses the session's new pane.
+                    let current: HerdrAgentInfo
                     do {
-                        try await revalidate(action: claimed, paneId: paneId)
+                        current = try await revalidate(action: claimed, paneId: paneId)
                     } catch {
                         try? await sharedActionStore.markFailed(actionId, detail: "revalidation failed: \(error)")
                         return makeToolError("Revalidation failed: \(error). No input sent.")
                     }
 
+                    let addressed = Self.addressedParams(
+                        requested: agentIdStr,
+                        resolved: current.paneId,
+                        extra: ["text_length": "\(text.count)"]
+                    )
+                    // The check that opened this dialog is minutes old.
+                    // Reserve the pane the write will actually address.
+                    if let error = await rejectIfSendOverBudget(
+                        actionId: actionId,
+                        tool: "agent.say",
+                        agentId: current.paneId,
+                        tier: .confirm,
+                        sessionIdentity: current.sessionIdentity,
+                        params: addressed,
+                        preState: "status=\(status)"
+                    ) {
+                        return error
+                    }
                     do {
-                        try await adapter.prompt(paneId: paneId, text: text)
+                        try await adapter.prompt(paneId: current.paneId, text: text)
+                    } catch NDJSONClientError.promptEnterFailed {
+                        // The text is already in the pane. A failed tool is
+                        // what the caller retries, and a retry inserts it again.
+                        let resolved = current.paneId == agentIdStr ? nil : current.paneId
+                        return await sayTextInserted(
+                            actionId: actionId,
+                            shared: true,
+                            params: addressed,
+                            preState: "status=\(status)",
+                            resolvedAgentId: resolved
+                        )
                     } catch {
                         return await failClaimedWrite(
                             actionId: actionId, tool: "agent.say",
-                            params: ["agent_id": agentIdStr, "text_length": "\(text.count)"],
+                            params: addressed,
                             preState: "status=\(status)", error: error
                         )
                     }
-                    await policy.recordWrite(agentId: agentIdStr)
                     try? await sharedActionStore.markExecuted(actionId)
 
                     await journal.record(JournalEntry(
                         actionId: actionId, tool: "agent.say",
-                        params: ["agent_id": agentIdStr, "text_length": "\(text.count)"],
+                        params: addressed,
                         caller: "mcp", preState: "status=\(status)",
                         postState: "sent", outcome: "executed"
                     ))
 
-                    if let waitFor = arguments["wait_for"] as? String {
-                        let timeoutMs = JSONNumber.int(arguments["timeout_ms"]) ?? 30000
-                        let settled = try await adapter.waitStatus(paneId: paneId, until: [waitFor], timeoutMs: timeoutMs)
-                        return makeToolResult("{\"sent\":true,\"actionId\":\"\(actionId)\",\"outcome\":\"\(settled ? "settled" : "timeout")\"}")
-                    }
-                    return makeToolResult("{\"sent\":true,\"actionId\":\"\(actionId)\",\"outcome\":\"sent\"}")
+                    let outcome = await sayWaitOutcome(paneId: current.paneId, decision: waitDecision)
+                    let resolvedField = ConfirmedPaneFollow.resolvedAgentField(
+                        current.paneId == agentIdStr ? nil : current.paneId
+                    )
+                    return makeToolResult(
+                        "{\"sent\":true,\"actionId\":\"\(actionId)\",\(SayWait.outcomeSuffix(for: outcome))\(resolvedField)}"
+                    )
                 } else if finalState == .denied {
                     await journal.record(JournalEntry(
                         actionId: actionId, tool: "agent.say",
@@ -882,37 +1063,134 @@ actor MCPServer {
                 }
             }
 
-            // Gated tier: auto-allowed
-            if let error = await checkWritesEnabled() { return error }
-            try await adapter.prompt(paneId: paneId, text: text)
-            await policy.recordWrite(agentId: agentIdStr)
-
+            // Gated tier: auto-allowed for idle and done. The check above
+            // did not take the slot, and it awaited the policy actor.
+            // `prompt` submits Enter, so address a list taken after that
+            // await. A move follows the session. A status that left idle
+            // or done, or a different occupant, sends nothing and does not
+            // take a slot. This list records the protocol, and the gate is
+            // read from it before the slot is taken.
+            let fresh = try await readHerd()
+            let confirmed: HerdrAgentInfo
+            switch GatedSayFollow.resolve(previous: paneInfo, in: fresh.agents) {
+            case .success(let info):
+                let health = adapter.health()
+                if !health.writesEnabled {
+                    return makeToolError(
+                        "Writes not enabled: \(health.reason ?? "herdr protocol not verified for writes"). No input sent."
+                    )
+                }
+                confirmed = info
+            case .failure(.agentGone):
+                return makeToolError("Agent not found: \(agentIdStr). No input sent.")
+            case .failure(.occupantChanged):
+                return makeToolError("Pane occupant changed before send. No input sent.")
+            case .failure(.noLongerAuto(let pane, let now)):
+                return makeToolError(
+                    "Agent \(pane) is \(now), so this say needs confirmation. No input sent."
+                )
+            }
+            let reserved = await policy.reserveWrite(
+                agentId: confirmed.paneId,
+                tier: .gated,
+                sessionIdentity: confirmed.sessionIdentity
+            )
+            if let error = policyDenial(reserved) { return error }
+            let addressed = Self.addressedParams(
+                requested: agentIdStr,
+                resolved: confirmed.paneId,
+                extra: ["text_length": "\(text.count)"]
+            )
             var params: [String: String] = [
                 "agent_id": agentIdStr,
                 "text": redactor.redact(String(text.prefix(100))).redactedText
             ]
-            params["_fp_occupant"] = fpOccupant
-            params["_fp_status"] = fpStatus
-            params["_fp_seq"] = "\(fpSeq)"
+            if confirmed.paneId != agentIdStr {
+                params["resolved_agent_id"] = confirmed.paneId
+            }
+            params["_fp_occupant"] = occupantFingerprint(from: confirmed)
+            params["_fp_status"] = confirmed.agentStatus
+            params["_fp_seq"] = "\(confirmed.stateChangeSeq)"
+            let resolvedAgentId = confirmed.paneId == agentIdStr ? nil : confirmed.paneId
+            let sayPreState = "status=\(confirmed.agentStatus), seq=\(confirmed.stateChangeSeq)"
+            do {
+                try await adapter.prompt(paneId: confirmed.paneId, text: text)
+            } catch NDJSONClientError.promptEnterFailed {
+                let actionId = await actionStore.create(tool: "agent.say", params: params)
+                return await sayTextInserted(
+                    actionId: actionId,
+                    shared: false,
+                    params: addressed,
+                    preState: sayPreState,
+                    resolvedAgentId: resolvedAgentId
+                )
+            }
 
             let actionId = await actionStore.create(tool: "agent.say", params: params)
             await actionStore.markExecuted(actionId)
 
             await journal.record(JournalEntry(
                 actionId: actionId, tool: "agent.say",
-                params: ["agent_id": agentIdStr, "text_length": "\(text.count)"],
-                caller: "mcp", preState: "status=\(status), seq=\(fpSeq)",
+                params: addressed,
+                caller: "mcp",
+                preState: sayPreState,
                 postState: "sent", outcome: "executed"
             ))
 
-            if let waitFor = arguments["wait_for"] as? String {
-                let timeoutMs = JSONNumber.int(arguments["timeout_ms"]) ?? 30000
-                let settled = try await adapter.waitStatus(paneId: paneId, until: [waitFor], timeoutMs: timeoutMs)
-                return makeToolResult("{\"sent\":true,\"actionId\":\"\(actionId)\",\"outcome\":\"\(settled ? "settled" : "timeout")\"}")
-            }
-            return makeToolResult("{\"sent\":true,\"actionId\":\"\(actionId)\",\"outcome\":\"sent\"}")
+            let resolvedField = ConfirmedPaneFollow.resolvedAgentField(resolvedAgentId)
+            let outcome = await sayWaitOutcome(paneId: confirmed.paneId, decision: waitDecision)
+            return makeToolResult(
+                "{\"sent\":true,\"actionId\":\"\(actionId)\",\(SayWait.outcomeSuffix(for: outcome))\(resolvedField)}"
+            )
         } catch {
             return makeToolError("agent.say failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Enter failed after the text write. The action is recorded as
+    /// executed because the text is in the pane; the journal says Enter
+    /// was not confirmed. The tool result is not an error.
+    private func sayTextInserted(
+        actionId: String,
+        shared: Bool,
+        params: [String: String],
+        preState: String,
+        resolvedAgentId: String?
+    ) async -> [String: Any] {
+        if shared {
+            try? await sharedActionStore.markExecuted(actionId)
+        } else {
+            await actionStore.markExecuted(actionId)
+        }
+        await journal.record(JournalEntry(
+            actionId: actionId,
+            tool: "agent.say",
+            params: params,
+            caller: "mcp",
+            preState: preState,
+            postState: "text inserted, Enter unconfirmed",
+            outcome: "enter_unconfirmed"
+        ))
+        return makeToolResult(
+            SayWait.enterUnconfirmedResult(actionId: actionId, resolvedAgentId: resolvedAgentId)
+        )
+    }
+
+    /// `agent.wait` after a prompt that already succeeded. A throw is not
+    /// an unsent say: the text is in the pane, and the result says so.
+    /// Only a `.wait` decision reaches the socket. The canonical status
+    /// is the one `decide` folded, not the caller's raw word.
+    private func sayWaitOutcome(paneId: String, decision: SayWait.Decision) async -> String {
+        guard case .wait(let status, let timeoutMs) = decision else {
+            return SayWait.sentToken
+        }
+        do {
+            let settled = try await adapter.waitStatus(
+                paneId: paneId, until: [status], timeoutMs: timeoutMs
+            )
+            return SayWait.outcomeToken(settled: settled)
+        } catch {
+            return SayWait.waitFailedToken
         }
     }
 
@@ -932,12 +1210,22 @@ actor MCPServer {
 
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
+            let herd = try await readHerd()
             let paneId = agentIdStr
 
             guard let paneInfo = herd.agents.first(where: { $0.paneId == paneId }) else {
                 return makeToolError("Agent not found: \(agentIdStr)")
             }
+
+            // Refuse before asking when the budget is already spent.
+            // The send reserves again: the approval wait is long enough
+            // for another write to take the slot.
+            let budget = await policy.checkWriteAllowed(
+                agentId: agentIdStr,
+                tier: .confirm,
+                sessionIdentity: paneInfo.sessionIdentity
+            )
+            if let error = policyDenial(budget) { return error }
 
             // Capture fingerprint info for revalidation after confirmation wait
             var params: [String: String] = ["agent_id": agentIdStr, "level": level]
@@ -970,34 +1258,56 @@ actor MCPServer {
                     return error
                 }
 
-                // Revalidate pane occupant + status episode after the wait
+                // Revalidate pane occupant + status episode after the wait.
+                // A move during the wait addresses the session's new pane.
+                let current: HerdrAgentInfo
                 do {
-                    _ = try await revalidate(action: claimed, paneId: paneId)
+                    current = try await revalidate(action: claimed, paneId: paneId)
                 } catch {
                     try? await sharedActionStore.markFailed(actionId, detail: "revalidation failed: \(error)")
                     return makeToolError("Revalidation failed: \(error). No input sent.")
                 }
 
                 let keys: [String] = level == "escape" ? ["esc"] : ["ctrl+c"]
+                let addressed = Self.addressedParams(
+                    requested: agentIdStr,
+                    resolved: current.paneId,
+                    extra: ["level": level]
+                )
+                if let error = await rejectIfSendOverBudget(
+                    actionId: actionId,
+                    tool: "agent.interrupt",
+                    agentId: current.paneId,
+                    tier: .confirm,
+                    sessionIdentity: current.sessionIdentity,
+                    params: addressed,
+                    preState: "status=\(paneInfo.agentStatus)"
+                ) {
+                    return error
+                }
                 do {
-                    try await adapter.sendKeys(paneId: paneId, keys: keys)
+                    try await adapter.sendKeys(paneId: current.paneId, keys: keys)
                 } catch {
                     return await failClaimedWrite(
                         actionId: actionId, tool: "agent.interrupt",
-                        params: ["agent_id": agentIdStr, "level": level],
+                        params: addressed,
                         preState: "status=\(paneInfo.agentStatus)", error: error
                     )
                 }
-                await policy.recordWrite(agentId: agentIdStr)
                 try? await sharedActionStore.markExecuted(actionId)
 
                 await journal.record(JournalEntry(
                     actionId: actionId, tool: "agent.interrupt",
-                    params: ["agent_id": agentIdStr, "level": level],
+                    params: addressed,
                     caller: "mcp", preState: "status=\(paneInfo.agentStatus)",
                     postState: "interrupted", outcome: "executed"
                 ))
-                return makeToolResult("{\"sent\":true,\"actionId\":\"\(actionId)\",\"level\":\"\(level)\"}")
+                let resolvedField = ConfirmedPaneFollow.resolvedAgentField(
+                    current.paneId == agentIdStr ? nil : current.paneId
+                )
+                return makeToolResult(
+                    "{\"sent\":true,\"actionId\":\"\(actionId)\",\"level\":\"\(level)\"\(resolvedField)}"
+                )
             } else if finalState == .denied {
                 await journal.record(JournalEntry(
                     actionId: actionId, tool: "agent.interrupt",
@@ -1033,12 +1343,21 @@ actor MCPServer {
 
         do {
             try await ensureConnected()
-            let herd = try await adapter.herdSnapshot()
+            let herd = try await readHerd()
             let paneId = agentIdStr
 
             guard let paneInfo = herd.agents.first(where: { $0.paneId == paneId }) else {
                 return makeToolError("Agent not found: \(agentIdStr)")
             }
+
+            // Same budget as interrupt. A stop is a write, and the
+            // approval wait does not hold the slot.
+            let budget = await policy.checkWriteAllowed(
+                agentId: agentIdStr,
+                tier: .confirm,
+                sessionIdentity: paneInfo.sessionIdentity
+            )
+            if let error = policyDenial(budget) { return error }
 
             // Capture fingerprint info for revalidation after confirmation wait
             var params: [String: String] = ["agent_id": agentIdStr, "reason": reason]
@@ -1072,35 +1391,58 @@ actor MCPServer {
                     return error
                 }
 
-                // Revalidate pane occupant + status episode after the wait
+                // Revalidate pane occupant + status episode after the wait.
+                // A move during the wait closes the session's new pane.
+                let current: HerdrAgentInfo
                 do {
-                    _ = try await revalidate(action: claimed, paneId: paneId)
+                    current = try await revalidate(action: claimed, paneId: paneId)
                 } catch {
                     try? await sharedActionStore.markFailed(actionId, detail: "revalidation failed: \(error)")
                     return makeToolError("Revalidation failed: \(error). No input sent.")
                 }
 
+                let addressed = Self.addressedParams(
+                    requested: agentIdStr,
+                    resolved: current.paneId,
+                    extra: ["reason": reason]
+                )
+                if let error = await rejectIfSendOverBudget(
+                    actionId: actionId,
+                    tool: "agent.stop",
+                    agentId: current.paneId,
+                    tier: .confirm,
+                    sessionIdentity: current.sessionIdentity,
+                    params: addressed,
+                    preState: "status=\(paneInfo.agentStatus)",
+                    keepForever: true
+                ) {
+                    return error
+                }
                 do {
-                    try await adapter.closePane(paneId: paneId)
+                    try await adapter.closePane(paneId: current.paneId)
                 } catch {
                     return await failClaimedWrite(
                         actionId: actionId, tool: "agent.stop",
-                        params: ["agent_id": agentIdStr, "reason": reason],
+                        params: addressed,
                         preState: "status=\(paneInfo.agentStatus)", error: error,
                         keepForever: true
                     )
                 }
-                await policy.recordWrite(agentId: agentIdStr)
                 try? await sharedActionStore.markExecuted(actionId)
 
                 await journal.record(JournalEntry(
                     actionId: actionId, tool: "agent.stop",
-                    params: ["agent_id": agentIdStr, "reason": reason],
+                    params: addressed,
                     caller: "mcp", preState: "status=\(paneInfo.agentStatus)",
                     postState: "closed", outcome: "executed",
                     keepForever: true
                 ))
-                return makeToolResult("{\"closed\":true,\"actionId\":\"\(actionId)\"}")
+                let resolvedField = ConfirmedPaneFollow.resolvedAgentField(
+                    current.paneId == agentIdStr ? nil : current.paneId
+                )
+                return makeToolResult(
+                    "{\"closed\":true,\"actionId\":\"\(actionId)\"\(resolvedField)}"
+                )
             } else if finalState == .denied {
                 await journal.record(JournalEntry(
                     actionId: actionId, tool: "agent.stop",
@@ -1136,6 +1478,14 @@ actor MCPServer {
         }
         guard let name = arguments["name"] as? String, !name.isEmpty else {
             return makeToolError("Missing required parameter: name")
+        }
+        // Same cap as agent.say, checked before any pane is created. A
+        // brief that cannot be sent must not leave an agent behind.
+        let brief = arguments["brief"] as? String
+        if let brief, SpawnBrief.exceedsLimit(brief) {
+            return makeToolError(
+                "Brief too long: \(brief.count) chars (max \(SpawnBrief.maxCharacters))"
+            )
         }
 
         // Validate agent kind
@@ -1189,7 +1539,7 @@ actor MCPServer {
         } else {
             do {
                 try await ensureConnected()
-                let herd = try await adapter.herdSnapshot()
+                let herd = try await readHerd()
 
                 if placement == "new_tab" {
                     guard let requestedWorkspace = workspaceId, !requestedWorkspace.isEmpty else {
@@ -1200,7 +1550,7 @@ actor MCPServer {
                     }
                     cwdHint = herd.agents.first(where: {
                         $0.workspaceId == requestedWorkspace
-                    }).flatMap { $0.foregroundCwd ?? $0.cwd }
+                    })?.workingDirectory
                 } else {
                     guard let targetId = arguments["target_agent_id"] as? String,
                           !targetId.isEmpty else {
@@ -1211,14 +1561,13 @@ actor MCPServer {
                     }
                     targetInfo = target
                     workspaceId = target.workspaceId
-                    cwdHint = target.foregroundCwd ?? target.cwd
+                    cwdHint = target.workingDirectory
                 }
             } catch {
                 return makeToolError("Failed to resolve placement: \(error.localizedDescription)")
             }
         }
 
-        let brief = arguments["brief"] as? String
         let spaceLabel = arguments["space_label"] as? String
 
         var params: [String: String] = [
@@ -1230,6 +1579,9 @@ actor MCPServer {
             params["requested_name"] = name
         }
         if let resolvedPath { params["repo_path"] = resolvedPath }
+        if let brief, SpawnBrief.isRequested(brief) {
+            params["brief_length"] = "\(brief.count)"
+        }
         if let workspaceId { params["workspace_id"] = workspaceId }
         if let targetInfo {
             params["target_agent_id"] = targetInfo.paneId
@@ -1263,6 +1615,17 @@ actor MCPServer {
         ) {
             return error
         }
+        // Before any mutation. Concurrent spawns share the 6/min cap.
+        // A spawn that then fails still holds the slot. The new pane's
+        // cooldown is stamped only after it has started, and that stamp
+        // does not count a second time.
+        if let error = await rejectIfGlobalSpawnOverBudget(
+            actionId: actionId,
+            params: params.filter { !$0.key.hasPrefix("_fp_") },
+            preState: "pending"
+        ) {
+            return error
+        }
 
         await journal.record(JournalEntry(
             actionId: actionId, tool: "session.spawn",
@@ -1275,7 +1638,7 @@ actor MCPServer {
             try await ensureConnected()
             let paneId: String
             let finalWorkspaceId: String
-            var tabId: String?
+            var tabId: String? = nil
 
             switch placement {
             case "new_workspace":
@@ -1294,10 +1657,13 @@ actor MCPServer {
                 guard let workspaceId else {
                     throw AgentResolutionError(description: "workspace ID missing")
                 }
-                let freshHerd = try await adapter.herdSnapshot()
+                let freshHerd = try await readHerd()
                 guard freshHerd.workspaceNames[workspaceId] != nil else {
                     throw AgentResolutionError(description: "workspace disappeared before execution")
                 }
+                // The placement read may have recorded a downgrade the
+                // claim-time gate did not see.
+                try throwIfWritesDisabled()
                 let creation = try await adapter.createTab(
                     workspaceId: workspaceId,
                     cwd: cwdHint,
@@ -1312,41 +1678,99 @@ actor MCPServer {
                 guard let targetInfo else {
                     throw AgentResolutionError(description: "split target missing")
                 }
-                try await revalidate(action: claimed, paneId: targetInfo.paneId)
-                finalWorkspaceId = targetInfo.workspaceId
+                // The target can move while the claim is in flight. Split
+                // the pane that still has that occupant.
+                let current = try await revalidate(action: claimed, paneId: targetInfo.paneId)
+                finalWorkspaceId = current.workspaceId
                 paneId = try await adapter.splitPane(
-                    targetPaneId: targetInfo.paneId,
-                    cwd: cwdHint
+                    targetPaneId: current.paneId,
+                    cwd: current.workingDirectory ?? cwdHint
                 )
 
             default:
                 throw AgentResolutionError(description: "invalid placement")
             }
 
-            let shellReady = try await adapter.waitForShell(paneId: paneId)
-            guard shellReady else {
-                throw AgentResolutionError(description: "agent target pane \(paneId) did not become an available shell")
-            }
-            try await adapter.startAgent(
-                paneId: paneId,
-                kind: agentKind,
-                name: agentName,
-                timeoutMs: 30_000
-            )
-
-            if let brief, !brief.isEmpty {
-                let ready = try await adapter.waitStatus(
-                    paneId: paneId,
-                    until: ["idle", "working", "blocked", "done"],
-                    timeoutMs: 30_000
-                )
-                guard ready else {
-                    throw AgentResolutionError(description: "agent \(paneId) did not become ready before the brief timeout")
+            // The pane id is already assigned. A failure from here on is
+            // not a tool error: the workspace, tab, or split exists, and a
+            // caller that treats a failed spawn as "no agent" starts a
+            // second one. `agent.start` still waits 30 seconds. That meets
+            // the request socket, so a launch that uses the whole window
+            // comes back as a timeout after herdr may have started the
+            // agent. Shortening the wait would also reject a launch herdr
+            // was about to accept. The brief is not sent on this path.
+            // Enter would accept a startup prompt the caller has not seen.
+            // Nil means agent.start returned. Every other path sets a miss
+            // before the brief, so a failed launch cannot fall through to Enter.
+            var launchMiss: SpawnLaunch.Miss? = nil
+            do {
+                let shellReady = try await adapter.waitForShell(paneId: paneId)
+                if !shellReady {
+                    launchMiss = .shell
+                } else {
+                    do {
+                        // A not-ready pane fails the shell read. A connect
+                        // failure in that retry clears the gate, and a later
+                        // read can still see the shell. Re-read before
+                        // launching, or the start is refused on a gate herdr
+                        // has already come back from. A restart onto an older
+                        // protocol stays closed. That refusal is before
+                        // `agent.start`, so the agent was not launched.
+                        try await requireFreshWrites()
+                        try await adapter.startAgent(
+                            paneId: paneId,
+                            kind: agentKind,
+                            name: agentName,
+                            timeoutMs: 30_000
+                        )
+                    } catch {
+                        if error is CancellationError { throw error }
+                        // requireFreshWrites throws its own error, and it
+                        // does so before agent.start. Classifying that as a
+                        // start failure would say the launch was attempted.
+                        if error is MCPRevalidationError {
+                            launchMiss = .writesClosed
+                        } else {
+                            launchMiss = SpawnLaunch.miss(forStart: error)
+                        }
+                    }
                 }
-                try await adapter.prompt(paneId: paneId, text: brief)
+            } catch {
+                if error is CancellationError { throw error }
+                launchMiss = .shell
+            }
+            if let launchMiss {
+                return await finishCreatedPane(
+                    actionId: actionId,
+                    placement: placement,
+                    kind: agentKind,
+                    name: agentName,
+                    paneId: paneId,
+                    space: finalWorkspaceId,
+                    tab: tabId,
+                    miss: launchMiss,
+                    briefRequested: SpawnBrief.isRequested(brief)
+                )
             }
 
-            await policy.recordWrite(agentId: paneId)
+            // `prompt` submits Enter. The wait used to treat `blocked` as
+            // ready, so a startup permission prompt received that Enter.
+            // Waking on blocked only ends the wait. The list after it is
+            // the status Enter would hit: idle, working, and done are sent
+            // the brief, and a block is not. A timeout of that wait is not
+            // a failed start. A throw from the wait, the list, or the
+            // prompt is not one either: the agent is already running, and
+            // failing the tool would hide the pane. Enter is not sent
+            // unless that list says to, and a prompt that does not finish
+            // cleanly is not reported as sent.
+            var briefOutcome = SpawnBrief.Outcome.none
+            if let brief, SpawnBrief.isRequested(brief) {
+                briefOutcome = await deliverBrief(paneId: paneId, brief: brief)
+            }
+
+            // The global slot was taken before the mutation. This only
+            // starts the new pane's cooldown, so the spawn is one write.
+            await policy.noteAgentCooldown(agentId: paneId)
             try? await sharedActionStore.markExecuted(actionId)
 
             await journal.record(JournalEntry(
@@ -1359,18 +1783,106 @@ actor MCPServer {
                     "pane_id": paneId
                 ],
                 caller: "mcp", preState: "placement=\(placement)",
-                postState: "started", outcome: "executed",
+                postState: SpawnBrief.journalPostState(for: briefOutcome),
+                outcome: "executed",
                 keepForever: true
             ))
-            var result = "{\"agentId\":\"\(paneId)\",\"space\":\"\(finalWorkspaceId)\",\"placement\":\"\(placement)\""
-            if let tabId { result += ",\"tab\":\"\(tabId)\"" }
-            result += ",\"started\":true,\"actionId\":\"\(actionId)\"}"
-            return makeToolResult(result)
+            return makeToolResult(SpawnBrief.startedResult(
+                agentId: paneId,
+                space: finalWorkspaceId,
+                placement: placement,
+                tab: tabId,
+                actionId: actionId,
+                brief: briefOutcome
+            ))
         } catch {
             let detail = String(describing: error)
             try? await sharedActionStore.markFailed(actionId, detail: detail)
             return makeToolError("session.spawn execution failed: \(detail)")
         }
+    }
+
+    /// The pane exists and `agent.start` did not return. The action is
+    /// finished because the workspace, tab, or split is already there.
+    /// The journal does not copy the socket error. No brief is sent, and
+    /// the new pane is not put on the write cooldown: the withheld brief
+    /// is what the caller may still need to deliver.
+    private func finishCreatedPane(
+        actionId: String,
+        placement: String,
+        kind: String,
+        name: String,
+        paneId: String,
+        space: String,
+        tab: String?,
+        miss: SpawnLaunch.Miss,
+        briefRequested: Bool
+    ) async -> [String: Any] {
+        try? await sharedActionStore.markExecuted(actionId)
+        await journal.record(JournalEntry(
+            actionId: actionId,
+            tool: "session.spawn",
+            params: [
+                "placement": placement,
+                "kind": kind,
+                "name": name,
+                "workspace_id": space,
+                "pane_id": paneId
+            ],
+            caller: "mcp",
+            preState: "placement=\(placement)",
+            postState: SpawnLaunch.journalPostState(for: miss),
+            outcome: "pane_created",
+            keepForever: true
+        ))
+        return makeToolResult(SpawnLaunch.createdResult(
+            agentId: paneId,
+            space: space,
+            placement: placement,
+            tab: tab,
+            actionId: actionId,
+            miss: miss,
+            briefRequested: briefRequested
+        ))
+    }
+
+    /// Brief delivery after `agent.start` has returned. Nothing here fails
+    /// the spawn. The pane id is the result either way.
+    ///
+    /// The wait's bool is unused. herdr's status timeout returns false,
+    /// and the list below is what decides. A connect failure, or any
+    /// other throw, still withholds the brief: that pane's status was
+    /// not read.
+    private func deliverBrief(paneId: String, brief: String) async -> SpawnBrief.Outcome {
+        do {
+            _ = try await adapter.waitStatus(
+                paneId: paneId,
+                until: SpawnBrief.wakeStatuses,
+                timeoutMs: SayWait.maxTimeoutMs
+            )
+        } catch {
+            return .unread
+        }
+        let status: String?
+        do {
+            let fresh = try await readHerd()
+            status = fresh.agents.first(where: { $0.paneId == paneId })?.agentStatus
+        } catch {
+            return .unread
+        }
+        let decision = SpawnBrief.outcome(brief: brief, status: status)
+        guard case .send = decision else { return decision }
+        do {
+            try await requireFreshWrites()
+        } catch {
+            return .writesClosed
+        }
+        do {
+            try await adapter.prompt(paneId: paneId, text: brief)
+        } catch {
+            return SpawnBrief.outcome(forPromptFailure: error)
+        }
+        return .send
     }
 
     // MARK: - action.status
@@ -1435,15 +1947,40 @@ actor MCPServer {
         }
     }
 
+    private func captureHerdReadSerial() -> UInt64 {
+        nextHerdReadSerial += 1
+        return nextHerdReadSerial
+    }
+
+    /// One herd read, ordered against every other MCP herd read and against
+    /// `checkWritesEnabled`. The serial is captured here, with no await
+    /// before the request. `agent.answer` captures its own serials because
+    /// the answer cap records the same id. Diagnosing tools keep the serial
+    /// (`readNumberedHerd`) so a slower earlier snapshot does not rewind
+    /// the episode clock.
+    private func readHerd() async throws -> HerdSnapshot {
+        let (snapshot, _) = try await readNumberedHerd()
+        return snapshot
+    }
+
+    private func readNumberedHerd() async throws -> (HerdSnapshot, UInt64) {
+        let readSerial = captureHerdReadSerial()
+        let snapshot = try await adapter.herdSnapshot(readSerial: readSerial)
+        return (snapshot, readSerial)
+    }
+
     // MARK: - Write-Gate Helper
 
     /// Returns a tool error dict if writes are disabled, or nil if writes are
     /// allowed. Every gate takes a fresh protocol reading. Re-reading only at
     /// protocol 0 let a herdr restarted between calls, or while a write sat
     /// in its confirmation wait, receive the write on the old build's
-    /// reading (`session.spawn` new_workspace never re-read at all).
+    /// reading (`session.spawn` new_workspace never re-read at all). The
+    /// refresh carries a herd-read serial so a slow earlier gate cannot put
+    /// the protocol back after a later read has recorded a newer one.
     private func checkWritesEnabled() async -> [String: Any]? {
-        let health = await adapter.refreshHealth()
+        let readSerial = captureHerdReadSerial()
+        let health = await adapter.refreshHealth(readSerial: readSerial)
         if !health.writesEnabled {
             return makeToolError("Writes not enabled: \(health.reason ?? "herdr protocol not verified for writes")")
         }
@@ -1456,6 +1993,79 @@ actor MCPServer {
         guard let error = await checkWritesEnabled() else { return nil }
         try? await sharedActionStore.markFailed(actionId, detail: detail)
         return error
+    }
+
+    /// The tool error for a budget result that is already decided.
+    /// Does not record a write.
+    private func policyDenial(_ result: PolicyResult) -> [String: Any]? {
+        guard !result.allowed else { return nil }
+        return makeToolError("Policy denied: \(result.reason ?? "unknown")")
+    }
+
+    /// Reserve the slot and, when the budget refuses, fail the claimed
+    /// action without sending. The reservation has already consumed the
+    /// slot when this returns nil.
+    private func rejectIfSendOverBudget(
+        actionId: String,
+        tool: String,
+        agentId: String,
+        tier: AuthorityTier,
+        sessionIdentity: String?,
+        params: [String: String],
+        preState: String,
+        keepForever: Bool = false
+    ) async -> [String: Any]? {
+        let result = await policy.reserveWrite(
+            agentId: agentId,
+            tier: tier,
+            sessionIdentity: sessionIdentity
+        )
+        return await failClosedBudget(
+            result,
+            actionId: actionId,
+            tool: tool,
+            params: params,
+            preState: preState,
+            keepForever: keepForever
+        )
+    }
+
+    /// One global slot for a spawn, which has no pane id yet.
+    private func rejectIfGlobalSpawnOverBudget(
+        actionId: String,
+        params: [String: String],
+        preState: String
+    ) async -> [String: Any]? {
+        let result = await policy.reserveGlobalWrite()
+        return await failClosedBudget(
+            result,
+            actionId: actionId,
+            tool: "session.spawn",
+            params: params,
+            preState: preState,
+            keepForever: true
+        )
+    }
+
+    private func failClosedBudget(
+        _ result: PolicyResult,
+        actionId: String,
+        tool: String,
+        params: [String: String],
+        preState: String,
+        keepForever: Bool
+    ) async -> [String: Any]? {
+        guard !result.allowed else { return nil }
+        let reason = result.reason ?? "rate limit"
+        try? await sharedActionStore.markFailed(actionId, detail: "policy denied: \(reason)")
+        await journal.record(JournalEntry(
+            actionId: actionId, tool: tool,
+            params: params,
+            caller: "mcp", preState: preState,
+            outcome: "policy_denied",
+            keepForever: keepForever
+        ))
+        return makeToolError("Policy denied: \(reason) (actionId: \(actionId))")
     }
 
     /// A claimed, approved write threw. Record the failure on the shared
@@ -1485,196 +2095,112 @@ actor MCPServer {
 
     /// Map an answer choice to keystrokes, gated on the detected block kind.
     /// Returns nil when the choice is not valid for the kind (or the kind is
-    /// unknown/weak), so unrecognized prompts stay read-only and we never send
-    /// a global hardcoded keystroke that the detected prompt does not warrant.
+    /// unknown or only probable), so those prompts stay read-only.
     private static func keys(forChoice choice: String, index: Int?, blockKind: BlockKind) -> [String]? {
-        // Weak or unknown blocks: never send input.
-        switch blockKind {
-        case .unknownBlock, .probableApproval:
-            return nil
-        default:
-            break
-        }
-
-        let permissionKinds: Set<BlockKind> = [.bashPermission, .toolPermission, .approval, .workflowConfirm]
-        let selectionKinds: Set<BlockKind> = [.selectionForm, .menu]
-
-        if permissionKinds.contains(blockKind) {
-            switch choice {
-            case "approve": return ["enter"]
-            case "accept_once": return ["down", "enter"]
-            case "deny", "cancel": return ["esc"]
-            default: return nil  // 'select' is meaningless on a yes/no prompt
-            }
-        }
-        if selectionKinds.contains(blockKind) {
-            switch choice {
-            case "select":
-                let idx = index ?? 0
-                return Array(repeating: "down", count: idx) + ["enter"]
-            case "approve": return ["enter"]  // accept the highlighted default
-            case "cancel", "deny": return ["esc"]
-            default: return nil  // 'accept_once' is meaningless on a list
-            }
-        }
-        return nil
+        blockKind.answerKeys(forChoice: choice, index: index)
     }
 
     // MARK: - Occupant Fingerprint & Revalidation
 
-    /// Compute a stable fingerprint for the current occupant of a pane, keyed
-    /// on the NATIVE herdr agent-session identity (source|agent|kind|value) so
-    /// that replacing an occupant with another agent of the same kind/name in
-    /// the same pane is still detected as a change. Falls back to a
-    /// kind|name|paneId form only when no agent-session identity is present.
+    /// Same identity `AnswerSendCheck` compares and pending actions store.
     private func occupantFingerprint(from info: HerdrAgentInfo) -> String {
-        if let session = info.agentSession {
-            return "session|\(session.source)|\(session.agent)|\(session.kind)|\(session.value)|\(info.paneId)"
-        }
-        let kind = info.agent ?? "unknown"
-        let name = info.title ?? info.name ?? info.terminalTitleStripped ?? kind
-        return "fallback|\(kind)|\(name)|\(info.paneId)"
+        info.occupantFingerprint
     }
 
-    /// Revalidate that the pane still has the same occupant and status episode
-    /// as when the action was created. Throws if mismatch.
-    /// Reads fingerprint info from action.params["_fp_*"] keys.
-    private func revalidate(action: PendingAction, paneId: String) async throws {
-        let herd = try await adapter.herdSnapshot()
-
-        guard let paneInfo = herd.agents.first(where: { $0.paneId == paneId }) else {
-            throw MCPRevalidationError.paneGone(paneId)
+    private func refusedAnswer(
+        _ refusal: AnswerSendCheck.Refusal,
+        agentId: String,
+        providedSeq: UInt64
+    ) -> [String: Any] {
+        switch refusal {
+        case .agentGone:
+            return makeToolError("Agent not found: \(agentId)")
+        case .notBlocked(let now):
+            return makeToolError("Agent \(agentId) is not blocked (status: \(now)). agent.answer requires status=blocked.")
+        case .promptChanged(let currentSeq):
+            return makeToolError("Stale state_change_seq: provided \(providedSeq), current \(currentSeq). Re-diagnose and retry.")
+        case .occupantChanged:
+            return makeToolError("Pane occupant changed before send. Re-diagnose and retry.")
         }
+    }
 
-        let seq = paneInfo.stateChangeSeq
-
-        // Compare the NATIVE occupant fingerprint (agent-session identity).
-        let currentFingerprint = occupantFingerprint(from: paneInfo)
+    /// Revalidate that the approved occupant is still on the same status
+    /// episode, and return the pane to address.
+    ///
+    /// The pane id from approval wins when it still runs an agent. A
+    /// cross-workspace move drops that id. The session stored in
+    /// `_fp_occupant` then has to name exactly one other agent, on the
+    /// same status and seq. Anything else throws, and the caller sends
+    /// nothing. Reads fingerprint info from action.params["_fp_*"] keys.
+    private func revalidate(action: PendingAction, paneId: String) async throws -> HerdrAgentInfo {
+        let herd = try await readHerd()
         let expectedFingerprint = action.params["_fp_occupant"]
-        if let expectedFingerprint, !expectedFingerprint.isEmpty,
-           expectedFingerprint != currentFingerprint {
-            throw MCPRevalidationError.occupantChanged(
-                expected: expectedFingerprint,
-                current: currentFingerprint
-            )
-        }
-
-        // Compare status episode (seq)
-        let expectedSeq = action.params["_fp_seq"].flatMap { UInt64($0) }
-        if let expectedSeq, expectedSeq != seq {
-            throw MCPRevalidationError.seqAdvanced(
-                expected: expectedSeq,
-                current: seq
-            )
-        }
-
-        // Compare status
         let expectedStatus = action.params["_fp_status"]
-        if let expectedStatus, !expectedStatus.isEmpty,
-           expectedStatus != paneInfo.agentStatus {
-            throw MCPRevalidationError.statusChanged(
-                expected: expectedStatus,
-                current: paneInfo.agentStatus
+        let expectedSeq = action.params["_fp_seq"].flatMap { UInt64($0) }
+        switch ConfirmedPaneFollow.resolve(
+            previousPaneId: paneId,
+            occupantFingerprint: expectedFingerprint,
+            expectedStatus: expectedStatus,
+            expectedSeq: expectedSeq,
+            in: herd.agents
+        ) {
+        case .success(let info):
+            // The herd read is a newer protocol observation than the refresh
+            // that opened the gate. A downgrade it just recorded must fail
+            // here, before prompt / keys / close, with no input sent.
+            try throwIfWritesDisabled()
+            return info
+        case .failure(.paneGone):
+            throw MCPRevalidationError.paneGone(paneId)
+        case .failure(.occupantChanged(let expected, let current)):
+            throw MCPRevalidationError.occupantChanged(expected: expected, current: current)
+        case .failure(.seqAdvanced(let expected, let current)):
+            throw MCPRevalidationError.seqAdvanced(expected: expected, current: current)
+        case .failure(.statusChanged(let expected, let current)):
+            throw MCPRevalidationError.statusChanged(expected: expected, current: current)
+        }
+    }
+
+    /// Journal and failure params for a write. `resolved_agent_id` is set
+    /// when a move sent the write to a pane other than the one approved.
+    nonisolated private static func addressedParams(
+        requested agentId: String,
+        resolved paneId: String,
+        extra: [String: String] = [:]
+    ) -> [String: String] {
+        var params = extra
+        params["agent_id"] = agentId
+        if paneId != agentId {
+            params["resolved_agent_id"] = paneId
+        }
+        return params
+    }
+
+    /// The protocol currently on the gate. Call after the read that should
+    /// have recorded it. Does not take another snapshot.
+    private func throwIfWritesDisabled() throws {
+        let health = adapter.health()
+        if !health.writesEnabled {
+            throw MCPRevalidationError.writesDisabled(
+                health.reason ?? "herdr protocol not verified for writes"
+            )
+        }
+    }
+
+    /// Snapshot the protocol and refuse when that reading cannot take a
+    /// write. Used where the previous read does not report a protocol
+    /// (`waitForShell`, `agent.wait`) and may have cleared the gate.
+    private func requireFreshWrites() async throws {
+        let readSerial = captureHerdReadSerial()
+        let health = await adapter.refreshHealth(readSerial: readSerial)
+        if !health.writesEnabled {
+            throw MCPRevalidationError.writesDisabled(
+                health.reason ?? "herdr protocol not verified for writes"
             )
         }
     }
 
     // MARK: - Formatting (nonisolated — pure functions on Sendable inputs)
-
-    nonisolated private static func formatOverview(
-        agents: [Agent],
-        workspaceNames: [String: String]
-    ) -> String {
-        guard !agents.isEmpty else {
-            return "Herd Overview — 0 agents\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nNo agents found."
-        }
-
-        // Count statuses. Mutually exclusive, worst-first — a gone pane
-        // with a leftover working/silent label is gone, not working.
-        let counts = AttentionTriage.counts(agents)
-        let gone = counts.gone
-        let blocked = counts.blocked
-        let silent = counts.silent
-        let done = counts.done
-        let working = counts.working
-        let idle = agents.filter { $0.status == .idle && !$0.verdict.isProcessGone }.count
-
-        // Group by workspace
-        var byWorkspace: [String: [Agent]] = [:]
-        for agent in agents {
-            let wsKey = agent.id.workspaceId
-            byWorkspace[wsKey, default: []].append(agent)
-        }
-
-        var lines: [String] = []
-        lines.append("Herd Overview — \(agents.count) agents across \(byWorkspace.count) workspace\(byWorkspace.count == 1 ? "" : "s")")
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-        var statusParts: [String] = []
-        if gone > 0 { statusParts.append("🔴 \(gone) gone") }
-        if blocked > 0 { statusParts.append("🔴 \(blocked) blocked") }
-        if silent > 0 { statusParts.append("🟠 \(silent) silent") }
-        if done > 0 { statusParts.append("🔵 \(done) done") }
-        if working > 0 { statusParts.append("🟡 \(working) working") }
-        if idle > 0 { statusParts.append("🟢 \(idle) idle") }
-        let unknown = agents.filter { $0.status == .unknown }.count
-        if unknown > 0 { statusParts.append("⚪ \(unknown) unknown") }
-        lines.append(statusParts.joined(separator: " · "))
-        lines.append("")
-
-        // Sort workspaces by name
-        let sortedWs = byWorkspace.keys.sorted {
-            let nameA = workspaceNames[$0] ?? $0
-            let nameB = workspaceNames[$1] ?? $1
-            return nameA < nameB
-        }
-
-        for wsId in sortedWs {
-            let wsAgents = byWorkspace[wsId] ?? []
-            let wsName = workspaceNames[wsId] ?? wsId
-            lines.append("\(wsName) (\(wsId)) — \(wsAgents.count) agent\(wsAgents.count == 1 ? "" : "s")")
-
-            // Worst first (gone/blocked, silent, done, rest), then by pane id
-            // so equal-priority rows keep their order between calls.
-            let sorted = wsAgents.sorted(by: AttentionTriage.ranksBefore)
-
-            for agent in sorted {
-                let glyph = statusGlyph(agent)
-                let verdictHint = agent.verdict.summaryLine ?? agent.status.rawValue
-                lines.append("  \(glyph) \(agent.name) [\(agent.id.paneId)] — \(verdictHint)")
-            }
-            lines.append("")
-        }
-
-        return lines.joined(separator: "\n")
-    }
-
-    nonisolated private static func formatAgentList(
-        agents: [Agent],
-        workspaceNames: [String: String]
-    ) -> String {
-        guard !agents.isEmpty else {
-            return "No agents found."
-        }
-
-        var lines: [String] = []
-        lines.append(pad("Status", 8) + " " + pad("Name", 20) + " " + pad("Kind", 10) + " " + pad("Workspace", 12) + " " + pad("Pane", 8) + " Verdict")
-        lines.append(String(repeating: "─", count: 90))
-
-        let sorted = agents.sorted(by: AttentionTriage.ranksBefore)
-        for agent in sorted {
-            let glyph = statusGlyph(agent)
-            let kindStr = agentKindString(agent.kind)
-            let wsName = workspaceNames[agent.id.workspaceId] ?? agent.id.workspaceId
-            let verdictStr = agent.verdict.summaryLine ?? agent.status.rawValue
-
-            lines.append(pad(glyph, 8) + " " + pad(truncate(agent.name, 20), 20) + " " + pad(truncate(kindStr, 10), 10) + " " + pad(truncate(wsName, 12), 12) + " " + pad(truncate(agent.id.paneId, 8), 8) + " " + truncate(verdictStr, 40))
-        }
-
-        lines.append("")
-        lines.append("Total: \(agents.count) agent\(agents.count == 1 ? "" : "s")")
-        return lines.joined(separator: "\n")
-    }
 
     nonisolated private static func formatInspect(
         info: HerdrAgentInfo,
@@ -1683,18 +2209,20 @@ actor MCPServer {
         procInfo: ProcessInfoResult?,
         recentOutput: String?,
         workspaceNames: [String: String],
-        tabNames: [String: String]
+        tabNames: [String: String],
+        paneLabel: String? = nil
     ) -> String {
         var lines: [String] = []
         let agentId = AgentID(info.paneId)
         let wsName = workspaceNames[info.workspaceId] ?? info.workspaceId
         let tabName = tabNames[info.tabId] ?? info.tabId
-        let title = info.title
-            ?? info.name
-            ?? info.terminalTitleStripped
-            ?? info.displayAgent
-            ?? info.agent
-            ?? "unknown"
+        let title = AgentLabel.preferred(
+            title: info.title,
+            displayAgent: info.displayAgent,
+            name: info.name,
+            terminalTitleStripped: info.terminalTitleStripped,
+            paneLabel: paneLabel
+        ) ?? info.agent ?? "unknown"
 
         lines.append("Agent: \(title) (\(agentId.raw))")
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -1707,15 +2235,24 @@ actor MCPServer {
         if info.launchPending {
             lines.append("Launch pending: yes")
         }
-        if let session = info.agentSession {
-            lines.append("Kind: \(session.agent) (source: \(session.source))")
-        } else if let agent = info.agent {
-            lines.append("Kind: \(agent)")
+        if let detected = AgentLabel.nonempty(info.agent) {
+            // Same rule as the row. An empty session agent is not a kind,
+            // and an empty session value is not a reason to hide the
+            // detected one behind a blank source.
+            let name = AgentLabel.nonempty(info.agentSession?.agent) ?? detected
+            let namesSession = info.agentSession?.identity != nil
+                || AgentLabel.nonempty(info.agentSession?.agent) != nil
+            if namesSession, let source = info.agentSession.flatMap({ AgentLabel.nonempty($0.source) }) {
+                lines.append("Kind: \(name) (source: \(source))")
+            } else {
+                lines.append("Kind: \(name)")
+            }
         }
-        if let cwd = info.cwd {
+        if let cwd = AgentLabel.nonempty(info.cwd) {
             lines.append("CWD: \(cwd)")
         }
-        if let foregroundCwd = info.foregroundCwd, foregroundCwd != info.cwd {
+        if let foregroundCwd = AgentLabel.nonempty(info.foregroundCwd),
+           foregroundCwd != AgentLabel.nonempty(info.cwd) {
             lines.append("Foreground CWD: \(foregroundCwd)")
         }
         if !info.stateLabels.isEmpty {
@@ -1902,19 +2439,6 @@ actor MCPServer {
 
     // MARK: - Formatting Helpers
 
-    nonisolated private static func statusGlyph(_ agent: Agent) -> String {
-        if agent.verdict.isProcessGone { return "🔴" }
-        if agent.status == .blocked { return "🔴" }
-        if AttentionTriage.isActionablySilent(agent) { return "🟠" }
-        switch agent.status {
-        case .blocked: return "🔴"
-        case .done: return "🔵"
-        case .working: return "🟡"
-        case .idle: return "🟢"
-        case .unknown: return "⚪"
-        }
-    }
-
     nonisolated private static func verdictName(_ verdict: Verdict) -> String {
         switch verdict {
         case .healthy: return "HEALTHY"
@@ -1923,21 +2447,6 @@ actor MCPServer {
         case .processGone: return "PROCESS GONE"
         case .unclassifiable: return "UNCLASSIFIABLE"
         }
-    }
-
-    nonisolated private static func agentKindString(_ kind: AgentKind) -> String {
-        switch kind {
-        case .claude: return "claude"
-        case .codex: return "codex"
-        case .opencode: return "opencode"
-        case .aider: return "aider"
-        case .gemini: return "gemini"
-        case .custom(let s): return s
-        }
-    }
-
-    nonisolated private static func formatDwell(enteredAt: Date) -> String {
-        formatElapsed(since: enteredAt)
     }
 
     nonisolated private static func formatElapsed(since date: Date) -> String {
@@ -1957,11 +2466,6 @@ actor MCPServer {
     nonisolated private static func truncate(_ s: String, _ maxLen: Int) -> String {
         if s.count <= maxLen { return s }
         return String(s.prefix(maxLen - 1)) + "…"
-    }
-
-    nonisolated private static func pad(_ s: String, _ width: Int) -> String {
-        if s.count >= width { return s }
-        return s + String(repeating: " ", count: width - s.count)
     }
 
     // MARK: - JSON-RPC Response Builders
@@ -1986,7 +2490,7 @@ actor MCPServer {
     nonisolated(unsafe) static let toolDefinitions: [[String: Any]] = [
         [
             "name": "herd.overview",
-            "description": "Overview of all AI agents in the herdr multiplexer, grouped by workspace. Shows counts by status and which agents need attention.",
+            "description": "Overview of all AI agents in the herdr multiplexer, grouped by workspace. Shows counts by status and which agents need attention. Each agent line includes its agent_id in brackets, in workspace:pane form (for example w5:p2); that is the id other tools accept. Quiet is reported once this server has seen the same detection screen past the silence threshold.",
             "inputSchema": [
                 "type": "object",
                 "properties": [String: Any]()
@@ -1994,22 +2498,22 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "agent.list",
-            "description": "List all agents with their current status. Optionally filter by status or workspace.",
+            "description": "List all agents with their current status. The ID column is the agent_id other tools accept, in workspace:pane form (for example w5:p2), not the bare pane suffix. Optionally filter by herdr status, by the overview marks gone and silent, by workspace, or by the same query text agent.inspect accepts. An unknown status is an error.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
                     "status": [
                         "type": "string",
-                        "enum": ["blocked", "working", "idle", "done", "unknown"],
-                        "description": "Filter by agent status"
+                        "enum": ["blocked", "working", "idle", "done", "unknown", "gone", "silent", "quiet"],
+                        "description": "herdr status (blocked, working, idle, done, unknown) or an overview mark (gone, silent; quiet is silent). Case-insensitive; surrounding space is ignored. A blank value does not filter. working is herdr's status, so a pane marked GONE or silent can still be included. An unknown word is an error."
                     ],
                     "workspace": [
                         "type": "string",
-                        "description": "Filter by workspace name or ID (substring match)"
+                        "description": "Filter by workspace name or ID (substring match). Surrounding space is ignored. A blank value does not filter."
                     ],
                     "query": [
                         "type": "string",
-                        "description": "Filter by human-facing agent title/name, kind, workspace, tab, cwd, or pane ID"
+                        "description": "Substring match on the same text as agent.inspect: title, rename, pane label, terminal title, detected or session kind, workspace, tab, directory, or pane id. A blank query does not filter."
                     ]
                 ] as [String: Any]
             ] as [String: Any]
@@ -2026,14 +2530,14 @@ actor MCPServer {
                     ],
                     "query": [
                         "type": "string",
-                        "description": "Human-facing title/name, workspace, tab, cwd, kind, or pane ID; must match exactly one agent"
+                        "description": "Same text as agent.list's query (title, rename, pane label, terminal title, kind, workspace, tab, directory, or pane id); must match exactly one agent"
                     ]
                 ] as [String: Any]
             ] as [String: Any]
         ] as [String: Any],
         [
             "name": "agent.tail",
-            "description": "Read the last N lines of one agent's terminal output. Pass agent_id or a unique human query. The read is bounded at the source and secret-scrubbed.",
+            "description": "Read the last N lines of one agent's terminal output. Pass agent_id or a unique human query. The read is bounded at the source and secret-scrubbed. source is visible, recent, recent_unwrapped, or detection (the default). An unknown source is an error.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -2043,7 +2547,7 @@ actor MCPServer {
                     ],
                     "query": [
                         "type": "string",
-                        "description": "Human-facing title/name, workspace, tab, cwd, kind, or pane ID; must match exactly one agent"
+                        "description": "Same text as agent.list's query (title, rename, pane label, terminal title, kind, workspace, tab, directory, or pane id); must match exactly one agent"
                     ],
                     "lines": [
                         "type": "integer",
@@ -2053,7 +2557,7 @@ actor MCPServer {
                     "source": [
                         "type": "string",
                         "enum": ["visible", "recent", "recent_unwrapped", "detection"],
-                        "description": "Pane read source (default: detection)",
+                        "description": "Pane read source (default: detection). Case-insensitive; surrounding space is ignored. A blank value is an error. An unknown word is an error, not detection.",
                         "default": "detection"
                     ]
                 ] as [String: Any]
@@ -2061,7 +2565,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "agent.diagnose",
-            "description": "Run full stuck-diagnosis on one agent. Pass agent_id or a unique human query. Returns verdict, confidence, what it is waiting on, evidence, and suggested actions.",
+            "description": "Run full stuck-diagnosis on one agent. Pass agent_id or a unique human query. Returns verdict, confidence, what it is waiting on, evidence, and suggested actions. Blocked and quiet durations start when this server first sees that episode. Quiet also requires the detection screen to stay unchanged across calls.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -2071,7 +2575,7 @@ actor MCPServer {
                     ],
                     "query": [
                         "type": "string",
-                        "description": "Human-facing title/name, workspace, tab, cwd, kind, or pane ID; must match exactly one agent"
+                        "description": "Same text as agent.list's query (title, rename, pane label, terminal title, kind, workspace, tab, directory, or pane id); must match exactly one agent"
                     ]
                 ] as [String: Any]
             ] as [String: Any]
@@ -2079,7 +2583,7 @@ actor MCPServer {
         // MARK: Write Tools
         [
             "name": "agent.answer",
-            "description": "Reply to a blocked agent's prompt with a bounded choice. Requires status=blocked. Maps choice to key sequences: approve→enter, deny→esc, accept_once→down+enter, select→arrows+enter, cancel→esc. Max 3 consecutive answers without status change.",
+            "description": "Reply to a blocked agent's prompt with a bounded choice. Requires status=blocked. approve sends Enter and deny or cancel sends Esc. accept_once (Down, then Enter) is only for a yes / don't-ask-again / no stack. select sends that many Downs, then Enter, on a menu or a highlighted confirmation. Unknown and probable blocks stay read-only. Max 3 consecutive answers without a status change. The same agent session keeps that cap when its pane id changes.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -2106,7 +2610,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "agent.say",
-            "description": "Send free-text prompt to an agent via agent.prompt (atomic, bracketed-paste aware). Auto-allowed when idle/done; requires confirmation when working/blocked. Max 2000 chars.",
+            "description": "Send free-text prompt to an agent via agent.prompt (atomic, bracketed-paste aware). Auto-allowed when idle/done; requires confirmation when working/blocked. Max 2000 chars. Optional wait_for accepts \(SayWait.statusWords) only, and is refused before any text is sent when the status or timeout is not usable. outcome timeout means herdr ended the wait without that status; the text was still sent. outcome \(SayWait.waitFailedToken) means the wait itself failed after the text was sent. outcome \(SayWait.enterUnconfirmedToken) means the text is already in the pane and Enter did not finish; do not send that text again. When the pane moved before the text was sent, resolvedAgentId is the pane that received it.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -2120,12 +2624,12 @@ actor MCPServer {
                     ],
                     "wait_for": [
                         "type": "string",
-                        "enum": ["idle", "done", "blocked"],
-                        "description": "Optional: wait for agent to reach this status"
-                    ],
+                        "enum": SayWait.acceptedStatuses,
+                        "description": "Optional settled status to wait for (\(SayWait.statusWords)). Surrounding space and case are ignored. working and unknown are not results. A blank or any other word is an error, and no text is sent. Omit to not wait."
+                    ] as [String: Any],
                     "timeout_ms": [
                         "type": "integer",
-                        "description": "Timeout for wait_for in milliseconds (default 30000)"
+                        "description": "How long to wait, in milliseconds, from 1 to \(SayWait.maxTimeoutMs) (default \(SayWait.defaultTimeoutMs)). Longer than that cannot finish before the request socket gives up, so it is refused before any text is sent. Ignored when wait_for is omitted."
                     ]
                 ] as [String: Any],
                 "required": ["agent_id", "text"]
@@ -2133,7 +2637,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "agent.interrupt",
-            "description": "Interrupt a running agent. escape sends Esc, sigint sends Ctrl+C. Always requires confirmation.",
+            "description": "Interrupt a running agent. escape sends Esc, sigint sends Ctrl+C. Always requires confirmation. When the pane moved before the keys were sent, resolvedAgentId is the pane that received them.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -2152,7 +2656,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "agent.stop",
-            "description": "Close an agent's pane. Always requires confirmation. Never accepts a list — one confirmation per agent.",
+            "description": "Close an agent's pane. Always requires confirmation. Never accepts a list — one confirmation per agent. When the pane moved before the close, resolvedAgentId is the pane that was closed.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -2170,7 +2674,7 @@ actor MCPServer {
         ] as [String: Any],
         [
             "name": "session.spawn",
-            "description": "Start an agent in a new workspace, a new tab in an existing workspace, or a split beside an existing agent. MCP callers are auto-allowed without menu-bar confirmation; other destructive writes remain confirmation-gated. Use placement=new_workspace with repo_path, new_tab with workspace_id, or split with target_agent_id.",
+            "description": "Start an agent in a new workspace, a new tab in an existing workspace, or a split beside an existing agent. MCP callers are auto-allowed without menu-bar confirmation; other destructive writes remain confirmation-gated. Use placement=new_workspace with repo_path, new_tab with workspace_id, or split with target_agent_id. Once the agent has started, a brief that cannot be checked or confirmed still returns that pane. If the pane was created but the agent start was not confirmed, started is false, startNotConfirmed says why, and that same pane id is returned. Do not start a second agent until that pane has been checked. A requested brief is not sent on that result.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -2202,7 +2706,7 @@ actor MCPServer {
                     ],
                     "brief": [
                         "type": "string",
-                        "description": "Optional initial prompt to send after starting"
+                        "description": "Optional initial prompt (max 2000 characters). Sent only when the new agent is idle, working, or done. A blocked agent does not receive it, because the prompt submits Enter. If the status cannot be read, or the prompt does not finish cleanly, the brief is not reported as sent and the spawn still returns the pane. When herdr rejects the text write, the result says the brief was not sent. A response too large to read does not, because the text may already be in the pane."
                     ],
                     "space_label": [
                         "type": "string",

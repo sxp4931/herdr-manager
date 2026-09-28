@@ -33,6 +33,19 @@ public enum TokenMeterProvider: String, Codable, CaseIterable, Hashable, Identif
         self.init(rawValue: agentKind.label)
     }
 
+    /// Whether a usage event from any provider can belong to this kind.
+    ///
+    /// OpenCode is one CLI that runs deepseek, qwen, and local models, so
+    /// a priced event in its directory matches it whatever the log's
+    /// provider is. The herd stores that runtime as `.custom("opencode")`:
+    /// `AgentKind.resolved` keeps the settings fingerprint
+    /// `custom:opencode`. `.opencode` is the same label. Comparing the
+    /// enum case left those events unattributed, and a Claude event in
+    /// the same directory was no longer ambiguous.
+    static func matchesAnyUsageProvider(_ kind: AgentKind) -> Bool {
+        kind.label == "opencode"
+    }
+
     public init?(rawValue: String) {
         switch rawValue.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) {
         case "claude", "claude-code", "claude_code", "anthropic": self = .claude

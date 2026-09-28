@@ -14,6 +14,9 @@ struct PanelView: View {
     /// state here (rather than per-row @State) is enough and makes Esc/Space
     /// keyboard handling trivial.
     @State private var expansion: RowExpansion = .none
+    /// Bumps each time a peek starts. A read that returns after a newer peek
+    /// must not replace that peek, and must not clear its spinner.
+    @State private var peekGeneration = 0
     @State private var nudgeText: String = ""
 
     /// Free-text filter over the visible list. With ~30 agents the panel is a
@@ -235,8 +238,10 @@ struct PanelView: View {
         for agent in appModel.store.agents.values where matchesSearch(agent, query: query) {
             matching += 1
             if Self.needsYou(agent) { needsYou += 1 }
-            if agent.status == .working { running += 1 }
-            if agent.status == .done { done += 1 }
+            // herdr leaves the status in place after the process dies.
+            // Running is a live worker, quiet included. Finished is the done bucket.
+            if AttentionTriage.isRunning(agent) { running += 1 }
+            if AttentionTriage.isFinished(agent) { done += 1 }
         }
 
         let groups: [WorkspaceGroup]
@@ -805,7 +810,7 @@ struct PanelView: View {
     private var runningAgents: [Agent] {
         let query = searchQuery
         return appModel.store.agents.values
-            .filter { $0.status == .working && matchesSearch($0, query: query) }
+            .filter { AttentionTriage.isRunning($0) && matchesSearch($0, query: query) }
             .sorted { a, b in
                 if a.enteredAt != b.enteredAt { return a.enteredAt < b.enteredAt }
                 return a.id.raw < b.id.raw
@@ -1255,9 +1260,13 @@ struct PanelView: View {
     }
 
     private func beginPeekLoad(_ agent: Agent) {
+        peekGeneration += 1
+        let generation = peekGeneration
+        let readPaneId = agent.id
         expansion = .peekLoading
         let paneId = agent.id.raw // herdr uses full session-qualified IDs (e.g. "w5:p2")
         Task {
+            let outcome: Result<String, String>
             do {
                 var result = try await appModel.adapter.read(
                     paneId: paneId, source: .detection, lines: 20
@@ -1272,16 +1281,59 @@ struct PanelView: View {
                 let content = last20.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     ? "(No terminal output is available yet.)"
                     : last20
-                await MainActor.run {
-                    guard appModel.selectedAgentId == agent.id else { return }
-                    expansion = .peek(content)
-                }
+                outcome = .success(content)
             } catch {
-                await MainActor.run {
-                    guard appModel.selectedAgentId == agent.id else { return }
-                    expansion = .peekFailed("Peek failed: \(error.localizedDescription)")
-                }
+                outcome = .failure(error.localizedDescription)
             }
+            await MainActor.run {
+                finishPeek(outcome, generation: generation, readPaneId: readPaneId)
+            }
+        }
+    }
+
+    /// Apply one finished peek. A move that landed during the read points
+    /// the selection at the new id and leaves this spinner on that row.
+    /// The bytes belong to the id that was read, so the new row is read
+    /// instead. A click while the spinner is up does not start that read:
+    /// the loading expansion ignores it.
+    private func finishPeek(
+        _ outcome: Result<String, String>,
+        generation: Int,
+        readPaneId: AgentID
+    ) {
+        let stillLoading: Bool
+        if case .peekLoading = expansion {
+            stillLoading = true
+        } else {
+            stillLoading = false
+        }
+        switch PeekCompletion.decide(
+            isLatest: generation == peekGeneration,
+            stillLoading: stillLoading,
+            selectedId: appModel.selectedAgentId,
+            readPaneId: readPaneId
+        ) {
+        case .ignore:
+            return
+        case .clear:
+            expansion = .none
+        case .show:
+            switch outcome {
+            case .success(let content):
+                expansion = .peek(content)
+            case .failure(let message):
+                expansion = .peekFailed("Peek failed: \(message)")
+            }
+        case .reread:
+            // The row the spinner is drawn on. Its id is not the one this
+            // read used; reading that id again would loop.
+            guard let selected = appModel.selectedAgentId,
+                  let agent = appModel.store.agents[selected],
+                  agent.id != readPaneId else {
+                expansion = .none
+                return
+            }
+            beginPeekLoad(agent)
         }
     }
 

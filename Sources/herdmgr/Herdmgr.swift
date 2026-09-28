@@ -13,6 +13,14 @@ func pad(_ s: String, to width: Int) -> String {
     return s + String(repeating: " ", count: width - count)
 }
 
+private enum LiveWake: Sendable {
+    case event(HerdrEvent)
+    /// `agent.list` for rows the table already shows. Not a process scan.
+    case herd
+    case tick
+    case ended
+}
+
 // MARK: - CLI Command
 
 @main
@@ -23,14 +31,15 @@ struct HerdmgrCommand: AsyncParsableCommand {
         discussion: """
             Without --socket, the herdr socket is resolved from HERDR_SOCKET_PATH, \
             then HERDR_SESSION, then $XDG_CONFIG_HOME/herdr/herdr.sock, \
-            then ~/.config/herdr/herdr.sock.
+            then ~/.config/herdr/herdr.sock. \
+            --json prints every agent once and exits. --show-all only widens the live table.
             """
     )
 
-    @Flag(name: .long, help: "Output as JSON")
+    @Flag(name: .long, help: "Print every agent as a JSON array and exit. needs_you is a boolean. Idle agents are included.")
     var json = false
 
-    @Flag(name: .long, help: "Show all agents, not just attention-worthy ones")
+    @Flag(name: .long, help: "In the live table, show every agent instead of only those that need attention")
     var showAll = false
 
     @Option(name: .long, help: "Path to herdr socket")
@@ -68,7 +77,7 @@ struct HerdmgrCommand: AsyncParsableCommand {
         // Take initial snapshot from agent.list (authoritative agents + seq)
         // merged with session.snapshot labels — not session.snapshot panes,
         // which omit seq and can include plain shells.
-        var herd: HerdSnapshot
+        let herd: HerdSnapshot
         do {
             herd = try await adapter.herdSnapshot()
         } catch {
@@ -82,23 +91,17 @@ struct HerdmgrCommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data("\(protocolLine)\n".utf8))
         }
 
-        var agents = herd.displayAgents()
+        var live = HerdLiveTable(herd: herd, agents: herd.displayAgents())
+        let diagnoser = Diagnoser()
+        // herdr keeps the last status after a process dies. The table's
+        // crash mark comes from the process list, not from that status.
+        let initialRead = await processGoneObservations(
+            for: live.agents, adapter: adapter, diagnoser: diagnoser
+        )
+        live.applyProcessGone(initialRead)
 
         if json {
-            let output = agents.map { agent in
-                [
-                    "id": agent.id.raw,
-                    "status": agent.status.rawValue,
-                    "kind": agentKindString(agent.kind),
-                    "name": agent.name,
-                    "workspace": agent.workspaceName,
-                    "tab": agent.tabName,
-                    "needs_you": AttentionTriage.needsYou(agent) ? "true" : "false",
-                    "priority": String(AttentionTriage.priority(agent)),
-                    "state_change_seq": String(agent.stateChangeSeq),
-                ] as [String: String]
-            }
-            let data = try JSONSerialization.data(withJSONObject: output, options: [.prettyPrinted, .sortedKeys])
+            let data = try HerdReport.jsonData(agents: live.agents)
             if let str = String(data: data, encoding: .utf8) {
                 print(str)
             }
@@ -106,7 +109,7 @@ struct HerdmgrCommand: AsyncParsableCommand {
         }
 
         // Live table mode
-        printTable(agents, showAll: showAll)
+        printTable(live.agents, showAll: showAll)
 
         // Set up signal handling for graceful exit
         signal(SIGINT, SIG_IGN)
@@ -117,28 +120,142 @@ struct HerdmgrCommand: AsyncParsableCommand {
         }
         signalSource.resume()
 
-        // Subscribe to events
-        let eventStream = adapter.events()
-        for await event in eventStream {
-            if case .workspacesChanged = event {
-                // Label/layout churn (tab_focused, layout_updated, ...) says
-                // nothing about the agents. Keep each pane's enteredAt so the
-                // dwell column does not reset to 0s every time the user
-                // switches tabs.
-                if let refreshed = try? await adapter.herdSnapshot() {
-                    agents = refreshed.displayAgents(preserving: agents)
-                    herd = refreshed
-                }
-            } else {
-                agents = herd.applying(event, to: agents)
-            }
-            // Clear screen and redraw
-            print("\u{001B}[2J\u{001B}[H")
-            printTable(agents, showAll: showAll)
-        }
-        FileHandle.standardError.write(
-            Data("Event stream ended. \(LiveHerdrAdapter.socketHint(resolvedPath: socketPath))\n".utf8)
+        await watchLiveTable(
+            startingFrom: live, adapter: adapter, diagnoser: diagnoser, socketPath: socketPath
         )
+    }
+
+    /// Subscribe, poll status for the rows already on screen, and re-read
+    /// the process list on a 15s tick — the same cadence as the menu bar's
+    /// diagnosis pass. A dead process often emits nothing, so the table
+    /// cannot wait for the next pane event.
+    ///
+    /// Status is polled every 3s, the same cadence as the menu bar's herd
+    /// read. herdr emits a status change as `pane.agent_status_changed`,
+    /// and that subscription is rejected without a pane id. `pane.updated`
+    /// is not sent for a status change, so a table that only refetches on
+    /// a layout event keeps the previous status until the user creates,
+    /// closes, or focuses a container.
+    ///
+    /// A poll that opens an episode reads the process list for those rows
+    /// before the table is drawn. The fresh verdict is the status verdict,
+    /// and a dead process whose status string stayed `working` would
+    /// otherwise leave the attention list until the next event or the 15s
+    /// tick. A poll that keeps the episode does not read. That read is
+    /// what would paint a status verdict over a crash the last scan
+    /// stamped, and it would run for the whole table at the herd cadence.
+    ///
+    /// Silence is not classified here. A full diagnose would time it from
+    /// `enteredAt`, and this table has no output clock, so a busy agent
+    /// would read as quiet once the episode outlasted the threshold.
+    private func watchLiveTable(
+        startingFrom initial: HerdLiveTable,
+        adapter: LiveHerdrAdapter,
+        diagnoser: Diagnoser,
+        socketPath: String
+    ) async {
+        var live = initial
+        let eventStream = adapter.events()
+        let (wakes, continuation) = AsyncStream.makeStream(of: LiveWake.self)
+        let eventsTask = Task {
+            for await event in eventStream {
+                continuation.yield(.event(event))
+            }
+            continuation.yield(.ended)
+            continuation.finish()
+        }
+        // 3s matches Shepherd's herd poll. Every fifth step is the 15s
+        // process scan, so an idle table still notices a dead process.
+        let herdEvery: UInt64 = 3_000_000_000
+        let processEverySteps = 5
+        let clockTask = Task {
+            var stepsUntilProcess = processEverySteps
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: herdEvery)
+                if Task.isCancelled { break }
+                continuation.yield(.herd)
+                stepsUntilProcess -= 1
+                if stepsUntilProcess == 0 {
+                    continuation.yield(.tick)
+                    stepsUntilProcess = processEverySteps
+                }
+            }
+        }
+        defer {
+            eventsTask.cancel()
+            clockTask.cancel()
+            continuation.finish()
+        }
+
+        for await wake in wakes {
+            let scanProcesses: Bool
+            switch wake {
+            case .ended:
+                FileHandle.standardError.write(
+                    Data("Event stream ended. \(LiveHerdrAdapter.socketHint(resolvedPath: socketPath))\n".utf8)
+                )
+                return
+            case .herd:
+                let before = live.agents
+                let refreshed = try? await adapter.herdSnapshot()
+                let opened = live.noteStatusRefresh(refreshed)
+                if !opened.isEmpty {
+                    let openedIds = Set(opened)
+                    let targets = live.agents.filter { openedIds.contains($0.id) }
+                    let observations = await processGoneObservations(
+                        for: targets, adapter: adapter, diagnoser: diagnoser
+                    )
+                    live.applyProcessGone(observations)
+                }
+                scanProcesses = false
+                guard live.agents != before else { continue }
+            case .tick:
+                scanProcesses = true
+            case .event(let event):
+                let before = live.agents
+                if case .workspacesChanged = event {
+                    // Create, close, and move. Not a focus: that event does
+                    // not change the set of panes, and a refetch here armed
+                    // the dwell baseline from a click. A move's new id is
+                    // already in the list. Remembering the pre-refetch rows
+                    // lets pane.moved put the dwell back. A rename is its
+                    // own event and already carries its label.
+                    let refreshed = try? await adapter.herdSnapshot()
+                    live.noteLayoutRefresh(refreshed)
+                } else {
+                    live.apply(event)
+                }
+                switch HerdLiveTable.FollowUp.after(event, rowsChanged: live.agents != before) {
+                case .skip:
+                    scanProcesses = false
+                    continue
+                case .paint:
+                    scanProcesses = false
+                case .scanAndPaint:
+                    scanProcesses = true
+                }
+            }
+            if scanProcesses {
+                let observations = await processGoneObservations(
+                    for: live.agents, adapter: adapter, diagnoser: diagnoser
+                )
+                live.applyProcessGone(observations)
+            }
+            print("\u{001B}[2J\u{001B}[H")
+            printTable(live.agents, showAll: showAll)
+        }
+    }
+
+    private func processGoneObservations(
+        for agents: [Agent],
+        adapter: HerdrAdapter,
+        diagnoser: Diagnoser
+    ) async -> [AgentID: ProcessGoneObservation] {
+        var observations: [AgentID: ProcessGoneObservation] = [:]
+        for agent in agents {
+            observations[agent.id] = await diagnoser.observeProcessGone(agent: agent, adapter: adapter)
+        }
+        return observations
     }
 
     private func resolveSocketPath() -> String {
@@ -167,9 +284,12 @@ struct HerdmgrCommand: AsyncParsableCommand {
         print(String(repeating: "-", count: 72))
 
         for agent in list {
-            let glyph = statusGlyph(agent)
+            let glyph = AttentionTriage.statusMark(for: agent)
             let dwell = formatDwell(Date().timeIntervalSince(agent.enteredAt))
-            let kind = agentKindString(agent.kind)
+            // The JSON snapshot keeps the full kind. This column is 12
+            // wide, so a longer custom kind shows the cut instead of a
+            // word that looks complete.
+            let kind = truncate(HerdReport.kindText(agent.kind), 12)
             let name = truncate(agent.displayName.isEmpty ? agent.name : agent.displayName, 20)
             let location = "\(agent.workspaceName)/\(agent.tabName)"
 
@@ -177,20 +297,10 @@ struct HerdmgrCommand: AsyncParsableCommand {
         }
 
         print()
-        let counts = AttentionTriage.counts(agents)
-        print("\(agents.count) agents | \(counts.blocked) blocked | \(counts.silent) silent | \(counts.done) done")
-    }
-
-    private func statusGlyph(_ agent: Agent) -> String {
-        if agent.verdict.isProcessGone { return "🔴" }
-        if agent.status == .blocked { return "🔴" }
-        if AttentionTriage.isActionablySilent(agent) { return "🟠" }
-        switch agent.status {
-        case .blocked: return "🔴"
-        case .done: return "🔵"
-        case .idle, .working: return "🟢"
-        case .unknown: return "⚪"
-        }
+        print(AttentionTriage.statusFooter(
+            agentCount: agents.count,
+            counts: AttentionTriage.counts(agents)
+        ))
     }
 
     private func formatDwell(_ interval: TimeInterval) -> String {
@@ -200,17 +310,6 @@ struct HerdmgrCommand: AsyncParsableCommand {
         if minutes < 60 { return "\(minutes)m" }
         let hours = minutes / 60
         return "\(hours)h\(minutes % 60)m"
-    }
-
-    private func agentKindString(_ kind: AgentKind) -> String {
-        switch kind {
-        case .claude: return "claude"
-        case .codex: return "codex"
-        case .opencode: return "opencode"
-        case .aider: return "aider"
-        case .gemini: return "gemini"
-        case .custom(let s): return String(s.prefix(12))
-        }
     }
 
     private func truncate(_ s: String, _ maxLen: Int) -> String {

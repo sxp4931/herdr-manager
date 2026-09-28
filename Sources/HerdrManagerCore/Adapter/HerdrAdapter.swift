@@ -29,6 +29,12 @@ public extension HerdrAdapter {
 
 // MARK: - LiveHerdrAdapter
 
+/// Epoch issued for one socket call. Written on the calling task before
+/// that call suspends, and read only after it resumes.
+private final class ProtocolEpochBox: @unchecked Sendable {
+    var value: UInt64 = 0
+}
+
 /// Two sockets, by design. `reqClient` carries request/response traffic
 /// (snapshot, explain, reads, writes) — one short transaction at a time,
 /// serialized inside the client. `subClient` is dedicated to the long-lived
@@ -47,6 +53,17 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     private let stateLock = NSLock()
     private var _connectionState: HerdrConnectionState = .disconnected
     private var _latestProtocolVersion: Int = 0
+    /// Highest herd-read serial whose protocol was recorded. A later poll
+    /// can finish before an earlier one; the earlier result must not put
+    /// the write gate back on the protocol it saw.
+    private var _herdReadSerialFloor: UInt64 = 0
+    /// Last enqueue id issued. The floor below is the highest one whose
+    /// protocol update was kept.
+    private var _nextProtocolEpoch: UInt64 = 0
+    /// `explain`, `pane.read`, `sendKeys`, and the subscription drop have
+    /// no herd-read serial. They clear under an epoch, so a herd read that
+    /// started earlier cannot turn writes back on.
+    private var _protocolEpochFloor: UInt64 = 0
     private var eventContinuation: AsyncStream<HerdrEvent>.Continuation?
     private let eventStream: AsyncStream<HerdrEvent>
     private var eventLoopTask: Task<Void, Never>?
@@ -54,7 +71,10 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     public init(socketPath: String) {
         // Request client: bounded I/O timeout so a stalled herdr errors out
         // (.timeout) instead of blocking forever.
-        self.reqClient = NDJSONClient(socketPath: socketPath, ioTimeoutSeconds: 30)
+        self.reqClient = NDJSONClient(
+            socketPath: socketPath,
+            ioTimeoutSeconds: NDJSONClient.requestIOTimeoutSeconds
+        )
         // Subscription client: no timeout — the event stream is push-based and
         // legitimately blocks between events.
         self.subClient = NDJSONClient(socketPath: socketPath, ioTimeoutSeconds: 0)
@@ -70,13 +90,42 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// a `Sendable` result so no non-Sendable value (e.g. `[String: Any]`)
     /// crosses the thread boundary. Combined with the socket-level timeouts, a
     /// hung herdr surfaces as `.timeout` rather than blocking indefinitely.
+    ///
+    /// `readSerial` is the capture id of the herd read this transaction
+    /// belongs to. A connect failure clears the protocol under that serial
+    /// and under the epoch issued as the work is enqueued. A read that
+    /// started earlier cannot put its protocol back after that clear, even
+    /// when it has no serial of its own. `epochBox` receives that epoch
+    /// before this call suspends, so a caller that records the protocol
+    /// after a success uses the same id.
+    ///
+    /// `writes` checks the gate on this queue, after every transaction
+    /// already enqueued has recorded. A herd read that saw a downgrade or
+    /// a dead socket runs before the mutation and the mutation does not
+    /// start. Checking before the enqueue would still see the protocol
+    /// from before that read. A refusal is not a connect failure: the
+    /// reading stays, and no byte of the request is written.
     private func onIO<T: Sendable>(
+        readSerial: UInt64? = nil,
+        epochBox: ProtocolEpochBox? = nil,
+        writes: Bool = false,
         _ body: @escaping @Sendable () throws -> T
     ) async throws -> T {
+        let box = epochBox ?? ProtocolEpochBox()
         do {
             return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
-                ioQueue.async {
+                // The epoch and the enqueue share this lock. `async` returns
+                // before the block runs, so the lock is not held across the
+                // socket call, and a higher epoch cannot run first.
+                stateLock.lock()
+                defer { stateLock.unlock() }
+                let epoch = nextProtocolEpochLocked()
+                box.value = epoch
+                ioQueue.async { [self] in
                     do {
+                        if writes, let reason = self.writeRefusal() {
+                            throw NDJSONClientError.writesDisabled(reason)
+                        }
                         continuation.resume(returning: try body())
                     } catch {
                         continuation.resume(throwing: error)
@@ -85,12 +134,40 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             }
         } catch let error as NDJSONClientError {
             // herdr is not accepting connections: it stopped or is restarting,
-            // and whatever answers next may be a different build.
+            // and whatever answers next may be a different build. A write
+            // the gate refused never connected, so it must not clear the
+            // reading the refusal just obeyed.
             if case .connectFailed = error {
-                clearProtocolReading()
+                recordProtocol(0, readSerial: readSerial, epoch: box.value)
             }
             throw error
         }
+    }
+
+    /// Nil when the protocol currently on the gate may receive a write.
+    /// Called on `ioQueue`, so a snapshot enqueued earlier has already
+    /// recorded.
+    private func writeRefusal() -> String? {
+        let health = Self.health(forProtocol: latestProtocol())
+        guard health.writesEnabled else {
+            return health.reason ?? "herdr protocol not verified for writes"
+        }
+        return nil
+    }
+
+    /// Caller holds `stateLock`.
+    private func nextProtocolEpochLocked() -> UInt64 {
+        _nextProtocolEpoch += 1
+        return _nextProtocolEpoch
+    }
+
+    /// Id of one protocol update, in enqueue order. A test stands in for a
+    /// request that has already started by issuing its epoch here and
+    /// passing it to `setLatestProtocol`.
+    func issueProtocolEpoch() -> UInt64 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return nextProtocolEpochLocked()
     }
 
     public var connectionState: HerdrConnectionState {
@@ -107,10 +184,39 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     /// Internal (not private) so `@testable` tests can seed a reading
     /// without a live herdr.
-    func setLatestProtocol(_ version: Int) {
+    ///
+    /// `readSerial` orders overlapping herd reads. A serial behind one
+    /// already recorded is ignored. Omit it and the serial gate stays
+    /// open: the CLI's snapshot has no serial and still records.
+    ///
+    /// `epoch` orders every request, including one with no serial. An
+    /// epoch behind one already recorded is ignored. Request paths pass
+    /// the id `onIO` issued at enqueue. Omit it only when a test seeds
+    /// the serial gate: a nil epoch does not move the epoch floor and
+    /// does not lose to it.
+    func setLatestProtocol(_ version: Int, readSerial: UInt64? = nil, epoch: UInt64? = nil) {
         stateLock.lock()
+        defer { stateLock.unlock() }
+        if let readSerial, readSerial < _herdReadSerialFloor {
+            return
+        }
+        if let epoch, epoch < _protocolEpochFloor {
+            return
+        }
+        if let readSerial {
+            _herdReadSerialFloor = readSerial
+        }
+        if let epoch {
+            _protocolEpochFloor = epoch
+        }
         _latestProtocolVersion = version
-        stateLock.unlock()
+    }
+
+    /// `epoch` 0 means the enqueue did not run. Recording without an epoch
+    /// would skip the floor, so that update is dropped.
+    private func recordProtocol(_ version: Int, readSerial: UInt64?, epoch: UInt64) {
+        guard epoch > 0 else { return }
+        setLatestProtocol(version, readSerial: readSerial, epoch: epoch)
     }
 
     private func latestProtocol() -> Int {
@@ -124,8 +230,13 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// reading could send a write to a herdr that no longer supports it.
     /// 0 reads as "protocol unknown" (writes off) until the next snapshot,
     /// which is also what makes the MCP write gate re-read it.
-    private func clearProtocolReading() {
-        setLatestProtocol(0)
+    ///
+    /// The epoch is issued here, so it sits after every request already
+    /// enqueued and before every request not yet started. An in-flight
+    /// herd read cannot put the old protocol back.
+    func clearProtocolReading() {
+        let epoch = issueProtocolEpoch()
+        setLatestProtocol(0, epoch: epoch)
     }
 
     public func connect() async throws {
@@ -135,11 +246,27 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     }
 
     public func snapshot() async throws -> HerdrSnapshot {
-        let snap = try await onIO { [reqClient] in
+        try await snapshot(readSerial: nil)
+    }
+
+    /// `session.snapshot`, recording the protocol under `readSerial`.
+    ///
+    /// The zero-argument form is the `HerdrAdapter` requirement and always
+    /// records. A serial behind one already recorded still returns this
+    /// snapshot and leaves the write gate on the newer reading. The epoch
+    /// issued for the socket call is recorded either way, so a snapshot
+    /// that started earlier cannot overwrite this one.
+    public func snapshot(readSerial: UInt64?) async throws -> HerdrSnapshot {
+        try await snapshot(readSerial: readSerial, epochBox: nil)
+    }
+
+    private func snapshot(readSerial: UInt64?, epochBox: ProtocolEpochBox?) async throws -> HerdrSnapshot {
+        let box = epochBox ?? ProtocolEpochBox()
+        let snap = try await onIO(readSerial: readSerial, epochBox: box) { [reqClient] in
             let result = try reqClient.sendRead(method: "session.snapshot", params: [:])
             return try LiveHerdrAdapter.parseSnapshot(result)
         }
-        setLatestProtocol(snap.protocol)
+        recordProtocol(snap.protocol, readSerial: readSerial, epoch: box.value)
         return snap
     }
 
@@ -227,6 +354,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     internal static func parseProcessInfo(_ dict: [String: Any]) -> ProcessInfoResult {
         let payload = (dict["process_info"] as? [String: Any]) ?? dict
         let shellPid = JSONNumber.int(payload["shell_pid"]).map(Int32.init(truncatingIfNeeded:))
+        let groupId = Self.parseProcessGroupId(payload["foreground_process_group_id"])
         var procs: [ForegroundProcess] = []
         if let fgList = payload["foreground_processes"] as? [[String: Any]] {
             for p in fgList {
@@ -235,15 +363,51 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                     name: p["name"] as? String ?? "",
                     argv0: p["argv0"] as? String,
                     cmdline: p["cmdline"] as? String,
-                    cwd: p["cwd"] as? String
+                    cwd: p["cwd"] as? String,
+                    argv: Self.parseArgv(p["argv"])
                 ))
             }
         }
-        return ProcessInfoResult(shellPid: shellPid, foregroundProcesses: procs)
+        return ProcessInfoResult(
+            shellPid: shellPid,
+            foregroundProcesses: procs,
+            foregroundProcessGroupId: groupId
+        )
+    }
+
+    /// A positive pid. Zero, a fraction, and a boolean are not a group
+    /// leader: `JSONNumber` already rejects booleans, and a value that
+    /// does not fit in `pid_t` is dropped instead of truncated onto
+    /// another process.
+    private static func parseProcessGroupId(_ value: Any?) -> Int32? {
+        guard let raw = JSONNumber.int(value), let pid = Int32(exactly: raw), pid > 0 else {
+            return nil
+        }
+        return pid
+    }
+
+    /// `argv` is an array of strings. A fixture stores `[String]`; the
+    /// socket stores an `NSArray`, which bridges the same way when every
+    /// element is a string. A number in the array is not a shifted
+    /// argument list, so the whole field is dropped and the crash check
+    /// falls back to `cmdline`. An empty array is the same as a missing one.
+    private static func parseArgv(_ value: Any?) -> [String]? {
+        let strings: [String]
+        if let list = value as? [String] {
+            strings = list
+        } else if let list = value as? [Any] {
+            let parsed = list.compactMap { $0 as? String }
+            guard parsed.count == list.count else { return nil }
+            strings = parsed
+        } else {
+            return nil
+        }
+        guard !strings.isEmpty else { return nil }
+        return strings
     }
 
     public func focus(paneId: String) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             _ = try reqClient.sendWrite(method: "agent.focus", params: Self.focusParams(paneId: paneId))
         }
     }
@@ -257,7 +421,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     // MARK: - Write Methods
 
     public func sendKeys(paneId: String, keys: [String]) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             let params: [String: Any] = [
                 "target": paneId,
                 "keys": keys
@@ -267,7 +431,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     }
 
     public func prompt(paneId: String, text: String) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             // Keep Nudge as one user action, but send text and Enter as two
             // ordered herdr writes. `agent.prompt` is documented as an atomic
             // submission, yet some live agent TUIs only accepted its paste
@@ -283,9 +447,12 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                     params: Self.promptEnterParams(paneId: paneId)
                 )
             } catch {
-                throw NDJSONClientError.invalidResponse(
-                    "text was inserted, but Enter failed: \(String(describing: error))"
-                )
+                // The text write already returned. Wrapping this as
+                // `invalidResponse` made it look like herdr had rejected
+                // the text, and `agent.say` then reported a failed tool.
+                // A retry inserted the text again. The underlying error
+                // stays off this case so a result cannot copy a path.
+                throw NDJSONClientError.promptEnterFailed
             }
         }
     }
@@ -305,13 +472,13 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     }
 
     public func closePane(paneId: String) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             _ = try reqClient.sendWrite(method: "pane.close", params: ["pane_id": paneId])
         }
     }
 
     public func createWorkspace(cwd: String, label: String?) async throws -> WorkspaceCreation {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             var params: [String: Any] = ["cwd": cwd]
             if let label { params["label"] = label }
             let result = try reqClient.sendWrite(method: "workspace.create", params: params)
@@ -337,7 +504,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// source-compatible while allowing MCP session creation to wait for a
     /// freshly-created shell instead of failing on the default short probe.
     public func startAgent(paneId: String, kind: String, name: String, timeoutMs: Int?) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             var params: [String: Any] = [
                 "pane_id": paneId,
                 "kind": kind,
@@ -372,6 +539,12 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         }
     }
 
+    /// `agent.wait` returns `{"type":"agent_info","agent":{…}}` when the
+    /// status matches. A timeout is not `settled: false`: herdr answers
+    /// with an error whose message is `agentWaitTimeoutDetail`. That is
+    /// an unsettled wait, so callers can tell it from a dropped socket.
+    /// Any other error still throws. `until` is matched exactly, which
+    /// is how herdr matches it.
     public func waitStatus(paneId: String, until: [String], timeoutMs: Int) async throws -> Bool {
         try await onIO { [reqClient] in
             let params: [String: Any] = [
@@ -379,23 +552,54 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                 "until": until,
                 "timeout_ms": timeoutMs
             ]
-            let result = try reqClient.sendWrite(method: "agent.wait", params: params)
-            if let settled = result["settled"] as? Bool {
-                if settled { return true }
+            do {
+                let result = try reqClient.sendWrite(method: "agent.wait", params: params)
+                return LiveHerdrAdapter.agentWaitSettled(result, until: until)
+            } catch {
+                if LiveHerdrAdapter.agentWaitTimedOut(error) { return false }
+                throw error
             }
-            if let status = result["status"] as? String {
-                if until.contains(status) { return true }
-            }
-            if let agent = result["agent"] as? [String: Any],
-               let status = agent["agent_status"] as? String {
-                return until.contains(status)
-            }
-            return false
         }
     }
 
+    /// herdr `agent.wait` status timeout. The error code is `timeout`
+    /// and this sentence is the message. A longer sentence, including
+    /// one that only contains these words, is a different failure.
+    static let agentWaitTimeoutDetail = "timed out waiting for agent status"
+
+    /// True when the wait reached a requested status.
+    ///
+    /// The success envelope is `agent_info` with `agent.agent_status`.
+    /// That status wins when it is present, including over a `settled`
+    /// flag on the same object. A result with no agent record still
+    /// accepts `settled: true` or a top-level `status` in `until`.
+    static func agentWaitSettled(_ result: [String: Any], until: [String]) -> Bool {
+        if let agent = result["agent"] as? [String: Any],
+           let status = agent["agent_status"] as? String {
+            return until.contains(status)
+        }
+        if let settled = result["settled"] as? Bool, settled {
+            return true
+        }
+        if let status = result["status"] as? String {
+            return until.contains(status)
+        }
+        return false
+    }
+
+    /// True only for herdr's status-timeout error. A socket timeout,
+    /// `agent_not_running`, and `timed out waiting for output match`
+    /// are different failures and stay thrown.
+    static func agentWaitTimedOut(_ error: Error) -> Bool {
+        guard let client = error as? NDJSONClientError,
+              case .invalidResponse(let detail) = client else {
+            return false
+        }
+        return detail == agentWaitTimeoutDetail
+    }
+
     public func reportMetadata(paneId: String, source: String, tokens: [String: String], ttlMs: Int) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             let params: [String: Any] = [
                 "pane_id": paneId,
                 "source": source,
@@ -420,8 +624,20 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     /// `agent.list` merged with `session.snapshot`'s workspace/tab labels and
     /// focus pointers — the one-stop call sites should use going forward.
-    public func herdSnapshot() async throws -> HerdSnapshot {
-        let result: HerdSnapshot = try await onIO { [reqClient] in
+    ///
+    /// `readSerial` is the capture id from `AgentStore.captureHerdRequest()`
+    /// or the MCP server's herd-read counter, taken before this call.
+    /// Overlapping reads pass it so a slow earlier read cannot put the
+    /// write gate back on an older protocol after a later read — including
+    /// one that followed a herdr restart — has already been recorded. The
+    /// same serial covers a connect failure: `onIO` clears the reading
+    /// under it, and a serial behind one already recorded leaves the later
+    /// reading in place. The enqueue epoch covers a connect failure on a
+    /// call that has no serial (`explain`, `pane.read`, `sendKeys`). Omit
+    /// the serial when there is only one reader.
+    public func herdSnapshot(readSerial: UInt64? = nil) async throws -> HerdSnapshot {
+        let epochBox = ProtocolEpochBox()
+        let result = try await onIO(readSerial: readSerial, epochBox: epochBox) { [reqClient] in
             let agentsResult = try reqClient.sendRead(method: "agent.list", params: [:])
             let agents = LiveHerdrAdapter.parseAgentList(agentsResult)
 
@@ -430,6 +646,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
             let workspaceNames = snap.workspaceNameMap
             let tabNames = snap.tabNameMap
+            let paneLabels = LiveHerdrAdapter.paneLabelIndex(in: snap.panes)
 
             return HerdSnapshot(
                 version: snap.version,
@@ -439,10 +656,12 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                 tabNames: tabNames,
                 focusedWorkspaceId: snap.focusedWorkspaceId,
                 focusedTabId: snap.focusedTabId,
-                focusedPaneId: snap.focusedPaneId
+                focusedPaneId: snap.focusedPaneId,
+                paneLabels: paneLabels.labels,
+                snapshotPaneIds: paneLabels.ids
             )
         }
-        setLatestProtocol(result.protocol)
+        recordProtocol(result.protocol, readSerial: readSerial, epoch: epochBox.value)
         return result
     }
 
@@ -453,11 +672,10 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
         label: String?,
         focus: Bool
     ) async throws -> (tabId: String, rootPaneId: String) {
-        try await onIO { [reqClient] in
-            var params: [String: Any] = ["focus": focus]
-            if let workspaceId { params["workspace_id"] = workspaceId }
-            if let cwd { params["cwd"] = cwd }
-            if let label { params["label"] = label }
+        try await onIO(writes: true) { [reqClient] in
+            let params = LiveHerdrAdapter.createTabParams(
+                workspaceId: workspaceId, cwd: cwd, label: label, focus: focus
+            )
             let result = try reqClient.sendWrite(method: "tab.create", params: params)
             guard let tab = result["tab"] as? [String: Any],
                   let tabId = tab["tab_id"] as? String, !tabId.isEmpty else {
@@ -474,11 +692,27 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// Split beside an existing pane in the same tab and return the new shell
     /// pane. `agent.start` can then launch into that interactive shell.
     public func splitPane(targetPaneId: String, cwd: String?) async throws -> String {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             let params = LiveHerdrAdapter.splitPaneParams(targetPaneId: targetPaneId, cwd: cwd)
             let result = try reqClient.sendWrite(method: "pane.split", params: params)
             return try LiveHerdrAdapter.parsePaneInfoID(result)
         }
+    }
+
+    /// `tab.create` parameters. An empty cwd is omitted, same as a nil
+    /// one: herdr then picks the directory itself instead of starting in
+    /// a path named `""`.
+    internal static func createTabParams(
+        workspaceId: String?,
+        cwd: String?,
+        label: String?,
+        focus: Bool
+    ) -> [String: Any] {
+        var params: [String: Any] = ["focus": focus]
+        if let workspaceId { params["workspace_id"] = workspaceId }
+        if let cwd = AgentLabel.nonempty(cwd) { params["cwd"] = cwd }
+        if let label { params["label"] = label }
+        return params
     }
 
     internal static func splitPaneParams(targetPaneId: String, cwd: String?) -> [String: Any] {
@@ -487,7 +721,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             "direction": "right",
             "focus": true
         ]
-        if let cwd { params["cwd"] = cwd }
+        if let cwd = AgentLabel.nonempty(cwd) { params["cwd"] = cwd }
         return params
     }
 
@@ -501,14 +735,14 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
 
     /// `workspace.focus` -> `{workspace_id}` (schema `WorkspaceTarget`).
     public func focusWorkspace(_ workspaceId: String) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             _ = try reqClient.sendWrite(method: "workspace.focus", params: ["workspace_id": workspaceId])
         }
     }
 
     /// `tab.focus` -> `{tab_id}` (schema `TabTarget`).
     public func focusTab(_ tabId: String) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             _ = try reqClient.sendWrite(method: "tab.focus", params: ["tab_id": tabId])
         }
     }
@@ -517,7 +751,7 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// `agent.focus`, which takes `{target}` and additionally routes agent
     /// attention; this is a plain pane focus.
     public func focusPane(_ paneId: String) async throws {
-        try await onIO { [reqClient] in
+        try await onIO(writes: true) { [reqClient] in
             _ = try reqClient.sendWrite(method: "pane.focus", params: ["pane_id": paneId])
         }
     }
@@ -546,10 +780,25 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// `pane.agent_status_changed` per-pane subscription was for. Deliberately
     /// excludes `pane.agent_status_changed`, `pane.scroll_changed`, and
     /// `pane.output_matched`, which the schema requires a `pane_id` for.
+    ///
+    /// `pane.moved` takes no `pane_id` either. herdr emits it instead of
+    /// close/create, and a cross-workspace move assigns a new pane id there.
+    /// The store and herdmgr already re-key on that event; without it in
+    /// this list the event never arrives. Shepherd then keeps the old id
+    /// until the next poll and alerts again for the same block. herdmgr's
+    /// status poll does not adopt a new id, so the row stays on the old one
+    /// until this event.
+    ///
+    /// `pane.focused`, `workspace.focused`, and `tab.focused` are not in
+    /// this list. They do not add, drop, or re-key a row. herdmgr treated
+    /// `workspace.focused` as a layout change, so every focus refetched
+    /// the herd and armed the move-dwell baseline from that click. The
+    /// parser still drops a container focus if one arrives. `pane.focused`
+    /// stays a focus event and changes no row.
     internal static let globalSubscriptionTypes: [String] = [
-        "pane.updated", "pane.created", "pane.closed",
-        "pane.exited", "pane.focused", "pane.agent_detected",
-        "workspace.created", "workspace.closed", "workspace.renamed", "workspace.focused",
+        "pane.updated", "pane.created", "pane.closed", "pane.moved",
+        "pane.exited", "pane.agent_detected",
+        "workspace.created", "workspace.closed", "workspace.renamed",
         "tab.created", "tab.closed", "tab.renamed"
     ]
 
@@ -673,7 +922,8 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
                     stateChangeSeq: JSONNumber.uint64(p["state_change_seq"]),
                     cwd: p["cwd"] as? String,
                     foregroundCwd: p["foreground_cwd"] as? String,
-                    revision: JSONNumber.uint64(p["revision"])
+                    revision: JSONNumber.uint64(p["revision"]),
+                    label: p["label"] as? String
                 ))
             }
         }
@@ -737,14 +987,40 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             guard !paneId.isEmpty else { return .ignored }
             return .paneExited(paneId: paneId)
         case "pane_moved":
-            guard !paneId.isEmpty else { return .ignored }
-            let wsId = pane["workspace_id"] as? String ?? data["workspace_id"] as? String
-            let tabId = pane["tab_id"] as? String ?? data["tab_id"] as? String
-            return .paneMoved(paneId: paneId, workspaceId: wsId, tabId: tabId)
+            // Real envelope: previous_pane_id plus the moved PaneInfo. The
+            // new id lives on that pane; a cross-workspace move changes it.
+            // A flat record that only has pane_id is the same pane renamed
+            // in place.
+            let previous = data["previous_pane_id"] as? String ?? ""
+            let info = parseAgentInfo(pane)
+            guard !info.paneId.isEmpty else { return .ignored }
+            return .paneMoved(
+                previousPaneId: previous,
+                pane: info,
+                createdWorkspaceLabel: Self.createdContainerLabel(data["created_workspace"]),
+                createdTabLabel: Self.createdContainerLabel(data["created_tab"])
+            )
+        case "workspace_renamed":
+            // The label is the whole event. Folding it into a refetch drops
+            // the name when the request socket is the one that is down.
+            let workspaceId = data["workspace_id"] as? String ?? ""
+            let workspaceLabel = data["label"] as? String ?? ""
+            guard !workspaceId.isEmpty, !workspaceLabel.isEmpty else { return .ignored }
+            return .workspaceRenamed(workspaceId: workspaceId, label: workspaceLabel)
+        case "tab_renamed":
+            let renamedTabId = data["tab_id"] as? String ?? ""
+            let tabLabel = data["label"] as? String ?? ""
+            guard !renamedTabId.isEmpty, !tabLabel.isEmpty else { return .ignored }
+            return .tabRenamed(tabId: renamedTabId, label: tabLabel)
+        case "workspace_focused", "tab_focused":
+            // Focus does not add or drop a container. Classifying it as
+            // `workspacesChanged` made herdmgr refetch the herd on every
+            // click and remember that refetch as the move-dwell baseline.
+            return .ignored
         case "workspace_created", "workspace_updated", "workspace_metadata_updated",
-             "workspace_closed", "workspace_renamed", "workspace_moved", "workspace_focused",
+             "workspace_closed", "workspace_moved",
              "worktree_created", "worktree_opened", "worktree_removed",
-             "tab_created", "tab_closed", "tab_renamed", "tab_moved", "tab_focused",
+             "tab_created", "tab_closed", "tab_moved",
              "layout_updated":
             return .workspacesChanged
         default:
@@ -752,6 +1028,15 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             // yet — harmless to drop) and any genuinely unknown event.
             return .ignored
         }
+    }
+
+    /// `created_workspace` / `created_tab` on a pane move. The label is what
+    /// the panel should show; the id is already on the moved pane.
+    private static func createdContainerLabel(_ value: Any?) -> String? {
+        guard let dict = value as? [String: Any],
+              let label = dict["label"] as? String,
+              !label.isEmpty else { return nil }
+        return label
     }
 
     /// Shared parser for both `agent.list`'s `AgentInfo` entries and the
@@ -788,8 +1073,29 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
             tokens: dict["tokens"] as? [String: String] ?? [:],
             stateLabels: dict["state_labels"] as? [String: String] ?? [:],
             interactiveReady: dict["interactive_ready"] as? Bool ?? false,
-            launchPending: dict["launch_pending"] as? Bool ?? false
+            launchPending: dict["launch_pending"] as? Bool ?? false,
+            paneLabel: AgentLabel.nonempty(dict["label"] as? String)
         )
+    }
+
+    /// Pane labels from a session snapshot. Every nonempty pane id is
+    /// listed, so a pane with no `label` is a clear. An empty string is
+    /// not a label. A later duplicate id wins.
+    internal static func paneLabelIndex(
+        in panes: [HerdrSnapshot.PaneInfo]
+    ) -> (labels: [String: String], ids: Set<String>) {
+        var labels: [String: String] = [:]
+        var ids = Set<String>()
+        for pane in panes {
+            guard !pane.paneId.isEmpty else { continue }
+            ids.insert(pane.paneId)
+            if let label = AgentLabel.nonempty(pane.label) {
+                labels[pane.paneId] = label
+            } else {
+                labels.removeValue(forKey: pane.paneId)
+            }
+        }
+        return (labels, ids)
     }
 
     /// Parses `agent.list`'s `{"agents":[AgentInfo, ...]}` result, dropping
@@ -825,14 +1131,23 @@ public final class LiveHerdrAdapter: HerdrAdapter, @unchecked Sendable {
     /// herdr's sockets are one-shot and MCP runs no subscription loop, so a
     /// herdr restarted between two tool calls (or during a confirmation
     /// wait) is invisible until a request fails. The next write was gated
-    /// on the previous build's protocol. Any failure to re-read leaves the
-    /// protocol unknown (writes off) with herdr's error in the reason.
-    public func refreshHealth() async -> AdapterHealth {
+    /// on the previous build's protocol. Any failure to re-read leaves this
+    /// caller with the protocol unknown (writes off) and herdr's error in
+    /// the reason. `readSerial` orders the reading with overlapping herd
+    /// snapshots. A serial behind one already recorded does not move the
+    /// stored gate, and a success returns that gate rather than the protocol
+    /// this response happened to carry: a slower earlier refresh must not
+    /// enable writes after a later read saw a downgrade or a dead socket.
+    /// The snapshot's enqueue epoch does the same when this refresh has no
+    /// serial. The failure records under the epoch the attempt started
+    /// with, so a read that started later and already won is left alone.
+    public func refreshHealth(readSerial: UInt64? = nil) async -> AdapterHealth {
+        let epochBox = ProtocolEpochBox()
         do {
-            let snap = try await snapshot()
-            return Self.health(forProtocol: snap.protocol)
+            _ = try await snapshot(readSerial: readSerial, epochBox: epochBox)
+            return health()
         } catch {
-            clearProtocolReading()
+            recordProtocol(0, readSerial: readSerial, epoch: epochBox.value)
             let unknown = Self.health(forProtocol: 0)
             return AdapterHealth(
                 protocolVersion: unknown.protocolVersion,

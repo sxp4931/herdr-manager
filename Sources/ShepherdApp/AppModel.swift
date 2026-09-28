@@ -94,6 +94,12 @@ final class AppModel {
     /// the permission prompt, not two.
     private(set) var inFlightAgentWrites: Set<AgentID> = []
 
+    /// Sessions whose Approve or Deny is in flight. A move publishes a new
+    /// pane id while the re-read is still out; the id set alone would let a
+    /// click on that row send a second Enter. Not panel state.
+    @ObservationIgnored
+    private var inFlightAnswerSessions: Set<String> = []
+
     /// Cached adapter health for the footer badge. Refreshed on every
     /// successful snapshot so protocol/version mismatches surface quickly.
     var adapterHealth: AdapterHealth?
@@ -208,20 +214,80 @@ final class AppModel {
     /// flow needs. The one place `HerdSnapshot` -> UI state happens, so every
     /// resync path (initial connect, periodic poll, manual resync, reconnect)
     /// stays in lockstep.
-    private func applyHerd(_ snapshot: HerdSnapshot) {
-        let transitions = store.applyHerdSnapshot(snapshot)
+    ///
+    /// `requestedAt` was captured before the request. A poll and a resync
+    /// can both be in flight; a response from the earlier capture must not
+    /// paint the pre-event row back, and must not replace a read that was
+    /// captured later even when no event landed between them. The new-agent
+    /// caches follow the store: a dropped snapshot leaves them alone.
+    private func applyHerd(_ snapshot: HerdSnapshot, requestedAt: HerdRequestStamp) async {
+        let transitions = store.applyHerdSnapshot(
+            snapshot,
+            requestedAtEpoch: requestedAt.epoch,
+            requestedAtSerial: requestedAt.serial
+        )
+        guard store.lastAppliedHerdRequestSerial == requestedAt.serial else { return }
         lastHerdAgents = snapshot.agents
-        lastTabNames = snapshot.tabNames
-        workspaceOptions = snapshot.workspaceNames
-            .map { WorkspaceOption(id: $0.key, name: $0.value) }
-            .sorted { $0.name < $1.name }
+        // The store keeps a rename a poll captured earlier must not undo.
+        // The menu reads that, not the raw snapshot maps.
+        adoptContainerLabels()
         considerFirstSuccess()
+        // Copied before any await. A later snapshot replaces `sessionMoves`.
+        let moves = store.sessionMoves
+        // The poll adopted the new pane id before `pane.moved`. Follow it
+        // now: a diagnosis pass can run before that event, and it would
+        // otherwise alert the silence again under the new id. Selection
+        // would stay on the id the poll already dropped.
+        for (from, to) in moves {
+            if selectedAgentId == from {
+                selectedAgentId = to
+            }
+            if let agent = store.agents[to], AttentionTriage.isActionablySilent(agent) {
+                silentAlerts.retarget(from: from, to: to)
+            }
+        }
         // When a poll sees a transition before its event, the event finds
         // the status unchanged and reports nothing; this is the only place
         // that transition surfaces. Seen by both, it is reported once.
         for transition in transitions {
             notifyAndDiagnoseIfNeeded(transition)
         }
+        // One call for the whole poll. Awaiting each replace lets
+        // `pane.moved` vacant-retarget a later pane, and lets the heartbeat
+        // prune that pane's old id, before its replace is queued. The
+        // replace then finds nothing to carry and deletes the screen.
+        if !moves.isEmpty {
+            let carried = await poller.retarget(replacing: moves)
+            for (to, observed) in carried {
+                store.applyObservedOutput([to: observed])
+            }
+        }
+    }
+
+    /// Workspace and tab names for the new-agent menu. Copied from the store
+    /// so a rename the store pinned is the name the menu shows, including
+    /// after a poll that was already in flight when the rename arrived.
+    private func adoptContainerLabels() {
+        let tabs = store.tabLabels
+        if lastTabNames != tabs {
+            lastTabNames = tabs
+        }
+        let options = store.workspaceLabels
+            .map { WorkspaceOption(id: $0.key, name: $0.value) }
+            .sorted { $0.name < $1.name }
+        if workspaceOptions != options {
+            workspaceOptions = options
+        }
+    }
+
+    /// Read the herd, remembering the event count and the capture order
+    /// from before the request left. `applyHerd` uses both so a response
+    /// already in flight cannot roll a later event or a later read back.
+    /// The serial also keeps the adapter's protocol reading on the later read.
+    private func herdSnapshotForApply() async throws -> (snapshot: HerdSnapshot, requestedAt: HerdRequestStamp) {
+        let requestedAt = store.captureHerdRequest()
+        let snapshot = try await adapter.herdSnapshot(readSerial: requestedAt.serial)
+        return (snapshot, requestedAt)
     }
 
     // MARK: - Lifecycle
@@ -320,9 +386,9 @@ final class AppModel {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 guard let self else { return }
                 do {
-                    let snapshot = try await self.adapter.herdSnapshot()
+                    let (snapshot, requestedAt) = try await self.herdSnapshotForApply()
                     // Probe succeeded -> we are (back) online.
-                    self.applyHerd(snapshot)
+                    await self.applyHerd(snapshot, requestedAt: requestedAt)
                     self.setConnection(.connected)
                     self.setHealth(self.adapter.health())
                     self.updateDwellForAllAgents()
@@ -356,8 +422,8 @@ final class AppModel {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let snapshot = try await self.adapter.herdSnapshot()
-                self.applyHerd(snapshot)
+                let (snapshot, requestedAt) = try await self.herdSnapshotForApply()
+                await self.applyHerd(snapshot, requestedAt: requestedAt)
                 self.setConnection(.connected)
                 self.setHealth(self.adapter.health())
                 self.updateDwellForAllAgents()
@@ -379,8 +445,8 @@ final class AppModel {
         setConnection(.connecting)
         do {
             try await adapter.connect()
-            let snapshot = try await adapter.herdSnapshot()
-            applyHerd(snapshot)
+            let (snapshot, requestedAt) = try await herdSnapshotForApply()
+            await applyHerd(snapshot, requestedAt: requestedAt)
             setConnection(.connected)
             setHealth(adapter.health())
             updateDwellForAllAgents()
@@ -547,8 +613,8 @@ final class AppModel {
                 Task { [weak self] in
                     guard let self else { return }
                     do {
-                        let snapshot = try await self.adapter.herdSnapshot()
-                        self.applyHerd(snapshot)
+                        let (snapshot, requestedAt) = try await self.herdSnapshotForApply()
+                        await self.applyHerd(snapshot, requestedAt: requestedAt)
                         self.setConnection(.connected)
                         self.setHealth(self.adapter.health())
                         self.updateDwellForAllAgents()
@@ -568,16 +634,116 @@ final class AppModel {
                 break
             }
 
+            // A cross-workspace move publishes a new pane id. Follow it
+            // before the store drops the old one, or the highlight and Jump
+            // stay pointed at a pane that is no longer in the herd.
+            retargetSelection(for: event)
             // React only to status changes the store accepted. `pane_updated`
             // is what herdr sends on protocol 17; `.agentStatusChanged` is the
             // legacy/dotted shape. Comparing the raw event against the
             // pre-event status used to notify for events the store dropped
             // (stale seq, untracked pane), so a blocked alert could fire for a
             // pane the panel still showed as working.
-            if let transition = store.applyEvent(event) {
+            // Captured before apply drops the old id. The heartbeat hashes
+            // by pane id; the move has to carry that hash or the next poll
+            // treats the new id as a first look and swallows its screen.
+            let movedHeartbeat = heartbeatRetarget(for: event)
+            let transition = store.applyEvent(event)
+            if case .workspaceRenamed = event {
+                adoptContainerLabels()
+            } else if case .tabRenamed = event {
+                adoptContainerLabels()
+            }
+            // After the store re-keys. A move it ignored leaves no row, so
+            // the alert stays on the old id and the next pass drops it. A
+            // move that keeps the quiet row would otherwise look like a new
+            // pane and alert again for the same silence.
+            retargetSilentAlert(for: event)
+            if let movedHeartbeat, store.agents[movedHeartbeat.to] != nil {
+                // A change compared before this move is keyed by the old
+                // id. Apply the time the retarget carried, or the row keeps
+                // the clock from before the output.
+                let observed: Date?
+                switch movedHeartbeat.kind {
+                case .replace:
+                    observed = await poller.retarget(from: movedHeartbeat.from, to: movedHeartbeat.to)
+                case .fillVacant:
+                    // The poll already published this id and moved the hash.
+                    // A hash that arrived on the new id since then is the
+                    // mover's screen; do not put the older one back.
+                    observed = await poller.retargetVacant(from: movedHeartbeat.from, to: movedHeartbeat.to)
+                }
+                if let observed {
+                    store.applyObservedOutput([movedHeartbeat.to: observed])
+                }
+            }
+            if let transition {
                 notifyAndDiagnoseIfNeeded(transition)
             }
         }
+    }
+
+    private func retargetSelection(for event: HerdrEvent) {
+        guard case .paneMoved(let previousPaneId, let info, _, _) = event else { return }
+        guard !info.paneId.isEmpty, let kind = info.agent, !kind.isEmpty else { return }
+        let previous = AgentID(previousPaneId.isEmpty ? info.paneId : previousPaneId)
+        let newId = AgentID(info.paneId)
+        // The poll may already have dropped the old id. Selection still
+        // names it, and the new id is the row that continued.
+        guard previous != newId, selectedAgentId == previous else { return }
+        guard store.agents[previous] != nil || store.agents[newId] != nil else { return }
+        selectedAgentId = newId
+    }
+
+    /// How a move should treat the detection hash.
+    private struct HeartbeatCarry {
+        enum Kind {
+            /// The old id is still in the store. Its hash replaces whatever
+            /// the destination stored for a previous occupant.
+            case replace
+            /// A poll already adopted the new id, so the old row is gone.
+            /// Fill only when the destination has not been hashed yet.
+            case fillVacant
+        }
+
+        let kind: Kind
+        let from: AgentID
+        let to: AgentID
+    }
+
+    /// The pane a move will re-key, before the store drops the old id.
+    ///
+    /// A shell move is not included. A move of a pane the store is not
+    /// tracking is included only when the new id is already a row: the poll
+    /// adopted it, and the hash still needs a chance to follow.
+    private func heartbeatRetarget(for event: HerdrEvent) -> HeartbeatCarry? {
+        guard case .paneMoved(let previousPaneId, let info, _, _) = event else { return nil }
+        guard !info.paneId.isEmpty, let kind = info.agent, !kind.isEmpty else { return nil }
+        let previous = AgentID(previousPaneId.isEmpty ? info.paneId : previousPaneId)
+        let newId = AgentID(info.paneId)
+        guard previous != newId else { return nil }
+        if store.agents[previous] != nil {
+            return HeartbeatCarry(kind: .replace, from: previous, to: newId)
+        }
+        if store.agents[newId] != nil {
+            return HeartbeatCarry(kind: .fillVacant, from: previous, to: newId)
+        }
+        return nil
+    }
+
+    /// Carry a silence already announced onto the id a move just published.
+    /// Same-id moves, moves that leave no row, and moves that are no longer
+    /// that silence are left alone. A status change starts a new episode;
+    /// pinning the old `since` on it would swallow the next quiet.
+    private func retargetSilentAlert(for event: HerdrEvent) {
+        guard case .paneMoved(let previousPaneId, let info, _, _) = event else { return }
+        guard !info.paneId.isEmpty else { return }
+        let previous = AgentID(previousPaneId.isEmpty ? info.paneId : previousPaneId)
+        let newId = AgentID(info.paneId)
+        guard previous != newId,
+              let agent = store.agents[newId],
+              AttentionTriage.isActionablySilent(agent) else { return }
+        silentAlerts.retarget(from: previous, to: newId)
     }
 
     /// Shared "did this agent just become blocked/start working" reaction for
@@ -645,29 +811,59 @@ final class AppModel {
     /// reading the write gate uses, so a herdr restart since the last poll
     /// is seen too.
     private func sendKeys(_ agent: Agent, keys: [String], actionName: String) {
+        // Before the task. A move can take this pane's session off the old
+        // id as soon as sendKeys returns to the event loop, and the re-read
+        // then has to recognize the occupant on the new id. The same copy
+        // blocks a second click on the row after that move.
+        let followedSession = store.sessionIdentity(for: agent.id)
         guard !inFlightAgentWrites.contains(agent.id) else { return }
+        if let followedSession, inFlightAnswerSessions.contains(followedSession) {
+            setLastError("A response is already being sent to this agent")
+            return
+        }
         inFlightAgentWrites.insert(agent.id)
-        Task { [weak self] in
-            defer { self?.inFlightAgentWrites.remove(agent.id) }
+        if let followedSession { inFlightAnswerSessions.insert(followedSession) }
+        Task { [weak self, followedSession] in
+            defer {
+                guard let self else { return }
+                self.inFlightAgentWrites.remove(agent.id)
+                if let followedSession {
+                    self.inFlightAnswerSessions.remove(followedSession)
+                }
+            }
             guard let self else { return }
             do {
-                let snapshot = try await self.adapter.herdSnapshot()
+                let (snapshot, requestedAt) = try await self.herdSnapshotForApply()
                 let health = self.adapter.health()
                 self.setHealth(health)
+                // A poll captured after this read can already be on screen.
+                // Sending Enter from the older read would answer a prompt
+                // the panel no longer shows.
+                guard self.store.lastAppliedHerdRequestSerial <= requestedAt.serial else {
+                    self.setLastError("\(actionName) skipped: a newer read of the herd landed first")
+                    return
+                }
                 guard health.writesEnabled else {
                     self.setLastError("\(actionName) skipped: \(health.reason ?? "writes disabled")")
                     return
                 }
-                if let refusal = PromptAnswerCheck.refusal(answering: agent, in: snapshot) {
+                switch PromptAnswerCheck.destination(
+                    answering: agent,
+                    in: snapshot,
+                    sessionIdentity: followedSession
+                ) {
+                case .failure(let refusal):
                     // Show what herdr reports now, so the row matches the
                     // reason and a retry uses the current episode.
-                    self.applyHerd(snapshot)
+                    await self.applyHerd(snapshot, requestedAt: requestedAt)
                     self.updateDwellForAllAgents()
                     self.setLastError("\(actionName) skipped: \(refusal.message)")
-                    return
+                case .success(let paneId):
+                    // `paneId` is the row's id, or the one pane its session
+                    // moved to. The row's id is the pane the agent left.
+                    try await self.adapter.sendKeys(paneId: paneId, keys: keys)
+                    self.setLastError(nil)
                 }
-                try await self.adapter.sendKeys(paneId: agent.id.raw, keys: keys)
-                self.setLastError(nil)
             } catch {
                 self.setLastError("\(actionName) failed: \(error.localizedDescription)")
             }
@@ -689,6 +885,10 @@ final class AppModel {
             do {
                 try await self.adapter.prompt(paneId: agent.id.raw, text: text)
                 self.setLastError(nil)
+            } catch NDJSONClientError.promptEnterFailed {
+                self.setLastError(
+                    "Nudge inserted the text, but Enter did not finish. Check the pane before sending it again."
+                )
             } catch {
                 self.setLastError("Nudge failed: \(error.localizedDescription)")
             }
@@ -737,16 +937,17 @@ final class AppModel {
         }
     }
 
-    /// Best-guess cwd for a new tab in `workspaceId`: the foreground cwd of
-    /// whichever pane in that workspace herdr currently reports as focused,
+    /// Best-guess cwd for a new tab in `workspaceId`: the working directory
+    /// of whichever pane in that workspace herdr currently reports as focused,
     /// falling back to any pane in the workspace, falling back to nil (herdr
-    /// then defaults the cwd itself). `agent.list`/`HerdSnapshot` don't carry
-    /// a per-workspace "last focused pane" concept beyond the single globally
-    /// focused pane, so this is a reasonable approximation, not a guarantee.
+    /// then defaults the cwd itself). An empty `foreground_cwd` is not that
+    /// directory. `agent.list`/`HerdSnapshot` don't carry a per-workspace
+    /// "last focused pane" concept beyond the single globally focused pane,
+    /// so this is a reasonable approximation, not a guarantee.
     private func cwdHint(forWorkspace workspaceId: String) -> String? {
         let inWorkspace = lastHerdAgents.filter { $0.workspaceId == workspaceId }
         let candidate = inWorkspace.first(where: { $0.focused }) ?? inWorkspace.first
-        return candidate?.foregroundCwd ?? candidate?.cwd
+        return candidate?.workingDirectory
     }
 
     func placementOptions(forWorkspace workspaceId: String) -> [AgentPlacementOption] {
@@ -771,7 +972,7 @@ final class AppModel {
 
     private func cwdHint(forPane paneId: String) -> String? {
         guard let pane = lastHerdAgents.first(where: { $0.paneId == paneId }) else { return nil }
-        return pane.foregroundCwd ?? pane.cwd
+        return pane.workingDirectory
     }
 
     /// Start in either a new tab or a split beside `targetPaneId`. Both paths
@@ -924,8 +1125,10 @@ final class AppModel {
     }
 
     /// Derive a stable occupant fingerprint from an Agent. Mirrors
-    /// `DwellTracker.fingerprint(for:)` which is `internal` to Core and
-    /// therefore not directly callable from the app module.
+    /// `DwellTracker.fingerprint(for:)`, which is `internal` to Core and
+    /// therefore not directly callable from the app module. Session
+    /// identity is not part of this string: the two have to stay identical,
+    /// and a settings override is keyed by it.
     private static func fingerprintForAgent(_ agent: Agent) -> String {
         switch agent.kind {
         case .claude: return "claude"

@@ -16,6 +16,14 @@ public enum NDJSONClientError: Error, Sendable, CustomStringConvertible, Localiz
     case connectionClosed
     case invalidResponse(String)
     case timeout
+    /// `prompt` wrote the text. The Enter that submits it did not finish.
+    /// No underlying error is attached: that string can carry a socket
+    /// path, and a tool result must not copy it. Callers treat this as
+    /// text already in the pane, not as a write that never started.
+    case promptEnterFailed
+    /// The protocol on the write gate does not allow a mutation. Thrown
+    /// before any byte of that request is written.
+    case writesDisabled(String)
 
     public var description: String {
         switch self {
@@ -33,6 +41,10 @@ public enum NDJSONClientError: Error, Sendable, CustomStringConvertible, Localiz
             return "invalid response: \(detail)"
         case .timeout:
             return "socket I/O timed out"
+        case .promptEnterFailed:
+            return "text was inserted, but Enter failed"
+        case .writesDisabled(let reason):
+            return "writes disabled: \(reason)"
         }
     }
 
@@ -40,6 +52,15 @@ public enum NDJSONClientError: Error, Sendable, CustomStringConvertible, Localiz
     /// NSError's generic "The operation couldn't be completed" and drops
     /// the socket path, errno, and herdr's own message.
     public var errorDescription: String? { description }
+
+    /// Prefix of an `invalidResponse` detail that means the response line
+    /// was drained and dropped. The request may already have been applied.
+    /// A herdr error message does not start with this.
+    public static let oversizedLineDetailPrefix = "NDJSON line exceeded "
+
+    public static func isOversizedLineDetail(_ detail: String) -> Bool {
+        detail.hasPrefix(oversizedLineDetailPrefix)
+    }
 }
 
 /// Bounded NDJSON framing. A missing newline or a multi-megabyte pane.read
@@ -105,6 +126,11 @@ enum NDJSONFraming {
 
 public final class NDJSONClient: @unchecked Sendable {
     private let socketPath: String
+    /// How long a request socket waits for the next byte, in seconds.
+    /// The subscription socket passes `0`. `agent.wait` produces none
+    /// until the agent settles, so that wait has to finish before this
+    /// or the read returns `.timeout`.
+    public static let requestIOTimeoutSeconds = 30
     /// Socket-level send/receive timeout in seconds. `0` disables the timeout
     /// (used by the dedicated subscription client, whose event stream is
     /// push-based and legitimately blocks between events). A positive value
@@ -124,7 +150,7 @@ public final class NDJSONClient: @unchecked Sendable {
     nonisolated(unsafe) private var skippingOversize = false
     nonisolated(unsafe) private var isConnected = false
 
-    public init(socketPath: String, ioTimeoutSeconds: Int = 30) {
+    public init(socketPath: String, ioTimeoutSeconds: Int = NDJSONClient.requestIOTimeoutSeconds) {
         self.socketPath = socketPath
         self.ioTimeoutSeconds = ioTimeoutSeconds
     }
@@ -429,7 +455,7 @@ public final class NDJSONClient: @unchecked Sendable {
             case .skippedOversized:
                 if skipOversized { continue }
                 throw NDJSONClientError.invalidResponse(
-                    "NDJSON line exceeded \(NDJSONFraming.maxLineBytes) bytes"
+                    "\(NDJSONClientError.oversizedLineDetailPrefix)\(NDJSONFraming.maxLineBytes) bytes"
                 )
             case .stillSkipping, .needMore:
                 break

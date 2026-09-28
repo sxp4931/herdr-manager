@@ -15,19 +15,25 @@ public struct DwellEntry: Sendable {
     /// a stale dwell episode after the pane has been reused by a different
     /// agent session or the status episode has advanced.
     public let stateChangeSeq: UInt64
+    /// Session identity without the pane id. Nil on a file written before
+    /// this was stored, and when the pane had no session. It is not part
+    /// of `occupantFingerprint`: that string is the settings override key.
+    public let sessionIdentity: String?
 
     public init(
         status: AgentStatus,
         enteredAt: Date,
         lastOutputAt: Date?,
         occupantFingerprint: String = "",
-        stateChangeSeq: UInt64 = 0
+        stateChangeSeq: UInt64 = 0,
+        sessionIdentity: String? = nil
     ) {
         self.status = status
         self.enteredAt = enteredAt
         self.lastOutputAt = lastOutputAt
         self.occupantFingerprint = occupantFingerprint
         self.stateChangeSeq = stateChangeSeq
+        self.sessionIdentity = SessionIdentity.carried(stored: nil, incoming: sessionIdentity)
     }
 
     public var dwellDuration: TimeInterval {
@@ -73,7 +79,8 @@ public final class DwellTracker: @unchecked Sendable {
         enteredAt: Date,
         lastOutputAt: Date?,
         occupantFingerprint: String = "",
-        stateChangeSeq: UInt64 = 0
+        stateChangeSeq: UInt64 = 0,
+        sessionIdentity: String? = nil
     ) {
         lock.lock()
         defer { lock.unlock() }
@@ -82,7 +89,8 @@ public final class DwellTracker: @unchecked Sendable {
             enteredAt: enteredAt,
             lastOutputAt: lastOutputAt,
             occupantFingerprint: occupantFingerprint,
-            stateChangeSeq: stateChangeSeq
+            stateChangeSeq: stateChangeSeq,
+            sessionIdentity: sessionIdentity
         )
     }
 
@@ -97,7 +105,8 @@ public final class DwellTracker: @unchecked Sendable {
                 enteredAt: agent.enteredAt,
                 lastOutputAt: agent.lastOutputAt,
                 occupantFingerprint: Self.fingerprint(for: agent),
-                stateChangeSeq: agent.stateChangeSeq
+                stateChangeSeq: agent.stateChangeSeq,
+                sessionIdentity: agent.sessionIdentity
             )
         }
         lock.lock()
@@ -193,9 +202,14 @@ public final class DwellTracker: @unchecked Sendable {
     /// after a herdr restart, a reused pane id running the same kind would
     /// match on kind alone and inherit a dead episode's `enteredAt`. A
     /// non-zero seq still collides when the reused pane reaches the same
-    /// seq and status; `agent.list` carries no server instance id to rule
-    /// that out, and the cost is one wrong dwell start, which resets at the
-    /// pane's next transition.
+    /// seq and status and neither side has a session. When both the file
+    /// and the live row name one, a different value is a different
+    /// occupant and the episode is not restored. A file written before
+    /// sessions were stored has none, and still matches on kind and seq.
+    /// A live row that has not named a session yet does too: omitting the
+    /// field is not a new person. `agent.list` carries no server instance
+    /// id, so a restart that comes back at the same seq with the same
+    /// session is still that episode.
     ///
     /// - Parameter currentAgents: The live agent map to validate against.
     ///   Typically `AgentStore.agents` at the time of restore.
@@ -213,11 +227,18 @@ public final class DwellTracker: @unchecked Sendable {
                 let agentId = item.agentId
                 guard let current = currentAgents[agentId] else { continue }
 
-                // Restore guard: fingerprint, status, and a real seq must match.
+                // Restore guard: fingerprint, status, and a real seq must
+                // match. A session on both sides has to match too. A
+                // missing side is the older file, or a list that left
+                // the field off, and is not a different occupant.
                 guard current.stateChangeSeq != 0,
                       current.stateChangeSeq == item.stateChangeSeq,
                       current.status == item.status,
-                      Self.fingerprint(for: current) == item.occupantFingerprint
+                      Self.fingerprint(for: current) == item.occupantFingerprint,
+                      !SessionIdentity.replaced(
+                        stored: item.sessionIdentity,
+                        incoming: current.sessionIdentity
+                      )
                 else { continue }
 
                 restored[agentId] = DwellEntry(
@@ -225,7 +246,8 @@ public final class DwellTracker: @unchecked Sendable {
                     enteredAt: item.enteredAt,
                     lastOutputAt: item.lastOutputAt,
                     occupantFingerprint: item.occupantFingerprint,
-                    stateChangeSeq: item.stateChangeSeq
+                    stateChangeSeq: item.stateChangeSeq,
+                    sessionIdentity: item.sessionIdentity
                 )
             }
         }
@@ -249,7 +271,9 @@ public final class DwellTracker: @unchecked Sendable {
 
     /// Derive a stable occupant fingerprint from an Agent. Uses the kind's
     /// raw description so two different agent runtimes (e.g. "claude" vs
-    /// "opencode") never collide on the same pane.
+    /// "opencode") never collide on the same pane. Session identity is
+    /// stored beside this string. Folding it in would change the settings
+    /// override key, which is this same string.
     internal static func fingerprint(for agent: Agent) -> String {
         switch agent.kind {
         case .claude: return "claude"
@@ -270,6 +294,7 @@ public final class DwellTracker: @unchecked Sendable {
         let lastOutputAt: Date?
         let occupantFingerprint: String
         let stateChangeSeq: UInt64
+        let sessionIdentity: String?
 
         init(agentId: AgentID, entry: DwellEntry) {
             self.agentId = agentId
@@ -278,6 +303,7 @@ public final class DwellTracker: @unchecked Sendable {
             self.lastOutputAt = entry.lastOutputAt
             self.occupantFingerprint = entry.occupantFingerprint
             self.stateChangeSeq = entry.stateChangeSeq
+            self.sessionIdentity = entry.sessionIdentity
         }
     }
 
