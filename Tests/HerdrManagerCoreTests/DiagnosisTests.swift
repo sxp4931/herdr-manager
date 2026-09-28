@@ -5348,7 +5348,8 @@ struct DiagnoserCpuSamplePidTests {
 
         // Node 22.23 rejects the operand only when `--test` is on, and
         // only the last operand counts. `none` and `process` run.
-        // `--test=` is still an exit on its own, before this check.
+        // A `--test=` the child still inherits skips the file body.
+        // `--no-test` and isolation `none` are the cases that run it.
         let rejected: [(String, [String])] = [
             ("nope", ["node", "--test", "--experimental-test-isolation", "nope", "/usr/local/bin/codex"]),
             ("nope-eq", ["nodejs", "--test", "--experimental-test-isolation=nope", "/tmp/codex"]),
@@ -5465,7 +5466,8 @@ struct DiagnoserCpuSamplePidTests {
         // Node 22.23 exits on `--test` with `--interactive` / `-i`, and
         // on `--test` with `--watch-path`. The attached boolean word is
         // ignored, so `--interactive=false` is still interactive. The
-        // last `--no-` wins. `--test=` is still an exit on its own.
+        // last `--no-` wins. A `--test=` the child still inherits skips
+        // the file; `--no-test` and isolation `none` run it.
         let rejected: [(String, [String])] = [
             ("interactive", ["node", "--test", "--interactive", "/usr/local/bin/codex"]),
             ("interactive-first", ["nodejs", "--interactive", "--test", "/tmp/codex"]),
@@ -8950,6 +8952,148 @@ struct DiagnoserUnclassifiableScopeTests {
 
         let python = process(
             4, "python3", argv: ["python3", "--run", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
+    }
+
+    @Test("a node --test= the child still inherits is not the agent script")
+    func nodeTestEqualsSkipsTheFileUnlessCleared() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23 strips a bare `--test` from the child's execArgv
+        // and leaves `--test=`. That child is a test runner with
+        // NODE_TEST_CONTEXT set, so it does not execute the file.
+        // `--no-test` clears it. Isolation `none` runs the file in
+        // this process. A bare `--test` after the clear is the parent
+        // harness, and its child does run the file.
+        let rejected: [(String, [String])] = [
+            ("equals", ["node", "--test=true", "/usr/local/bin/codex"]),
+            ("empty", ["nodejs", "--test=", "/tmp/codex"]),
+            ("false", ["node.exe", "--test=false", "/usr/local/bin/codex"]),
+            ("zero", ["node", "--test=0", "/tmp/codex"]),
+            ("then-test", ["nodejs", "--test=true", "--test", "/usr/local/bin/codex"]),
+            ("reenabled", ["node", "--no-test", "--test=true", "/tmp/codex"]),
+            ("process", [
+                "node.exe", "--experimental-test-isolation=process", "--test=true",
+                "/usr/local/bin/codex",
+            ]),
+            ("none-then-process", [
+                "node", "--test=true", "--experimental-test-isolation=none",
+                "--experimental-test-isolation=process", "/tmp/codex",
+            ]),
+            ("cleared-then-equals", [
+                "nodejs", "--test=true", "--no-test", "--test=false", "/usr/local/bin/codex",
+            ]),
+            ("title", ["node", "--title", "helper", "--test=true", "/tmp/codex"]),
+            ("unknown", ["node.exe", "--test=true", "--no-test", "--not-a-flag", "/usr/local/bin/codex"]),
+            ("interactive", [
+                "node", "--experimental-test-isolation=none", "--test=true", "--interactive",
+                "/tmp/codex",
+            ]),
+            ("short-i", ["nodejs", "-i", "--test=true", "/usr/local/bin/codex"]),
+            ("pattern", [
+                "node", "--experimental-test-isolation=none", "--test=true",
+                "--test-name-pattern", "(", "/tmp/codex",
+            ]),
+            ("heap", ["node.exe", "--test=true", "--no-test", "--secure-heap", "3", "/usr/local/bin/codex"]),
+            ("watch-path", [
+                "node", "--experimental-test-isolation=none", "--test=true",
+                "--watch-path", "/tmp", "/tmp/codex",
+            ]),
+        ]
+        for (name, argv) in rejected {
+            let exited = process(4, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(name) beat claude")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(name) stayed the group leader"
+            )
+        }
+        let alone = process(4, "node", argv: ["node", "--test=true", "/usr/local/bin/codex"])
+        #expect(Diagnoser.cpuSamplePid([alone]) == 4)
+
+        let kept: [(String, [String])] = [
+            ("cleared", ["node", "--test=true", "--no-test", "/usr/local/bin/codex"]),
+            ("false-cleared", ["nodejs", "--test=false", "--no-test", "/tmp/codex"]),
+            ("empty-cleared", ["node.exe", "--test=", "--no-test", "/usr/local/bin/codex"]),
+            ("zero-cleared", ["node", "--test=0", "--no-test", "/tmp/codex"]),
+            ("no-test-equals", ["nodejs", "--test=true", "--no-test=true", "/usr/local/bin/codex"]),
+            ("none", [
+                "node", "--experimental-test-isolation=none", "--test=true", "/tmp/codex",
+            ]),
+            ("none-after", [
+                "node.exe", "--test=true", "--experimental-test-isolation=none",
+                "/usr/local/bin/codex",
+            ]),
+            ("process-then-none", [
+                "nodejs", "--test=true", "--experimental-test-isolation=process",
+                "--experimental-test-isolation=none", "/tmp/codex",
+            ]),
+            ("bare-after-clear", [
+                "node", "--test=true", "--no-test", "--test", "/usr/local/bin/codex",
+            ]),
+            ("double-clear", [
+                "node.exe", "--test=true", "--no-test", "--test=false", "--no-test", "/tmp/codex",
+            ]),
+            ("pattern-off", [
+                "node", "--test=true", "--no-test", "--test-name-pattern", "(",
+                "/usr/local/bin/codex",
+            ]),
+            ("isolation-off", [
+                "nodejs", "--test=true", "--no-test", "--experimental-test-isolation", "nope",
+                "/tmp/codex",
+            ]),
+            ("title", ["node", "--title", "helper", "--test=true", "--no-test", "/usr/local/bin/codex"]),
+            ("title-none", [
+                "node.exe", "--title", "helper", "--experimental-test-isolation=none",
+                "--test=true", "/tmp/codex",
+            ]),
+            ("short-i-clear", ["node", "-i", "--test=true", "--no-test", "/usr/local/bin/codex"]),
+            ("interactive-clear", [
+                "nodejs", "--test=true", "--no-test", "--interactive", "/tmp/codex",
+            ]),
+            ("watch-path-off", [
+                "node", "--test=true", "--no-test", "--watch-path", "/tmp", "/usr/local/bin/codex",
+            ]),
+            ("script-first", ["node.exe", "/usr/local/bin/codex", "--test=true"]),
+            ("file-then-run", ["node", "--test=true", "--no-test", "/tmp/codex", "--run", "hello"]),
+            ("package", ["nodejs", "--test=true", "--run", "codex"]),
+            ("package-none", [
+                "node", "--experimental-test-isolation=none", "--test=true", "--run", "codex",
+            ]),
+            ("bun", ["bun", "--test=true", "/usr/local/bin/codex"]),
+        ]
+        for (name, argv) in kept {
+            let running = process(20, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(name) lost to the helper")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, running], foregroundProcessGroupId: 20) == 20,
+                "\(name) lost the group"
+            )
+        }
+
+        let skippedLetta = process(
+            8, "node", argv: ["node", "--test=true", "/tmp/letta"]
+        )
+        let runningLetta = process(
+            40, "node", argv: ["node", "--test=true", "--no-test", "/tmp/letta"]
+        )
+        let inProcessLetta = process(
+            40,
+            "nodejs",
+            argv: ["nodejs", "--experimental-test-isolation=none", "--test=true", "/tmp/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([skippedLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([skippedLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([helper, runningLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, inProcessLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([runningLetta, interactive]) == 40)
+
+        let python = process(
+            4, "python3", argv: ["python3", "--test=true", "/usr/local/bin/codex"]
         )
         #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
     }

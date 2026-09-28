@@ -1180,10 +1180,16 @@ private enum ShellForeground {
         }
         guard let runtime = argv.first, isNodeOrBunRuntime(runtime) else { return nil }
         let runtimeName = shellBase(runtime)
-        // The same pair that makes `runtimeScript` return nil. The path
-        // after it is not Letta, because node exits before the file.
-        if isNodeRuntime(runtimeName), nodePrefixFlags(argv).conflicts {
-            return nil
+        // The same pairs that make `runtimeScript` return nil. A
+        // conflict exits before the file. A `--test=` whose child
+        // still has the runner on never executes the file body, so
+        // that path is not Letta either. `--no-test` and isolation
+        // `none` do run it, and the walk below still finds the path.
+        if isNodeRuntime(runtimeName) {
+            let prefix = nodePrefixFlags(argv)
+            if prefix.conflicts || prefix.testEqualsSkipsScript {
+                return nil
+            }
         }
         var index = 1
         var skippedSubcommand = false
@@ -1869,7 +1875,9 @@ private enum ShellForeground {
         // `--run` names a package.json script. That happens before the
         // positional walk: a dash operand exits, and the `=` form is not
         // the file that follows. No `--run` in the option region keeps
-        // the walk below.
+        // the walk below. A package script still runs when `--test=`
+        // would have skipped a file, which is why that decision is
+        // after this switch.
         if isNodeRuntime(runtime) {
             switch nodePackageProgram(argv) {
             case .exits:
@@ -1880,8 +1888,15 @@ private enum ShellForeground {
                 break
             }
         }
-        if isNodeRuntime(runtime), nodePrefixFlags(argv).conflicts {
-            return nil
+        if isNodeRuntime(runtime) {
+            let prefix = nodePrefixFlags(argv)
+            // CheckOptions rejects the pairs. A `--test=` form whose
+            // child still has the runner on does not execute the file
+            // body, so that path is not the program. Isolation `none`
+            // and a later `--no-test` do run it.
+            if prefix.conflicts || prefix.testEqualsSkipsScript {
+                return nil
+            }
         }
         var index = 1
         var skippedSubcommand = false
@@ -2914,8 +2929,10 @@ private enum ShellForeground {
     /// `--watch`, `--interactive`, and `--experimental-strip-types`
     /// leave the next word as the script, and so does `--watch=true`.
     /// `--run` is not one of them: its operand is the package script
-    /// (`nodePackageProgram`). `--test=true` does not. `--use-strict`
-    /// and `--harmony` are
+    /// (`nodePackageProgram`). `--test=true` is still this boolean.
+    /// Whether the process runs the file is `testEqualsSkipsScript`:
+    /// the child that keeps `--test=` does not, and `--no-test` or
+    /// isolation `none` does. `--use-strict` and `--harmony` are
     /// V8 booleans: the bare flag and `--no-harmony` name the file, and
     /// `--harmony=true` does not. `--max-old-space-size=4096` names the
     /// file. A separate word (`--max-old-space-size 4096`) is not a
@@ -2958,11 +2975,9 @@ private enum ShellForeground {
             return value == nil ? .skip(1) : .exits
         }
         if NodeRuntimeFlags.scriptBooleans.contains(name) {
-            // `--test=true` does not run a file. A package script still
-            // runs, which is why the package walker passes `packageRun`.
-            if value != nil, !packageRun, NodeRuntimeFlags.equalsRejected.contains(name) {
-                return .exits
-            }
+            // `--test=` is not an exit at this word. The file body
+            // runs or skips from the final prefix, after a later
+            // `--no-test` or isolation value has been seen.
             return .skip(1)
         }
         if let positive = nodeNegatedFlag(name) {
@@ -3074,8 +3089,10 @@ private enum ShellForeground {
     /// checked only when the final `--test` state is on. The last
     /// operand wins, and only `none` and `process` run. A later
     /// `--no-test` leaves the file running, including `nope`. A script
-    /// written first is not this check. `--test=` is still
-    /// `equalsRejected` when the walk reaches that word.
+    /// written first is not this check. A `--test=` whose child still
+    /// has the runner on is `testEqualsSkipsScript`: the process runs
+    /// and does not execute the file. `--no-test` and isolation `none`
+    /// do, so this word is not where that decision is made.
     /// `--heapsnapshot-near-heap-limit` uses `std::atoll`: a negative
     /// result exits, and the last operand wins. `abc` is 0 and still
     /// runs. `--secure-heap` below 0 does not run the file (OpenSSL
@@ -3568,6 +3585,11 @@ private enum ShellForeground {
         /// Final `--test` / `--no-test` state. `--test=true` is on:
         /// Node's boolean parser ignores the attached word.
         var testRunner = false
+        /// Final `--test` state the child inherits. `filterExecArgv`
+        /// drops a bare `--test` and keeps `--test=` and `--no-test`.
+        /// When this stays on, that child is itself a test runner and
+        /// does not execute the file.
+        var childTestRunner = false
         /// Final `--interactive` / `-i` / `--no-interactive` state.
         /// `--interactive=false` is still on: the parser ignores the
         /// attached word. `-i` is the alias and is set by the scan.
@@ -3642,6 +3664,15 @@ private enum ShellForeground {
                 || (watch && testForceExit)
         }
 
+        /// Process isolation, the runner is on, and the child still
+        /// has `--test=`. That child skips the file body. Isolation
+        /// `none` runs the file in this process. A later `--no-test`
+        /// clears the child, and a bare `--test` after that is the
+        /// parent harness whose child does run the file.
+        var testEqualsSkipsScript: Bool {
+            testRunner && childTestRunner && testIsolation != "none"
+        }
+
         mutating func set(_ flag: NodeBoolFlag, on: Bool) {
             switch flag {
             case .cpu: cpuProf = on
@@ -3702,6 +3733,12 @@ private enum ShellForeground {
             }
             if let (flag, on) = nodeBooleanUpdate(arg) {
                 state.set(flag, on: on)
+                // A bare `--test` is stripped from the child's execArgv.
+                // `--test=` and `--no-test` are not, so only those move
+                // the state the child actually runs with.
+                if case .test = flag, arg != "--test" {
+                    state.childTestRunner = on
+                }
                 index += 1
                 continue
             }

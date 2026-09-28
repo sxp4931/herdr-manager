@@ -10,8 +10,6 @@
 enum NodeRuntimeFlags {
     static let scriptBooleans: Set<String> = flags(scriptBooleanLines)
     static let printFlags: Set<String> = flags(printFlagLines)
-    /// `--test=true` does not run the file. `--no-test=true` still does.
-    static let equalsRejected: Set<String> = flags(equalsRejectedLines)
     static let v8Booleans: Set<String> = flags(v8BooleanLines)
     /// The positive form aborts before the file. `--no-` of it still runs.
     static let v8NegationOnly: Set<String> = flags(v8NegationOnlyLines)
@@ -149,10 +147,6 @@ enum NodeRuntimeFlags {
 --help
 --v8-options
 --version
-"""
-
-    private static let equalsRejectedLines = """
---test
 """
 
     private static let v8BooleanLines = """
