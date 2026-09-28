@@ -2,7 +2,9 @@
 /// `--test-name-pattern` or `--test-skip-pattern` operand.
 ///
 /// The wrapper is `^/(.*)/([a-z]*)$`: a match is `new RegExp(pattern, flags)`,
-/// and anything else is `new RegExp(text)` with empty flags. The pattern
+/// and anything else is `new RegExp(text)` with empty flags. `.` does not
+/// match CR, LF, U+2028, or U+2029, and `$` does not match before a trailing
+/// one, so any of those leaves the whole operand as the pattern. The pattern
 /// grammar is V8 12.4 (the engine in Node 22.23.2). A `v` flag's character
 /// class is that engine's unicodeSets grammar: union, range, `&&`, `--`,
 /// and `\q`. `\p` and `\P` use the Unicode 17 aliases that engine accepts.
@@ -31,12 +33,16 @@ enum NodeTestPattern {
     }
 
     /// The rightmost `/` whose tail is only `[a-z]`, when the text starts
-    /// with `/`. `/a/b/g` is pattern `a/b` and flags `g`. `/foo/I` does
-    /// not match, because `I` is not `[a-z]`, so the whole text is the
-    /// pattern.
+    /// with `/` and contains no line terminator. Node's wrapper is
+    /// `/^\/(.*)\/([a-z]*)$/`. `.` does not match CR, LF, U+2028, or
+    /// U+2029, and `$` does not match before a trailing one, so any of
+    /// those leaves the whole operand as the pattern. `/a/b/g` is
+    /// pattern `a/b` and flags `g`. `/foo/I` does not match, because
+    /// `I` is not `[a-z]`, so the whole text is the pattern.
     private static func parts(_ raw: String) -> (pattern: String, flags: String) {
         let scalars = Array(raw.unicodeScalars)
-        if scalars.count >= 2, scalars[0].value == 47 {
+        if scalars.count >= 2, scalars[0].value == 47,
+           !scalars.contains(where: isJSLineTerminator) {
             var index = scalars.count - 1
             while index > 0 {
                 if scalars[index].value == 47,
@@ -50,6 +56,18 @@ enum NodeTestPattern {
             }
         }
         return (raw, "")
+    }
+
+    /// The four characters JavaScript's `.` does not match. `$` does not
+    /// treat a trailing one as the end either, so any of them makes
+    /// Node's wrapper fail.
+    private static func isJSLineTerminator(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x0A, 0x0D, 0x2028, 0x2029:
+            return true
+        default:
+            return false
+        }
     }
 
     private static func string(from scalars: ArraySlice<Unicode.Scalar>) -> String {

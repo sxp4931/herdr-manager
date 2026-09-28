@@ -1246,7 +1246,10 @@ private enum ShellForeground {
                 // or `v` is set, so `/[\uD83D\uDE00-\uD83D\uDE00]/u`
                 // still is Letta. A lone `\uD83D` is a character. A
                 // braced `\u{D800}` does not pair, and a legacy class
-                // still reads two units. `ok`, `/foo/i`, and
+                // still reads two units. A CR, LF, U+2028, or U+2029
+                // in the operand keeps it whole: Node's wrapper does
+                // not match across one, so `/*\n/` and `/\c\n/u` still
+                // are Letta. `/*/` and `/\c/u` are not. `ok`, `/foo/i`, and
                 // `/[a--b]/v` still are. `--no-test` leaves a bad shard
                 // and `(` as Letta.
                 // Bun rejects `-W`,

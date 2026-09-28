@@ -7350,6 +7350,146 @@ struct DiagnoserCpuSamplePidTests {
         #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)
         #expect(Diagnoser.cpuSamplePid([pythonPair, claude]) == 12)
     }
+
+    @Test("a line terminator in a test pattern is not a flag separator")
+    func nodePatternLineTerminatorStaysWhole() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node's wrapper is `/^\/(.*)\/([a-z]*)$/`. `.` does not match
+        // CR, LF, U+2028, or U+2029, and `$` does not match before a
+        // trailing one, so the whole operand is the pattern. `/*\n/`
+        // quantifies the slash and runs. Splitting it would be `*\n`,
+        // which is nothing to repeat. `/\c\n/u` is a legacy identity
+        // escape; applying the `u` flag would throw.
+        let kept = [
+            "/*\n/",
+            "/*\r/",
+            "/*\u{2028}/",
+            "/*\u{2029}/",
+            "/*\nok/",
+            "/\\c\n/u",
+            "/\\c\r/u",
+            "/\\c\u{2028}/u",
+            "/\\u\n/u",
+            "/\\x\n/u",
+            "/a{\n/u",
+            "/foo/g\n",
+            "/ok\n/i",
+            "/\n/",
+            "/[\n-a]/",
+            "/a/b\n/g",
+            "/a/b\n/gg",
+            "/ok/i",
+            "/[a--b]/v",
+        ]
+        for raw in kept {
+            #expect(!NodeTestPattern.rejects(raw), "\(raw) was dropped")
+        }
+
+        let rejected = [
+            "/*/",
+            "/\\c/u",
+            "/\\u/u",
+            "/\\x/u",
+            "/a{/u",
+            "/[z-a]\n/",
+            "/[a-\n]/",
+            "/(\n",
+            "/(\n/",
+            "*\n",
+            "a{2,1}\n",
+            "/foo/gg",
+        ]
+        for raw in rejected {
+            #expect(NodeTestPattern.rejects(raw), "\(raw) stayed the script")
+        }
+
+        let keptArgv: [(String, [String])] = [
+            ("star", ["node", "--test", "--test-name-pattern", "/*\n/", "/usr/local/bin/codex"]),
+            ("cr", ["nodejs", "--test", "--test-name-pattern", "/*\r/", "/tmp/codex"]),
+            ("sep", ["node.exe", "--test", "--test-skip-pattern", "/*\u{2028}/", "/usr/local/bin/codex"]),
+            ("para", ["node", "--test", "--test-name-pattern", "/*\u{2029}/", "/tmp/codex"]),
+            ("control", ["nodejs", "--test", "--test-name-pattern=/\\c\n/u", "/usr/local/bin/codex"]),
+            ("brace", ["node.exe", "--test", "--test-name-pattern", "/a{\n/u", "/tmp/codex"]),
+            ("flags", ["node", "--test", "--test-skip-pattern", "/a/b\n/gg", "/usr/local/bin/codex"]),
+            ("off", ["nodejs", "--test-name-pattern", "/*/", "/tmp/codex"]),
+            ("no-test", ["node", "--test", "--no-test", "--test-name-pattern", "/*/", "/usr/local/bin/codex"]),
+            ("script-first", ["node.exe", "/usr/local/bin/codex", "--test", "--test-name-pattern", "/[z-a]\n/"]),
+        ]
+        for (label, argv) in keptArgv {
+            let running = process(20, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(label) dropped the script")
+        }
+        let leader = process(
+            20,
+            "node",
+            argv: ["node", "--test", "--test-name-pattern", "/*\n/", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+
+        let rejectedArgv: [(String, [String])] = [
+            ("star", ["node", "--test", "--test-name-pattern", "/*/", "/usr/local/bin/codex"]),
+            ("order", ["nodejs", "--test", "--test-name-pattern", "/[z-a]\n/", "/tmp/codex"]),
+            ("group", ["node.exe", "--test", "--test-skip-pattern", "/(\n/", "/usr/local/bin/codex"]),
+            ("control", ["node", "--test", "--test-name-pattern=/\\c/u", "/tmp/codex"]),
+            ("later", [
+                "nodejs", "--test", "--test-name-pattern", "/*\n/",
+                "--test-skip-pattern", "/*/", "/usr/local/bin/codex",
+            ]),
+        ]
+        for (label, argv) in rejectedArgv {
+            let exited = process(4, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(label) ranked the path")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(label) took the sample from the leader slot"
+            )
+        }
+        #expect(
+            Diagnoser.cpuSamplePid([
+                process(4, "node", argv: ["node", "--test", "--test-name-pattern", "/[z-a]\n/", "/usr/local/bin/codex"])
+            ]) == 4
+        )
+
+        let badOrder = process(
+            8, "node", argv: ["node", "--test", "--test-name-pattern", "/[z-a]\n/", "/tmp/letta"]
+        )
+        let badGroup = process(
+            8, "nodejs", argv: ["nodejs", "--test", "--test-name-pattern", "/(\n/", "/tmp/letta"]
+        )
+        let keptLetta = process(
+            40, "node.exe", argv: ["node.exe", "--test", "--test-name-pattern", "/*\n/", "/tmp/letta"]
+        )
+        let keptControl = process(
+            40, "node", argv: ["node", "--test", "--test-name-pattern", "/\\c\n/u", "/tmp/letta"]
+        )
+        let oneShot = process(
+            40,
+            "nodejs",
+            argv: ["nodejs", "--test", "--test-name-pattern", "/*\n/", "/tmp/letta", "--prompt"]
+        )
+        #expect(Diagnoser.cpuSamplePid([badOrder, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badOrder, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([badGroup, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badGroup, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, keptLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, keptControl]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, oneShot]) == 10)
+        #expect(Diagnoser.cpuSamplePid([oneShot, interactive]) == 30)
+
+        let bun = process(
+            20, "bun", argv: ["bun", "--test", "--test-name-pattern", "/*\n/", "/usr/local/bin/codex"]
+        )
+        let python = process(
+            4, "python3", argv: ["python3", "--test", "--test-name-pattern", "/*\n/", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([bun]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)
+        #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
+    }
 }
 
 @Suite("Diagnoser finished vs process-gone")
