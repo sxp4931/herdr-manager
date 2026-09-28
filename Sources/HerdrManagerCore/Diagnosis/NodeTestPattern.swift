@@ -5,12 +5,12 @@
 /// and anything else is `new RegExp(text)` with empty flags. The pattern
 /// grammar is V8 12.4 (the engine in Node 22.23.2). A `v` flag's character
 /// class is that engine's unicodeSets grammar: union, range, `&&`, `--`,
-/// and `\q`. Two throws are still not decided. Whether a `\p{…}` or
-/// `\P{…}` name is a real property, and whether that property contains
-/// strings, needs the Unicode database. A scalar above U+FFFF is a
-/// surrogate pair in the legacy parser, so that pattern is not decided
-/// either. A class nested more than 64 deep is not decided: the file
-/// stays the script.
+/// and `\q`. `\p` and `\P` use the Unicode 17 aliases that engine accepts.
+/// A property of strings is legal only with `v`, and a negated class that
+/// still contains one throws. Two throws are still not decided. A scalar
+/// above U+FFFF is a surrogate pair in the legacy parser, so that pattern
+/// is not decided. A class nested more than 64 deep is not decided: the
+/// file stays the script.
 enum NodeTestPattern {
     private static let quantifierInfinity = 2_147_483_647
 
@@ -514,11 +514,9 @@ enum NodeTestPattern {
                     if failed { return nil }
                     return ClassPiece(kind: .stringDisjunction, mayContainStrings: strings)
                 }
-                if classSetEscape() {
+                if case .escape(let strings) = classSetEscape() {
                     if failed { return nil }
-                    // `\p` may contain strings. The property database is
-                    // not consulted, so this escape is treated as none.
-                    return ClassPiece(kind: .escape)
+                    return ClassPiece(kind: .escape, mayContainStrings: strings)
                 }
             }
             if matches(current, "[") {
@@ -563,25 +561,32 @@ enum NodeTestPattern {
             return mayContainStrings
         }
 
+        private enum ClassEscape {
+            case other
+            case escape(strings: Bool)
+        }
+
         /// `\d` and the other class escapes, including `\p` and `\P`.
-        /// False when the backslash is some other escape, which the
-        /// caller then reads as a character. A bad property name does
-        /// not fail here: any non-empty `{…}` is accepted.
-        private mutating func classSetEscape() -> Bool {
-            guard matches(current, "\\") else { return false }
+        /// `.other` when the backslash is some other escape, which the
+        /// caller then reads as a character. `\p{RGI_Emoji}` contains
+        /// strings. An unknown name fails the pattern.
+        private mutating func classSetEscape() -> ClassEscape {
+            guard matches(current, "\\") else { return .other }
             let following = nextScalar
             if matches(following, "d") || matches(following, "D")
                 || matches(following, "s") || matches(following, "S")
                 || matches(following, "w") || matches(following, "W") {
                 advance(2)
-                return true
+                return .escape(strings: false)
             }
             if matches(following, "p") || matches(following, "P") {
+                let negated = matches(following, "P")
                 advance(2)
-                if !propertyName() { failed = true }
-                return true
+                let kind = propertyEscape(negated: negated)
+                if kind == .invalid { failed = true }
+                return .escape(strings: kind == .strings)
             }
-            return false
+            return .other
         }
 
         /// One code point of a `v` class. `\b` is backspace. A syntax
@@ -808,25 +813,56 @@ enum NodeTestPattern {
                 return (true, 0)
             }
             if unicode, matches(following, "p") || matches(following, "P") {
+                let negated = matches(following, "P")
                 advance(2)
-                if !propertyName() { failed = true }
+                if propertyEscape(negated: negated) == .invalid { failed = true }
                 return (true, 0)
             }
             return (false, characterEscape(inClass: true))
         }
 
-        /// `{…}` after `\p` or `\P`. The property database is not
-        /// consulted: an unknown name does not throw here.
-        private mutating func propertyName() -> Bool {
-            guard matches(current, "{") else { return false }
+        /// `{name}` or `{name=value}` after `\p` or `\P`. The body is
+        /// ASCII letters, digits, and `_`. One `=` splits the name from
+        /// the value. Anything else, including an unknown alias, is
+        /// invalid. `\p` and `\P` have already been consumed.
+        private mutating func propertyEscape(negated: Bool) -> NodeUnicodeProperty.Kind {
+            guard matches(current, "{") else { return .invalid }
             advance()
-            if matches(current, "}") || current == nil { return false }
+            var name = ""
+            var value = ""
+            var hasValue = false
             while let scalar = current, !matches(scalar, "}") {
+                if !hasValue, matches(scalar, "=") {
+                    hasValue = true
+                    advance()
+                    continue
+                }
+                guard isPropertyCharacter(scalar), let character = Unicode.Scalar(scalar) else {
+                    return .invalid
+                }
+                if hasValue {
+                    value.unicodeScalars.append(character)
+                } else {
+                    name.unicodeScalars.append(character)
+                }
                 advance()
             }
-            guard matches(current, "}") else { return false }
+            guard matches(current, "}") else { return .invalid }
             advance()
-            return true
+            return NodeUnicodeProperty.kind(
+                name: name,
+                value: hasValue ? value : nil,
+                sets: sets,
+                negated: negated
+            )
+        }
+
+        /// The characters V8 allows inside a property name or value.
+        private func isPropertyCharacter(_ value: UInt32) -> Bool {
+            if value >= 48 && value <= 57 { return true }
+            if value >= 65 && value <= 90 { return true }
+            if value >= 97 && value <= 122 { return true }
+            return value == Unicode.Scalar("_").value
         }
 
         private enum EscapeKind {
@@ -874,8 +910,9 @@ enum NodeTestPattern {
             }
             if matches(following, "p") || matches(following, "P") {
                 if unicode {
+                    let negated = matches(following, "P")
                     advance(2)
-                    if !propertyName() { failed = true }
+                    if propertyEscape(negated: negated) == .invalid { failed = true }
                     return .atom
                 }
                 advance(2)
