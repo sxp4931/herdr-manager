@@ -1698,6 +1698,161 @@ private enum ShellForeground {
         }
     }
 
+    /// What `node --run` does with this argv. `.absent` when the option
+    /// region has no `--run`, so the positional walk still names the file.
+    private enum NodePackageDecision {
+        case absent
+        case exits
+        case program(String)
+    }
+
+    /// Node 22.23's `--run` operand is a package.json script. The last
+    /// one wins. A missing operand, a word that starts with `-`, an
+    /// empty `--run=`, and `--no-run` exit before any file runs. A
+    /// file written before `--run` is the program, and `--run` is only
+    /// an argument to it. With a real operand, `--help`, `--version`,
+    /// and a test-pattern failure still run that script. An unknown
+    /// option, a missing value, a `CheckOptions` pair, and `--watch`
+    /// without a script file do not. Bun does not use this.
+    private static func nodePackageProgram(_ argv: [String]) -> NodePackageDecision {
+        guard let runtime = argv.first.map({ shellBase($0) }), isNodeRuntime(runtime) else {
+            return .absent
+        }
+        var index = 1
+        var program: String?
+        var sawFile = false
+        var state = NodePrefix()
+        while index < argv.count {
+            let arg = argv[index]
+            let following = index + 1 < argv.count ? argv[index + 1] : nil
+            if arg.hasPrefix("-") {
+                if arg == "-i" {
+                    state.interactive = true
+                }
+                if let (flag, on) = nodeBooleanUpdate(arg) {
+                    state.set(flag, on: on)
+                }
+                if arg == "--watch-path" || arg.hasPrefix("--watch-path=") {
+                    state.watch = true
+                    state.watchPath = true
+                }
+            }
+            if arg == "--" {
+                if program == nil { return .absent }
+                if index + 1 < argv.count { sawFile = true }
+                break
+            }
+            if program == nil, !arg.hasPrefix("-") {
+                return .absent
+            }
+            if arg == "--no-run" || arg.hasPrefix("--no-run=") {
+                return .exits
+            }
+            if arg == "--run" {
+                guard let following, !following.hasPrefix("-") else { return .exits }
+                program = following
+                index += 2
+                continue
+            }
+            if arg.hasPrefix("--run=") {
+                let value = String(arg.dropFirst("--run=".count))
+                guard !value.isEmpty else { return .exits }
+                program = value
+                index += 1
+                continue
+            }
+            if configFlagExits(runtime), arg == "--config" || arg.hasPrefix("--config=") {
+                return .exits
+            }
+            if runtimeAbandonsScript(arg) {
+                guard let width = nodePackageAbandonWidth(arg, following: following) else {
+                    return program == nil ? .absent : .exits
+                }
+                index += width
+                continue
+            }
+            // Print flags and the test harness do not stop a package
+            // script. Passing that in before `--run` is seen lets
+            // `--help --run codex` reach the operand; with no operand
+            // the positional walk still applies those exits.
+            if let option = nodeOption(
+                arg,
+                following: following,
+                argv: argv,
+                packageRun: true
+            ) {
+                switch option {
+                case .skip(let width):
+                    index += width
+                    continue
+                case .exits:
+                    return .exits
+                }
+            }
+            if arg.hasPrefix("-"), !arg.hasPrefix("--") {
+                switch nodeBareShort(arg) {
+                case .skip(let width):
+                    index += width
+                    continue
+                case .exits:
+                    return .exits
+                }
+            }
+            if program != nil, !arg.hasPrefix("-") {
+                sawFile = true
+                break
+            }
+            if program == nil { return .absent }
+            return .exits
+        }
+        guard let program else { return .absent }
+        if state.conflicts || (state.watch && !sawFile) { return .exits }
+        return .program(program)
+    }
+
+    /// How many words an eval or check flag occupies while looking for
+    /// `--run`. Nil when this word is not one of those flags, or when
+    /// the flag exits (`-e` with no value, an empty `--eval=`, a glued
+    /// `-cfile`). The caller then stops if `--run` was already seen,
+    /// and otherwise lets the positional walk decide.
+    ///
+    /// `-e` and `--eval` require a value that does not start with `-`.
+    /// `-p` and `--print` are optional, so a following dash word stays
+    /// an option. `-c` alone is `--check` and does not take the next
+    /// word.
+    private static func nodePackageAbandonWidth(
+        _ arg: String,
+        following: String?
+    ) -> Int? {
+        if arg == "-e" || arg == "--eval" {
+            guard let following, !following.hasPrefix("-") else { return nil }
+            return 2
+        }
+        if arg.hasPrefix("--eval=") {
+            return arg.count > "--eval=".count ? 1 : nil
+        }
+        if !arg.hasPrefix("--"), arg.hasPrefix("-e"), arg.count > 2 {
+            return 1
+        }
+        // `-p` is optional. A following dash word is the next option,
+        // which is how `node -p --run codex` still runs the script.
+        if arg == "-p" || arg == "--print" {
+            if let following, !following.hasPrefix("-") { return 2 }
+            return 1
+        }
+        if arg.hasPrefix("--print=") { return 1 }
+        if !arg.hasPrefix("--"), arg.hasPrefix("-p"), arg.count > 2 {
+            return 1
+        }
+        // `-c` is `--check`. It does not swallow the next word, so
+        // `--run` after it is still the package script. A glued `-cfile`
+        // is a bad option and falls through.
+        if arg == "-c" || arg == "--check" || arg.hasPrefix("--check=") {
+            return 1
+        }
+        return nil
+    }
+
     private static func runtimeScript(_ argv: [String]) -> String? {
         let runtime = argv.first.map { shellBase($0) } ?? ""
         // Node exits before the file when two booleans cannot be set
@@ -1711,6 +1866,20 @@ private enum ShellForeground {
         // wins. A test-runner operand the harness rejects, including
         // a name or skip pattern, is `nodeOption`, and only while the
         // final `--test` state is on.
+        // `--run` names a package.json script. That happens before the
+        // positional walk: a dash operand exits, and the `=` form is not
+        // the file that follows. No `--run` in the option region keeps
+        // the walk below.
+        if isNodeRuntime(runtime) {
+            switch nodePackageProgram(argv) {
+            case .exits:
+                return nil
+            case .program(let name):
+                return name
+            case .absent:
+                break
+            }
+        }
         if isNodeRuntime(runtime), nodePrefixFlags(argv).conflicts {
             return nil
         }
@@ -1986,8 +2155,8 @@ private enum ShellForeground {
     /// `-C` is `--conditions`; bun rejects that short form, so it stays
     /// here. `--env-file`, `--require`, `--import`, and `--loader` are
     /// already `runtimeValueFlags`. `-e` / `--eval` abandon the walk.
-    /// `--run`'s word is the package script, so it stays the program.
-    /// `--inspect` does not take the next word. `--define` is not a node
+    /// `--run` is `nodePackageProgram`: the operand is the program, not
+    /// the file after it. `--inspect` does not take the next word. `--define` is not a node
     /// flag. Python and deno are not this runtime.
     private static let nodeRequiredValueFlags: Set<String> = [
         "--title",
@@ -2717,41 +2886,63 @@ private enum ShellForeground {
     private static func nodeOption(
         _ arg: String,
         following: String?,
-        argv: [String]
+        argv: [String],
+        packageRun: Bool = false
     ) -> NodeOption? {
         if nodeOptionExits(arg) { return .exits }
         if nodeTakesSeparateValue(arg) {
             if let following, !following.hasPrefix("-") {
-                if nodeRejectedOperand(name: arg, value: following, argv: argv) {
+                if nodeRejectedOperand(
+                    name: arg,
+                    value: following,
+                    argv: argv,
+                    packageRun: packageRun
+                ) {
                     return .exits
                 }
                 return .skip(2)
             }
             return .exits
         }
-        return nodeLongOption(arg, argv: argv)
+        return nodeLongOption(arg, argv: argv, packageRun: packageRun)
     }
 
     /// A Node long option after the value flags have been claimed.
     /// Nil when `arg` is not a long option, so a single dash still
     /// reaches `nodeBareShort`.
     ///
-    /// `--watch`, `--interactive`, `--experimental-strip-types`, and
-    /// `--run` leave the next word as the script. `--watch=true` does
-    /// too. `--test=true` does not. `--use-strict` and `--harmony` are
+    /// `--watch`, `--interactive`, and `--experimental-strip-types`
+    /// leave the next word as the script, and so does `--watch=true`.
+    /// `--run` is not one of them: its operand is the package script
+    /// (`nodePackageProgram`). `--test=true` does not. `--use-strict`
+    /// and `--harmony` are
     /// V8 booleans: the bare flag and `--no-harmony` name the file, and
     /// `--harmony=true` does not. `--max-old-space-size=4096` names the
     /// file. A separate word (`--max-old-space-size 4096`) is not a
     /// value. `--help`, `--version`, `--v8-options`, and
     /// `--completion-bash` print and exit. Anything else, including
     /// `--not-a-flag` and `--revision`, exits before the file runs.
-    private static func nodeLongOption(_ arg: String, argv: [String]) -> NodeOption? {
+    private static func nodeLongOption(
+        _ arg: String,
+        argv: [String],
+        packageRun: Bool = false
+    ) -> NodeOption? {
         guard let (name, value) = splitNodeFlag(arg) else { return nil }
-        if NodeRuntimeFlags.printFlags.contains(name) { return .exits }
+        // `--help` and `--version` print and exit, unless `--run` names
+        // a package script. Then they are ordinary booleans and the
+        // script still runs.
+        if NodeRuntimeFlags.printFlags.contains(name) {
+            return packageRun ? .skip(1) : .exits
+        }
         if nodeValueFlagName(name) {
             guard let value else { return nil }
             if value.isEmpty { return .exits }
-            if nodeRejectedOperand(name: name, value: String(value), argv: argv) {
+            if nodeRejectedOperand(
+                name: name,
+                value: String(value),
+                argv: argv,
+                packageRun: packageRun
+            ) {
                 return .exits
             }
             return .skip(1)
@@ -2767,7 +2958,9 @@ private enum ShellForeground {
             return value == nil ? .skip(1) : .exits
         }
         if NodeRuntimeFlags.scriptBooleans.contains(name) {
-            if value != nil, NodeRuntimeFlags.equalsRejected.contains(name) {
+            // `--test=true` does not run a file. A package script still
+            // runs, which is why the package walker passes `packageRun`.
+            if value != nil, !packageRun, NodeRuntimeFlags.equalsRejected.contains(name) {
                 return .exits
             }
             return .skip(1)
@@ -2903,7 +3096,8 @@ private enum ShellForeground {
     private static func nodeRejectedOperand(
         name: String,
         value: String,
-        argv: [String]
+        argv: [String],
+        packageRun: Bool = false
     ) -> Bool {
         if let allowed = nodeEnumValues[name] {
             return !allowed.contains(value)
@@ -2917,7 +3111,9 @@ private enum ShellForeground {
             return NodePercentage.rejects(value)
         }
         let prefix = nodePrefixFlags(argv)
-        if nodeTestHarnessRejects(name, prefix: prefix) {
+        // A package script still runs when the harness would throw.
+        // `CheckOptions` (isolation, the secure heap, conflicts) does not.
+        if !packageRun, nodeTestHarnessRejects(name, prefix: prefix) {
             return true
         }
         if name == "--heapsnapshot-near-heap-limit" {
@@ -3485,6 +3681,17 @@ private enum ShellForeground {
         var index = 1
         while index < argv.count {
             let arg = argv[index]
+            // The operand is the package script, not a program file, so
+            // flags after it still count. A dash operand is malformed;
+            // the package walker exits on that before this state matters.
+            if arg == "--run" {
+                index += 2
+                continue
+            }
+            if arg.hasPrefix("--run=") || arg == "--no-run" || arg.hasPrefix("--no-run=") {
+                index += 1
+                continue
+            }
             if arg == "--" || !arg.hasPrefix("-") { break }
             // `-i` is `--interactive`. Node does not cluster shorts, so
             // `-ii` is a different word and is not this flag.

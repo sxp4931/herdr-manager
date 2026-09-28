@@ -8861,4 +8861,96 @@ struct DiagnoserUnclassifiableScopeTests {
         let verdict = await Diagnoser().diagnose(agent: agent, adapter: adapter)
         #expect(verdict.isUnclassifiable)
     }
+
+    @Test("node --run names the package script, and a bad operand is not the file")
+    func nodeRunOperandIsThePackageScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+
+        // Node 22.23 exits before the file. The path is not the program,
+        // so this node is not the group leader.
+        let rejected: [(String, [String])] = [
+            ("dash", ["node", "--run", "--watch", "/usr/local/bin/codex"]),
+            ("dash-eq", ["nodejs", "--run", "-e", "/tmp/codex"]),
+            ("end", ["node.exe", "--run", "--", "/usr/local/bin/codex"]),
+            ("alone", ["node", "--run"]),
+            ("empty", ["nodejs", "--run=", "/usr/local/bin/codex"]),
+            ("empty-watch", ["node.exe", "--run=", "--watch", "/tmp/codex"]),
+            ("negation", ["node", "--no-run", "/usr/local/bin/codex"]),
+            ("negation-eq", ["nodejs", "--no-run=1", "/tmp/codex"]),
+            ("watch-before", ["node.exe", "--watch", "--run", "codex"]),
+            ("watch-after", ["node", "--run", "codex", "--watch"]),
+            ("watch-false", ["nodejs", "--run=codex", "--watch=false"]),
+            ("watch-path", ["node", "--run", "codex", "--watch-path", "/tmp"]),
+            ("unknown", ["node.exe", "--run", "codex", "--not-a-flag"]),
+            ("title-missing", ["node", "--run=codex", "--title"]),
+            ("eval-missing", ["nodejs", "--run", "codex", "-e"]),
+            ("eval-dash", ["node", "-e", "--run", "codex"]),
+            ("conflict", ["node.exe", "--run", "codex", "--test", "--interactive"]),
+            ("short-i", ["node", "-i", "--run", "codex", "--test"]),
+            ("heap", ["nodejs", "--run", "codex", "--secure-heap", "3"]),
+            ("config", ["node", "--config", "x", "--run", "codex"]),
+            ("glued-check", ["node.exe", "--run", "codex", "-c/tmp/codex"]),
+        ]
+        for (name, argv) in rejected {
+            let exited = process(4, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(name) beat claude")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(name) stayed the group leader"
+            )
+        }
+        let alone = process(4, "node", argv: ["node", "--run", "--watch", "/usr/local/bin/codex"])
+        #expect(Diagnoser.cpuSamplePid([alone]) == 4)
+
+        // The operand is the program, including the `=` form and a later
+        // file. A bad test pattern does not stop it. A file written first
+        // is still that file. Bun does not use node's rule.
+        let kept: [(String, [String])] = [
+            ("separate", ["node", "--run", "codex"]),
+            ("equals", ["nodejs", "--run=codex"]),
+            ("equals-path", ["node.exe", "--run=/usr/local/bin/codex"]),
+            ("later-file", ["node", "--run", "codex", "/tmp/other.js"]),
+            ("last", ["node", "--run", "hello", "--run", "codex"]),
+            ("equals-last", ["node.exe", "--run=hello", "--run=codex"]),
+            ("title", ["node", "--title", "helper", "--run", "codex"]),
+            ("help-before", ["nodejs", "--help", "--run", "codex"]),
+            ("help-after", ["node.exe", "--run", "codex", "--help"]),
+            ("version", ["node", "--version", "--run=codex"]),
+            ("test-equals", ["node", "--run", "codex", "--test=true"]),
+            ("pattern", ["nodejs", "--run", "codex", "--test", "--test-name-pattern", "("]),
+            ("pattern-before", ["node", "--test", "--test-name-pattern", "(", "--run", "codex"]),
+            ("eval", ["node.exe", "-e", "console.log(1)", "--run", "codex"]),
+            ("print", ["node", "-p", "--run", "codex"]),
+            ("check", ["nodejs", "-c", "--run", "codex"]),
+            ("watch-file", ["node", "--run", "codex", "--watch", "/tmp/x.js"]),
+            ("dashdash", ["node.exe", "--run=codex", "--", "--not-a-flag"]),
+            ("script-first", ["node", "/usr/local/bin/codex", "--run", "--watch"]),
+            ("watch-first", ["nodejs", "--watch", "/usr/local/bin/codex", "--run", "hello"]),
+            ("no-watch", ["node", "--run=codex", "--watch", "--no-watch"]),
+            ("bun", ["bun", "--run", "--watch", "/usr/local/bin/codex"]),
+        ]
+        for (name, argv) in kept {
+            let running = process(20, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(name) lost to the helper")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, running], foregroundProcessGroupId: 20) == 20,
+                "\(name) lost the group"
+            )
+        }
+
+        // `hello` is not an agent. The file after `--run=hello` is an
+        // argument of that script, so this node does not outrank claude.
+        let hello = process(
+            4, "node", argv: ["node", "--run=hello", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([hello, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([mcp, hello], foregroundProcessGroupId: 4) == 10)
+
+        let python = process(
+            4, "python3", argv: ["python3", "--run", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
+    }
 }
