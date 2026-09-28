@@ -1185,9 +1185,13 @@ private enum ShellForeground {
         // still has the runner on never executes the file body, so
         // that path is not Letta either. `--no-test` and isolation
         // `none` do run it, and the walk below still finds the path.
+        // A non-empty `--experimental-sea-config` writes the blob
+        // and returns before the positional, so that path is not
+        // Letta either. `--run` is not this check: the package
+        // script still runs, and `runtimeScript` names it.
         if isNodeRuntime(runtimeName) {
             let prefix = nodePrefixFlags(argv)
-            if prefix.conflicts || prefix.testEqualsSkipsScript {
+            if prefix.conflicts || prefix.testEqualsSkipsScript || prefix.seaConfig {
                 return nil
             }
         }
@@ -1778,9 +1782,10 @@ private enum ShellForeground {
                 continue
             }
             // Print flags and the test harness do not stop a package
-            // script. Passing that in before `--run` is seen lets
-            // `--help --run codex` reach the operand; with no operand
-            // the positional walk still applies those exits.
+            // script. A sea config does not either: Node runs `--run`
+            // before it builds the blob. Passing that in before `--run`
+            // is seen lets `--help --run codex` reach the operand; with
+            // no operand the positional walk still applies those exits.
             if let option = nodeOption(
                 arg,
                 following: following,
@@ -1876,8 +1881,9 @@ private enum ShellForeground {
         // positional walk: a dash operand exits, and the `=` form is not
         // the file that follows. No `--run` in the option region keeps
         // the walk below. A package script still runs when `--test=`
-        // would have skipped a file, which is why that decision is
-        // after this switch.
+        // would have skipped a file, and when `--experimental-sea-config`
+        // is also set: Node runs the package script before it builds
+        // the blob. That is why both decisions are after this switch.
         if isNodeRuntime(runtime) {
             switch nodePackageProgram(argv) {
             case .exits:
@@ -1893,8 +1899,12 @@ private enum ShellForeground {
             // CheckOptions rejects the pairs. A `--test=` form whose
             // child still has the runner on does not execute the file
             // body, so that path is not the program. Isolation `none`
-            // and a later `--no-test` do run it.
-            if prefix.conflicts || prefix.testEqualsSkipsScript {
+            // and a later `--no-test` do run it. A non-empty
+            // `--experimental-sea-config` writes the blob and returns
+            // before the positional, whether or not the config file
+            // can be read. An empty `=` or a separate dash word is a
+            // missing argument and is the walk's exit, not this flag.
+            if prefix.conflicts || prefix.testEqualsSkipsScript || prefix.seaConfig {
                 return nil
             }
         }
@@ -2173,6 +2183,9 @@ private enum ShellForeground {
     /// `--run` is `nodePackageProgram`: the operand is the program, not
     /// the file after it. `--inspect` does not take the next word. `--define` is not a node
     /// flag. Python and deno are not this runtime.
+    /// `--experimental-sea-config` consumes its path and then does not
+    /// run the positional: Node writes the blob and returns. That
+    /// decision is `NodePrefix.seaConfig`, after `--run`.
     private static let nodeRequiredValueFlags: Set<String> = [
         "--title",
         "--unhandled-rejections",
@@ -3746,6 +3759,16 @@ private enum ShellForeground {
         /// A separate `\-` stays in the text. This is a string option,
         /// not the numeric unescape the shard path uses.
         var testPatterns: [String] = []
+        /// `--experimental-sea-config` had a non-empty path before the
+        /// first positional. Node writes the single-executable blob and
+        /// returns, so the positional is not the program. A missing
+        /// config file still counts: both outcomes leave that word
+        /// unexecuted. An empty `=` or a separate word that starts
+        /// with `-` is a missing argument and stays false. A separate
+        /// empty word is an empty config string and stays false too:
+        /// the next word still runs. `--run` is decided before this
+        /// flag is consulted.
+        var seaConfig = false
 
         /// TLS pair, CA pair, `--test` with `--interactive` / `-i` or
         /// with `--watch-path`, or `--watch` with `--interactive` /
@@ -3898,10 +3921,44 @@ private enum ShellForeground {
                 index += testOperand.width
                 continue
             }
+            // A non-empty path makes Node write the blob and return.
+            // The word after that path is not a program. An empty
+            // `=` and a separate dash word are a missing argument,
+            // so this stays false and the walk exits. `--run` was
+            // skipped above; a package script still runs.
+            if nodeSeaConfigSetsBlob(arg, argv: argv, index: index) {
+                state.seaConfig = true
+            }
             let width = arg.contains("=") || !nodeTakesSeparateValue(arg) ? 1 : 2
             index += width
         }
         return state
+    }
+
+    /// True when this word is `--experimental-sea-config` and the
+    /// value is a path Node will try to read.
+    ///
+    /// `sea.json` and `--experimental-sea-config=sea.json` are that
+    /// path, including a value that is only spaces and an attached
+    /// value that starts with `-` (`=--watch` is a filename). A
+    /// separate word that starts with `-`, an empty `=`, and a
+    /// missing word are not: the parser exits before the blob, and
+    /// the walk reports that exit. A separate empty word is an empty
+    /// config string, so this stays false and the next word still
+    /// runs. The positional after a real path is not the program.
+    private static func nodeSeaConfigSetsBlob(
+        _ arg: String,
+        argv: [String],
+        index: Int
+    ) -> Bool {
+        if arg == "--experimental-sea-config" {
+            guard index + 1 < argv.count else { return false }
+            let value = argv[index + 1]
+            return !value.isEmpty && !value.hasPrefix("-")
+        }
+        let prefix = "--experimental-sea-config="
+        guard arg.hasPrefix(prefix) else { return false }
+        return arg.count > prefix.count
     }
 
     /// The operand of `--experimental-test-isolation`, and how many

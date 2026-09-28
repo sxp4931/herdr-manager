@@ -9240,4 +9240,125 @@ struct DiagnoserUnclassifiableScopeTests {
         )
         #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
     }
+
+    @Test("a node sea config does not run the positional as the agent script")
+    func nodeSeaConfigDoesNotRunThePositional() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23 writes the blob from --experimental-sea-config and
+        // returns before the positional. A missing config, a directory,
+        // and a config that is not JSON do that too. The = form is the
+        // same path, including a filename that starts with `-`. A
+        // separate dash word and an empty = are a missing argument.
+        // --run still names the package script: Node runs it before
+        // the blob. A script written first is that file.
+        let rejected: [(String, [String])] = [
+            ("separate", ["node", "--experimental-sea-config", "sea.json", "/usr/local/bin/codex"]),
+            ("equals", ["nodejs", "--experimental-sea-config=sea.json", "/tmp/codex"]),
+            ("exe", ["node.exe", "--experimental-sea-config", "sea.json", "/usr/local/bin/codex"]),
+            ("config-is-agent", [
+                "node", "--experimental-sea-config", "/usr/local/bin/codex", "/tmp/codex",
+            ]),
+            ("config-only", ["nodejs", "--experimental-sea-config", "/usr/local/bin/codex"]),
+            ("equals-agent", ["node.exe", "--experimental-sea-config=/usr/local/bin/codex", "/tmp/codex"]),
+            ("spaces", ["node", "--experimental-sea-config", " ", "/usr/local/bin/codex"]),
+            ("equals-dash", ["nodejs", "--experimental-sea-config=--watch", "/tmp/codex"]),
+            ("equals-space", ["node", "--experimental-sea-config= ", "/usr/local/bin/codex"]),
+            ("after-strict", [
+                "node.exe", "--use-strict", "--experimental-sea-config", "sea.json",
+                "/usr/local/bin/codex",
+            ]),
+            ("then-watch", [
+                "node", "--experimental-sea-config", "sea.json", "--watch", "/usr/local/bin/codex",
+            ]),
+            ("then-snapshot", [
+                "nodejs", "--experimental-sea-config=sea.json", "--build-snapshot", "/tmp/codex",
+            ]),
+            ("then-end", ["node", "--experimental-sea-config", "sea.json", "--", "/usr/local/bin/codex"]),
+            ("two", [
+                "node.exe", "--experimental-sea-config", "a.json",
+                "--experimental-sea-config=b.json", "/tmp/codex",
+            ]),
+            ("empty-equals", ["node", "--experimental-sea-config=", "/usr/local/bin/codex"]),
+            ("dash-word", ["nodejs", "--experimental-sea-config", "--watch", "/usr/local/bin/codex"]),
+            ("missing", ["node.exe", "--experimental-sea-config"]),
+            ("no-flag", ["node", "--no-experimental-sea-config", "/usr/local/bin/codex"]),
+            ("no-equals", ["nodejs", "--no-experimental-sea-config=sea.json", "/tmp/codex"]),
+            ("sea-then-run-dash", ["node", "--experimental-sea-config", "--run", "codex"]),
+            ("run-then-missing", ["node.exe", "--run", "codex", "--experimental-sea-config"]),
+            ("bun-value", ["bun", "--experimental-sea-config", "sea.json", "/usr/local/bin/codex"]),
+        ]
+        for (name, argv) in rejected {
+            let exited = process(4, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(name) beat claude")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(name) stayed the group leader"
+            )
+        }
+        let alone = process(
+            4, "node",
+            argv: ["node", "--experimental-sea-config", "sea.json", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([alone]) == 4)
+
+        let kept: [(String, [String])] = [
+            ("script-first", ["node", "/usr/local/bin/codex", "--experimental-sea-config", "sea.json"]),
+            ("script-equals", ["node.exe", "/tmp/codex", "--experimental-sea-config=sea.json"]),
+            ("script-bare", ["nodejs", "/usr/local/bin/codex", "--experimental-sea-config"]),
+            // A separate empty word is an empty config string. Node does
+            // not build the blob, and the next word still runs. An empty
+            // `--flag=` is the missing-argument exit above.
+            ("empty-word", ["node", "--experimental-sea-config", "", "/usr/local/bin/codex"]),
+            ("after-end", ["node", "--", "/usr/local/bin/codex", "--experimental-sea-config", "sea.json"]),
+            ("watch-first", [
+                "node.exe", "--watch", "/usr/local/bin/codex", "--experimental-sea-config", "sea.json",
+            ]),
+            ("snapshot-first", [
+                "nodejs", "--build-snapshot", "/tmp/codex", "--experimental-sea-config", "sea.json",
+            ]),
+            ("sea-then-run", ["node", "--experimental-sea-config", "sea.json", "--run", "codex"]),
+            ("run-then-sea", ["node.exe", "--run", "codex", "--experimental-sea-config", "sea.json"]),
+            ("equals-then-run", ["nodejs", "--experimental-sea-config=sea.json", "--run", "codex"]),
+            ("run-then-equals", ["node", "--run", "codex", "--experimental-sea-config=missing.json"]),
+            ("title-then-run", [
+                "node.exe", "--title", "helper", "--experimental-sea-config", "sea.json", "--run", "codex",
+            ]),
+            ("bun-script", ["bun", "--experimental-sea-config", "/usr/local/bin/codex"]),
+        ]
+        for (name, argv) in kept {
+            let running = process(20, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(name) lost to the helper")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, running], foregroundProcessGroupId: 20) == 20,
+                "\(name) lost the group"
+            )
+        }
+
+        let blobLetta = process(
+            8, "node", argv: ["node", "--experimental-sea-config", "sea.json", "/tmp/letta"]
+        )
+        let scriptLetta = process(
+            40, "nodejs", argv: ["nodejs", "/tmp/letta", "--experimental-sea-config", "sea.json"]
+        )
+        let runLetta = process(
+            40, "node.exe",
+            argv: ["node.exe", "--experimental-sea-config=sea.json", "--run", "/tmp/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([blobLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([blobLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([helper, scriptLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([scriptLetta, interactive]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, runLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([runLetta, interactive]) == 40)
+
+        let python = process(
+            4, "python3",
+            argv: ["python3", "--experimental-sea-config", "sea.json", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
+    }
 }
