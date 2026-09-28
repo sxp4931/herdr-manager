@@ -1153,6 +1153,24 @@ private enum ShellForeground {
             }
             return .notLetta
         }
+        // The builder in `--build-snapshot-config` is the program.
+        // The positional is an argument of that script, so a Letta
+        // path there is not the TUI. The words after `node` are what
+        // the builder receives once Node has inserted the script.
+        if let runtime = argv.first, isNodeRuntime(shellBase(runtime)) {
+            let prefix = nodePrefixFlags(argv)
+            if prefix.seaConfig || prefix.conflicts || prefix.snapshotConfigExits {
+                return .notLetta
+            }
+            if prefix.snapshotConfigSkipsScript, let path = prefix.snapshotConfigPath {
+                if let script = snapshotBuilderScript(configPath: path, cwd: process.cwd),
+                   isLettaProgram(script) {
+                    let cli = Array(argv.dropFirst())
+                    return lettaArgsAreInteractive(cli) ? .interactive : .noninteractive
+                }
+                return .notLetta
+            }
+        }
         if let index = lettaEntrypointIndex(argv) {
             let cli = Array(argv.dropFirst(index + 1))
             return lettaArgsAreInteractive(cli) ? .interactive : .noninteractive
@@ -1161,7 +1179,7 @@ private enum ShellForeground {
         // or deno script, or a comm name that is Letta while argv[0] is
         // not. herdr then judges the whole vector, and a runtime in
         // argv[0] fails the "starts with -" check.
-        if runtimeScriptIsLetta(argv)
+        if runtimeScriptIsLetta(argv, cwd: process.cwd)
             || isLettaProgram(process.name)
             || process.argv0.map({ isLettaProgram($0) }) == true {
             return lettaArgsAreInteractive(argv) ? .interactive : .noninteractive
@@ -1187,11 +1205,14 @@ private enum ShellForeground {
         // `none` do run it, and the walk below still finds the path.
         // A non-empty `--experimental-sea-config` writes the blob
         // and returns before the positional, so that path is not
-        // Letta either. `--run` is not this check: the package
-        // script still runs, and `runtimeScript` names it.
+        // Letta either. A non-empty `--build-snapshot-config` while
+        // snapshot building is still on runs the builder in that
+        // JSON, not the positional. `--run` is not this check: the
+        // package script still runs, and `runtimeScript` names it.
         if isNodeRuntime(runtimeName) {
             let prefix = nodePrefixFlags(argv)
-            if prefix.conflicts || prefix.testEqualsSkipsScript || prefix.seaConfig {
+            if prefix.seaConfig || prefix.conflicts || prefix.snapshotConfigExits
+                || prefix.snapshotConfigSkipsScript || prefix.testEqualsSkipsScript {
                 return nil
             }
         }
@@ -1423,8 +1444,8 @@ private enum ShellForeground {
         return nil
     }
 
-    private static func runtimeScriptIsLetta(_ argv: [String]) -> Bool {
-        guard let script = runtimeScript(argv) else { return false }
+    private static func runtimeScriptIsLetta(_ argv: [String], cwd: String?) -> Bool {
+        guard let script = runtimeScript(argv, cwd: cwd) else { return false }
         return isLettaProgram(script)
     }
 
@@ -1659,7 +1680,8 @@ private enum ShellForeground {
     /// value is 1000. `--cron-title` and `--cron-period` exit unless
     /// both are set and neither value is empty.
     private static func runtimeScriptIsAgent(_ process: ForegroundProcess) -> Bool {
-        guard let argv = launchArguments(process), let script = runtimeScript(argv) else {
+        guard let argv = launchArguments(process),
+              let script = runtimeScript(argv, cwd: process.cwd) else {
             return false
         }
         return isKnownAgentProgram(script, cwd: process.cwd)
@@ -1864,7 +1886,7 @@ private enum ShellForeground {
         return nil
     }
 
-    private static func runtimeScript(_ argv: [String]) -> String? {
+    private static func runtimeScript(_ argv: [String], cwd: String? = nil) -> String? {
         let runtime = argv.first.map { shellBase($0) } ?? ""
         // Node exits before the file when two booleans cannot be set
         // together, when `--test` is combined with `--interactive`
@@ -1882,8 +1904,9 @@ private enum ShellForeground {
         // the file that follows. No `--run` in the option region keeps
         // the walk below. A package script still runs when `--test=`
         // would have skipped a file, and when `--experimental-sea-config`
-        // is also set: Node runs the package script before it builds
-        // the blob. That is why both decisions are after this switch.
+        // or `--build-snapshot-config` is also set: Node runs the
+        // package script before it builds the blob. That is why those
+        // decisions are after this switch.
         if isNodeRuntime(runtime) {
             switch nodePackageProgram(argv) {
             case .exits:
@@ -1904,7 +1927,24 @@ private enum ShellForeground {
             // before the positional, whether or not the config file
             // can be read. An empty `=` or a separate dash word is a
             // missing argument and is the walk's exit, not this flag.
-            if prefix.conflicts || prefix.testEqualsSkipsScript || prefix.seaConfig {
+            // A non-empty `--build-snapshot-config` while
+            // `--build-snapshot` is still on runs the JSON `builder`,
+            // or exits when that file cannot be read. The positional
+            // is not the program. `--no-build-snapshot` after the
+            // config clears the mode and the walk names the file.
+            // Sea returns before the snapshot, and CheckOptions
+            // rejects the pairs before either runs. A missing
+            // `--build-snapshot-config` value is a parser error, so
+            // an earlier builder does not run. `--test=` does not
+            // stop the builder: the child skip applies only when
+            // this process executes the positional.
+            if prefix.seaConfig || prefix.conflicts || prefix.snapshotConfigExits {
+                return nil
+            }
+            if prefix.snapshotConfigSkipsScript, let path = prefix.snapshotConfigPath {
+                return snapshotBuilderScript(configPath: path, cwd: cwd)
+            }
+            if prefix.testEqualsSkipsScript {
                 return nil
             }
         }
@@ -2186,6 +2226,9 @@ private enum ShellForeground {
     /// `--experimental-sea-config` consumes its path and then does not
     /// run the positional: Node writes the blob and returns. That
     /// decision is `NodePrefix.seaConfig`, after `--run`.
+    /// `--build-snapshot-config` also consumes its path. While
+    /// snapshot building stays on, the program is the JSON `builder`,
+    /// not the next word. That decision is `snapshotBuilderScript`.
     private static let nodeRequiredValueFlags: Set<String> = [
         "--title",
         "--unhandled-rejections",
@@ -3769,6 +3812,29 @@ private enum ShellForeground {
         /// the next word still runs. `--run` is decided before this
         /// flag is consulted.
         var seaConfig = false
+        /// Final `--build-snapshot` state. `--build-snapshot-config`
+        /// implies this when that flag is seen, before its value is
+        /// stored. A later `--no-build-snapshot` clears it and leaves
+        /// the config path. `--build-snapshot=false` is still on: the
+        /// parser ignores the attached word.
+        var buildSnapshot = false
+        /// Last non-empty `--build-snapshot-config` path before the
+        /// first positional. An empty separate word clears it. Nil
+        /// when the flag was absent or the last value was empty. A
+        /// missing argument does not change it.
+        var snapshotConfigPath: String?
+        /// A `--build-snapshot-config` value was missing. The parser
+        /// exits before the builder runs, including when an earlier
+        /// config path is still stored.
+        var snapshotConfigExits = false
+
+        /// Snapshot building is on and a config path is set. Node runs
+        /// the JSON `builder`, or exits when the file cannot be read.
+        /// The positional is not the program. `--no-build-snapshot`
+        /// after the config leaves this false.
+        var snapshotConfigSkipsScript: Bool {
+            buildSnapshot && snapshotConfigPath != nil
+        }
 
         /// TLS pair, CA pair, `--test` with `--interactive` / `-i` or
         /// with `--watch-path`, or `--watch` with `--interactive` /
@@ -3808,6 +3874,7 @@ private enum ShellForeground {
             case .watch: watch = on
             case .testForceExit: testForceExit = on
             case .coverage: coverage = on
+            case .buildSnapshot: buildSnapshot = on
             }
         }
     }
@@ -3825,6 +3892,7 @@ private enum ShellForeground {
         case watch
         case testForceExit
         case coverage
+        case buildSnapshot
     }
 
     private static func nodePrefixFlags(_ argv: [String]) -> NodePrefix {
@@ -3929,6 +3997,22 @@ private enum ShellForeground {
             if nodeSeaConfigSetsBlob(arg, argv: argv, index: index) {
                 state.seaConfig = true
             }
+            // Implies `--build-snapshot` before the value is stored.
+            // A non-empty path replaces the previous one. An empty
+            // separate word clears it, and the positional is the
+            // builder. A missing value does not clear a path already
+            // stored; the parser exits on that word.
+            if let config = nodeSnapshotConfigValue(arg, argv: argv, index: index) {
+                state.buildSnapshot = true
+                switch config {
+                case .path(let path):
+                    state.snapshotConfigPath = path
+                case .empty:
+                    state.snapshotConfigPath = nil
+                case .missing:
+                    state.snapshotConfigExits = true
+                }
+            }
             let width = arg.contains("=") || !nodeTakesSeparateValue(arg) ? 1 : 2
             index += width
         }
@@ -3959,6 +4043,131 @@ private enum ShellForeground {
         let prefix = "--experimental-sea-config="
         guard arg.hasPrefix(prefix) else { return false }
         return arg.count > prefix.count
+    }
+
+    /// What `--build-snapshot-config` contributes on this word.
+    private enum SnapshotConfigValue {
+        /// A path Node will try to open, including spaces and
+        /// `=--watch`. A separate `\-file` is the filename `-file`.
+        case path(String)
+        /// A separate empty word. The config string becomes empty and
+        /// the positional is the builder.
+        case empty
+        /// No word, an empty `=`, or a separate word that starts with
+        /// `-`. The parser exits. The stored path is left as it was.
+        case missing
+    }
+
+    /// The config value, or nil when this word is not the flag.
+    ///
+    /// `snap.json` and `--build-snapshot-config=snap.json` are paths.
+    /// A separate word that starts with `-`, an empty `=`, and a
+    /// missing word are not stored. A separate empty word clears the
+    /// path. The implication that turns `--build-snapshot` on is
+    /// applied by the caller for every one of these, which is the
+    /// order in `OptionsParser::Parse`.
+    private static func nodeSnapshotConfigValue(
+        _ arg: String,
+        argv: [String],
+        index: Int
+    ) -> SnapshotConfigValue? {
+        if arg == "--build-snapshot-config" {
+            guard index + 1 < argv.count else { return .missing }
+            let value = argv[index + 1]
+            if value.isEmpty { return .empty }
+            if value.hasPrefix("-") { return .missing }
+            if value.hasPrefix("\\-") {
+                return .path(String(value.dropFirst()))
+            }
+            return .path(value)
+        }
+        let prefix = "--build-snapshot-config="
+        guard arg.hasPrefix(prefix) else { return nil }
+        let value = String(arg.dropFirst(prefix.count))
+        return value.isEmpty ? .missing : .path(value)
+    }
+
+    /// The user script `--build-snapshot-config` runs, or nil when
+    /// Node does not run one.
+    ///
+    /// The path is the process's, joined to `cwd` when it is relative.
+    /// A missing file, a directory, JSON that is not an object, a
+    /// `builder` that is missing or empty, and a `withoutCodeCache`
+    /// that is not a boolean are the exits `ReadSnapshotConfig`
+    /// reports. `node:generate_default_snapshot`,
+    /// `node:generate_default_snapshot_source`, and
+    /// `node:embedded_snapshot_main` do not run a user file. Any other
+    /// builder is the script only when that path is a readable file:
+    /// Node reads it before the snapshot is written, and a missing
+    /// builder exits. The positional is never this result. A config
+    /// larger than 1 MiB is not read, so a path aimed at a huge file
+    /// cannot stall the sample.
+    private static func snapshotBuilderScript(configPath: String, cwd: String?) -> String? {
+        guard let file = resolveSnapshotFile(configPath, cwd: cwd),
+              let data = snapshotConfigData(at: file),
+              let parsed = try? JSONSerialization.jsonObject(with: data),
+              let object = parsed as? [String: Any] else {
+            return nil
+        }
+        if let flag = object["withoutCodeCache"], !jsonIsBool(flag) {
+            return nil
+        }
+        guard let builder = object["builder"] as? String, !builder.isEmpty else { return nil }
+        if snapshotBuiltinBuilders.contains(builder) { return nil }
+        guard let builderFile = resolveSnapshotFile(builder, cwd: cwd) else { return nil }
+        var isDirectory = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: builderFile, isDirectory: &isDirectory),
+              !isDirectory.boolValue,
+              FileManager.default.isReadableFile(atPath: builderFile) else {
+            return nil
+        }
+        return builder
+    }
+
+    /// Node's three builder names that do not read a user script.
+    private static let snapshotBuiltinBuilders: Set<String> = [
+        "node:generate_default_snapshot",
+        "node:generate_default_snapshot_source",
+        "node:embedded_snapshot_main",
+    ]
+
+    /// Absolute path, or a relative path joined to an absolute process
+    /// cwd. The config and the builder are files, not `PATH` lookups,
+    /// so a bare name is joined. Without that cwd the pane's directory
+    /// is not this process's, and the file is treated as unreadable.
+    /// A backslash path is a Windows file and is not opened here.
+    private static func resolveSnapshotFile(_ token: String, cwd: String?) -> String? {
+        if token.hasPrefix("/") { return token }
+        if token.contains("\\") { return nil }
+        guard let cwd, cwd.hasPrefix("/") else { return nil }
+        let prefix = cwd.hasSuffix("/") ? String(cwd.dropLast()) : cwd
+        return prefix + "/" + token
+    }
+
+    /// The config bytes, when the path is a readable file of at most
+    /// 1 MiB. A directory and a larger file are the same as a missing
+    /// config: the positional is not ranked in their place.
+    private static func snapshotConfigData(at path: String) -> Data? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = attributes[.size] as? NSNumber,
+              size.int64Value >= 0,
+              size.int64Value <= 1_048_576,
+              let kind = attributes[.type] as? FileAttributeType,
+              kind == .typeRegular,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+            return nil
+        }
+        return data
+    }
+
+    /// JSON `true` and `false` only. A number is not a boolean, which
+    /// is the check that rejects `"withoutCodeCache": 1`.
+    /// `JSONSerialization` boxes booleans as `CFBoolean`.
+    private static func jsonIsBool(_ value: Any) -> Bool {
+        if let number = value as? NSNumber {
+            return CFGetTypeID(number) == CFBooleanGetTypeID()
+        }
+        return value is Bool
     }
 
     /// The operand of `--experimental-test-isolation`, and how many
@@ -4011,6 +4220,7 @@ private enum ShellForeground {
         case "--experimental-test-coverage": flag = .coverage
         case "--interactive": flag = .interactive
         case "--watch": flag = .watch
+        case "--build-snapshot": flag = .buildSnapshot
         default: flag = nil
         }
         guard let flag else { return nil }

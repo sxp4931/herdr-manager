@@ -1298,10 +1298,11 @@ struct DiagnoserCpuSamplePidTests {
         _ name: String,
         argv: [String]? = nil,
         argv0: String? = nil,
-        cmdline: String? = nil
+        cmdline: String? = nil,
+        cwd: String? = nil
     ) -> ForegroundProcess {
         ForegroundProcess(
-            pid: pid, name: name, argv0: argv0, cmdline: cmdline, cwd: nil, argv: argv
+            pid: pid, name: name, argv0: argv0, cmdline: cmdline, cwd: cwd, argv: argv
         )
     }
 
@@ -9358,6 +9359,192 @@ struct DiagnoserUnclassifiableScopeTests {
         let python = process(
             4, "python3",
             argv: ["python3", "--experimental-sea-config", "sea.json", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
+    }
+
+    @Test("a node snapshot config runs the builder, not the positional")
+    func nodeSnapshotConfigRunsTheBuilder() throws {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("herdr-snapshot-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codex = root.appendingPathComponent("codex")
+        let other = root.appendingPathComponent("other.js")
+        let letta = root.appendingPathComponent("letta")
+        try Data("codex\n".utf8).write(to: codex)
+        try Data("other\n".utf8).write(to: other)
+        try Data("letta\n".utf8).write(to: letta)
+        let codexDir = root.appendingPathComponent("dir-codex", isDirectory: true)
+        try FileManager.default.createDirectory(at: codexDir, withIntermediateDirectories: true)
+        func write(_ name: String, _ json: String) throws -> String {
+            let url = root.appendingPathComponent(name)
+            try Data(json.utf8).write(to: url)
+            return url.path
+        }
+        let builderCodex = try write("builder-codex.json", "{\"builder\":\"\(codex.path)\"}")
+        let builderOther = try write("builder-other.json", "{\"builder\":\"\(other.path)\"}")
+        let builderLetta = try write("builder-letta.json", "{\"builder\":\"\(letta.path)\"}")
+        let builderCache = try write(
+            "builder-cache.json",
+            "{\"builder\":\"\(codex.path)\",\"withoutCodeCache\":true}"
+        )
+        let builderBadCache = try write(
+            "builder-bad-cache.json",
+            "{\"builder\":\"\(codex.path)\",\"withoutCodeCache\":\"yes\"}"
+        )
+        let builderNumber = try write("builder-number.json", "{\"builder\":1}")
+        let builderEmpty = try write("builder-empty.json", "{\"builder\":\"\"}")
+        let builderMissingField = try write("builder-none.json", "{}")
+        let builderBuiltin = try write(
+            "builder-builtin.json",
+            "{\"builder\":\"node:generate_default_snapshot\"}"
+        )
+        let builderAbsent = try write(
+            "builder-absent.json",
+            "{\"builder\":\"\(root.path)/absent/codex\"}"
+        )
+        let builderDirectory = try write(
+            "builder-directory.json",
+            "{\"builder\":\"\(codexDir.path)\"}"
+        )
+        let badJSON = try write("bad.json", "not json")
+        let configDir = root.appendingPathComponent("config-dir", isDirectory: true)
+        try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        try Data("{\"builder\":\"codex\"}".utf8).write(to: root.appendingPathComponent("rel.json"))
+
+        // Node 22.23 runs the JSON builder and does not execute the
+        // positional. A missing config, bad JSON, an empty builder, a
+        // builder that is not a file, and the node: snapshot names exit
+        // before that file. --build-snapshot=false does not clear the
+        // mode. The = form is the same path.
+        let rejected: [(String, [String], String?)] = [
+            ("separate", ["node", "--build-snapshot-config", builderOther, "/usr/local/bin/codex"], nil),
+            ("equals", ["nodejs", "--build-snapshot-config=\(builderOther)", "/tmp/codex"], nil),
+            ("exe", ["node.exe", "--build-snapshot-config", builderOther, "/usr/local/bin/codex"], nil),
+            ("missing", ["node", "--build-snapshot-config", root.path + "/nope.json", "/usr/local/bin/codex"], nil),
+            ("bad-json", ["nodejs", "--build-snapshot-config", badJSON, "/tmp/codex"], nil),
+            ("empty-object", ["node.exe", "--build-snapshot-config", builderMissingField, "/usr/local/bin/codex"], nil),
+            ("empty-builder", ["node", "--build-snapshot-config", builderEmpty, "/tmp/codex"], nil),
+            ("builder-number", ["nodejs", "--build-snapshot-config", builderNumber, "/usr/local/bin/codex"], nil),
+            ("bad-cache", ["node", "--build-snapshot-config", builderBadCache, "/tmp/codex"], nil),
+            ("directory", ["node.exe", "--build-snapshot-config", configDir.path, "/usr/local/bin/codex"], nil),
+            ("spaces", ["node", "--build-snapshot-config", " ", "/usr/local/bin/codex"], nil),
+            ("equals-dash", ["nodejs", "--build-snapshot-config=--watch", "/tmp/codex"], nil),
+            ("absent-builder", ["node", "--build-snapshot-config", builderAbsent, "/usr/local/bin/codex"], nil),
+            ("builder-dir", ["node.exe", "--build-snapshot-config", builderDirectory, "/tmp/codex"], nil),
+            ("builtin", ["nodejs", "--build-snapshot-config", builderBuiltin, "/usr/local/bin/codex"], nil),
+            ("equals-false", [
+                "node", "--build-snapshot-config", builderOther, "--build-snapshot=false",
+                "/usr/local/bin/codex",
+            ], nil),
+            ("no-then-config", [
+                "node.exe", "--no-build-snapshot", "--build-snapshot-config", builderOther,
+                "/usr/local/bin/codex",
+            ], nil),
+            ("good-then-missing", [
+                "node", "--build-snapshot-config", builderCodex,
+                "--build-snapshot-config", root.path + "/nope.json", "/tmp/codex",
+            ], nil),
+            ("relative-no-cwd", ["nodejs", "--build-snapshot-config", "rel.json", "/usr/local/bin/codex"], nil),
+            ("empty-equals", ["node", "--build-snapshot-config=", "/usr/local/bin/codex"], nil),
+            ("dash-word", ["nodejs", "--build-snapshot-config", "--watch", "/usr/local/bin/codex"], nil),
+            ("flag-only", ["node.exe", "--build-snapshot-config"], nil),
+            ("then-empty-equals", [
+                "node", "--build-snapshot-config", builderCodex, "--build-snapshot-config=",
+                "/usr/local/bin/codex",
+            ], nil),
+            ("test-interactive", [
+                "nodejs", "--build-snapshot-config", builderCodex, "--test", "-i",
+                "/usr/local/bin/codex",
+            ], nil),
+            ("no-flag", ["node", "--no-build-snapshot-config", "/usr/local/bin/codex"], nil),
+            ("bun-value", ["bun", "--build-snapshot-config", "sea.json", "/usr/local/bin/codex"], nil),
+        ]
+        for (name, argv, cwd) in rejected {
+            let exited = process(4, argv[0], argv: argv, cwd: cwd)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(name) beat claude")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(name) stayed the group leader"
+            )
+        }
+        let alone = process(
+            4, "node",
+            argv: ["node", "--build-snapshot-config", builderOther, "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([alone]) == 4)
+
+        let kept: [(String, [String], String?)] = [
+            ("builder", ["node", "--build-snapshot-config", builderCodex, "server.js"], nil),
+            ("equals", ["nodejs", "--build-snapshot-config=\(builderCodex)", "server.js"], nil),
+            ("exe", ["node.exe", "--build-snapshot-config", builderCodex, "/tmp/other.js"], nil),
+            ("cache", ["node", "--build-snapshot-config", builderCache, "server.js"], nil),
+            ("relative", ["nodejs", "--build-snapshot-config", "rel.json", "server.js"], root.path),
+            ("last-wins", [
+                "node", "--build-snapshot-config", builderOther,
+                "--build-snapshot-config", builderCodex, "server.js",
+            ], nil),
+            ("cleared", [
+                "node.exe", "--build-snapshot-config", builderOther,
+                "--no-build-snapshot", "/usr/local/bin/codex",
+            ], nil),
+            ("cleared-equals", [
+                "node", "--build-snapshot-config", builderOther,
+                "--no-build-snapshot=true", "/tmp/codex",
+            ], nil),
+            ("empty-word", [
+                "nodejs", "--build-snapshot-config", builderOther,
+                "--build-snapshot-config", "", "/usr/local/bin/codex",
+            ], nil),
+            ("script-first", ["node", "/usr/local/bin/codex", "--build-snapshot-config", builderOther], nil),
+            ("build-only", ["node.exe", "--build-snapshot", "/tmp/codex"], nil),
+            ("build-false", ["node", "--build-snapshot=false", "/usr/local/bin/codex"], nil),
+            ("test-equals", [
+                "node", "--test=true", "--build-snapshot-config", builderCodex, "server.js",
+            ], nil),
+            ("help", ["node.exe", "--help", "--build-snapshot-config", builderCodex], nil),
+            ("run", ["nodejs", "--build-snapshot-config", builderOther, "--run", "codex"], nil),
+            ("run-first", ["node", "--run", "codex", "--build-snapshot-config", root.path + "/nope.json"], nil),
+            ("bun-script", ["bun", "--build-snapshot-config", "/usr/local/bin/codex"], nil),
+        ]
+        for (name, argv, cwd) in kept {
+            let running = process(20, argv[0], argv: argv, cwd: cwd)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(name) lost to the helper")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, running], foregroundProcessGroupId: 20) == 20,
+                "\(name) lost the group"
+            )
+        }
+
+        let otherLetta = process(
+            8, "node",
+            argv: ["node", "--build-snapshot-config", builderOther, "/tmp/letta"]
+        )
+        let builtLetta = process(
+            40, "nodejs",
+            argv: ["nodejs", "--build-snapshot-config", builderLetta, "server.js"]
+        )
+        let prompted = process(
+            8, "node.exe",
+            argv: [
+                "node.exe", "--build-snapshot-config", builderLetta, "--prompt", "hi",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([otherLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([otherLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([helper, builtLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([builtLetta, interactive]) == 40)
+        #expect(Diagnoser.cpuSamplePid([prompted, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([prompted, interactive]) == 30)
+
+        let python = process(
+            4, "python3",
+            argv: ["python3", "--build-snapshot-config", builderCodex, "/usr/local/bin/codex"]
         )
         #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
     }
