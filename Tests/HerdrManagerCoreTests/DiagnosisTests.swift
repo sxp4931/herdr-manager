@@ -9548,4 +9548,247 @@ struct DiagnoserUnclassifiableScopeTests {
         )
         #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
     }
+
+    @Test("a node config file that cannot run is not the agent script")
+    func nodeConfigFileThatCannotRunIsNotTheScript() throws {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("herdr-node-config-\(UUID().uuidString)", isDirectory: true)
+        let sub = root.appendingPathComponent("sub", isDirectory: true)
+        let emptyDir = root.appendingPathComponent("empty", isDirectory: true)
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: emptyDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func write(_ name: String, _ json: String) throws -> String {
+            let url = root.appendingPathComponent(name)
+            try Data(json.utf8).write(to: url)
+            return url.path
+        }
+        let good = try write("good.json", "{\"nodeOptions\":{\"title\":\"helper\"}}")
+        let emptyObject = try write("empty.json", "{}")
+        let schemaOnly = try write("schema.json", "{\"$schema\":\"x\"}")
+        let watch = try write("watch.json", "{\"nodeOptions\":{\"watch\":true}}")
+        let watchFalse = try write("watch-false.json", "{\"nodeOptions\":{\"watch\":false}}")
+        let watchPath = try write("watch-path.json", "{\"nodeOptions\":{\"watch-path\":\"src\"}}")
+        let heap3 = try write("heap3.json", "{\"nodeOptions\":{\"secure-heap\":3}}")
+        let heap4 = try write("heap4.json", "{\"nodeOptions\":{\"secure-heap\":4}}")
+        let cpuName = try write("cpu-name.json", "{\"nodeOptions\":{\"cpu-prof-name\":\"x.cpuprofile\"}}")
+        let cpuOk = try write(
+            "cpu-ok.json",
+            "{\"nodeOptions\":{\"cpu-prof\":true,\"cpu-prof-name\":\"x.cpuprofile\"}}"
+        )
+        let input = try write("input.json", "{\"nodeOptions\":{\"input-type\":\"nope\"}}")
+        let titleSpace = try write("title-space.json", "{\"nodeOptions\":{\"title\":\"my title\"}}")
+        let titleQuote = try write("title-quote.json", "{\"nodeOptions\":{\"title\":\"a\\\"b\"}}")
+        let titleEmpty = try write("title-empty.json", "{\"nodeOptions\":{\"title\":\"\"}}")
+        let titleComma = try write("title-comma.json", "{\"nodeOptions\":{\"title\":\"a,b\"}}")
+        let port80 = try write("port80.json", "{\"nodeOptions\":{\"inspect-port\":80}}")
+        let port9229 = try write("port9229.json", "{\"nodeOptions\":{\"inspect-port\":9229}}")
+        let largepages = try write("lp.json", "{\"nodeOptions\":{\"use-largepages\":\"nope\"}}")
+        let largepagesOff = try write("lp-off.json", "{\"nodeOptions\":{\"use-largepages\":\"off\"}}")
+        let cas = try write(
+            "ca.json",
+            "{\"nodeOptions\":{\"use-openssl-ca\":true,\"use-bundled-ca\":true}}"
+        )
+        let tls = try write(
+            "tls.json",
+            "{\"nodeOptions\":{\"tls-min-v1.3\":true,\"tls-max-v1.2\":true}}"
+        )
+        let percent = try write(
+            "percent.json",
+            "{\"nodeOptions\":{\"max-old-space-size-percentage\":\"nope\"}}"
+        )
+        let percent50 = try write(
+            "percent50.json",
+            "{\"nodeOptions\":{\"max-old-space-size-percentage\":\"50\"}}"
+        )
+        let percentNumber = try write(
+            "percent-number.json",
+            "{\"nodeOptions\":{\"max-old-space-size-percentage\":50}}"
+        )
+        let v8 = try write("v8.json", "{\"nodeOptions\":{\"max-old-space-size\":64}}")
+        let unknown = try write("unknown.json", "{\"nodeOptions\":{\"not-a-flag\":true}}")
+        let evalOption = try write("eval.json", "{\"nodeOptions\":{\"eval\":\"code\"}}")
+        let runOption = try write("run.json", "{\"nodeOptions\":{\"run\":\"codex\"}}")
+        let alias = try write("alias.json", "{\"nodeOptions\":{\"report-directory\":\"/tmp\"}}")
+        let fips = try write("fips.json", "{\"nodeOptions\":{\"enable-fips\":true}}")
+        let snapshotFlag = try write("snapshot-flag.json", "{\"nodeOptions\":{\"node-snapshot\":true}}")
+        let allow = try write("allow.json", "{\"nodeOptions\":{\"allow-fs-read\":\"*\"}}")
+        let allowOk = try write(
+            "allow-ok.json",
+            "{\"nodeOptions\":{\"permission\":true,\"allow-fs-read\":\"*\"}}"
+        )
+        let conditions = try write(
+            "conditions.json",
+            "{\"nodeOptions\":{\"conditions\":[\"dev\",\"test\"]}}"
+        )
+        let conditionsSpace = try write(
+            "conditions-space.json",
+            "{\"nodeOptions\":{\"conditions\":\"a b\"}}"
+        )
+        let bad = try write("bad.json", "not json")
+        let blank = try write("blank.json", "")
+        let array = try write("array.json", "[]")
+        let comment = try write("comment.json", "{/*c*/ \"nodeOptions\":{}}")
+        let optionsString = try write("options-string.json", "{\"nodeOptions\":\"title\"}")
+        let trailing = try write("trailing.json", "{\"nodeOptions\":{\"title\":\"helper\",},}")
+        let configDir = root.appendingPathComponent("config-dir", isDirectory: true)
+        try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        try Data("{\"nodeOptions\":{}}".utf8).write(to: root.appendingPathComponent("rel.json"))
+        try Data("{\"nodeOptions\":{\"title\":\"helper\"}}".utf8).write(
+            to: root.appendingPathComponent("node.config.json")
+        )
+        var bom = Data([0xEF, 0xBB, 0xBF])
+        bom.append(Data("{\"nodeOptions\":{}}".utf8))
+        let bomPath = root.appendingPathComponent("bom.json").path
+        try bom.write(to: URL(fileURLWithPath: bomPath))
+        let link = root.appendingPathComponent("link.json").path
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: good)
+        let huge = root.appendingPathComponent("huge.json")
+        try Data(repeating: 0x78, count: 1_048_577).write(to: huge)
+        let missing = root.path + "/nope.json"
+        let script = "/usr/local/bin/codex"
+
+        // Node 22.23 reads the config before --run and before the
+        // positional. A missing file, a bad document, a disallowed
+        // option, watch, and a value CheckOptions rejects do not run
+        // that file. The = form is the same path. A file written first
+        // still does not run when the config cannot be used.
+        let rejected: [(String, [String], String?)] = [
+            ("missing", ["node", "--experimental-config-file", missing, script], nil),
+            ("equals-missing", ["nodejs", "--experimental-config-file=\(missing)", script], nil),
+            ("exe-missing", ["node.exe", "--experimental-config-file", missing, script], nil),
+            ("directory", ["node", "--experimental-config-file", configDir.path, script], nil),
+            ("bad-json", ["nodejs", "--experimental-config-file", bad, script], nil),
+            ("blank", ["node", "--experimental-config-file", blank, script], nil),
+            ("array", ["node.exe", "--experimental-config-file", array, script], nil),
+            ("comment", ["node", "--experimental-config-file", comment, script], nil),
+            ("options-string", ["nodejs", "--experimental-config-file", optionsString, script], nil),
+            ("unknown", ["node", "--experimental-config-file", unknown, script], nil),
+            ("eval", ["node", "--experimental-config-file", evalOption, script], nil),
+            ("run-key", ["nodejs", "--experimental-config-file", runOption, script], nil),
+            ("alias", ["node", "--experimental-config-file", alias, script], nil),
+            ("v8", ["node.exe", "--experimental-config-file", v8, script], nil),
+            ("watch", ["node", "--experimental-config-file", watch, script], nil),
+            ("watch-no", ["nodejs", "--no-watch", "--experimental-config-file", watch, script], nil),
+            ("watch-path", ["node", "--experimental-config-file", watchPath, script], nil),
+            ("heap3", ["node.exe", "--experimental-config-file", heap3, script], nil),
+            ("cpu-name", ["node", "--experimental-config-file", cpuName, script], nil),
+            ("input", ["nodejs", "--experimental-config-file", input, script], nil),
+            ("title-space", ["node", "--experimental-config-file", titleSpace, script], nil),
+            ("title-quote", ["node", "--experimental-config-file", titleQuote, script], nil),
+            ("title-empty", ["node.exe", "--experimental-config-file", titleEmpty, script], nil),
+            ("port80", ["node", "--experimental-config-file", port80, script], nil),
+            ("largepages", ["nodejs", "--experimental-config-file", largepages, script], nil),
+            ("cas", ["node", "--experimental-config-file", cas, script], nil),
+            ("tls", ["node", "--experimental-config-file", tls, script], nil),
+            ("percent", ["node.exe", "--experimental-config-file", percent, script], nil),
+            ("percent-number", ["node", "--experimental-config-file", percentNumber, script], nil),
+            ("fips", ["nodejs", "--experimental-config-file", fips, script], nil),
+            ("allow", ["node", "--experimental-config-file", allow, script], nil),
+            ("conditions-space", ["node", "--experimental-config-file", conditionsSpace, script], nil),
+            ("script-first", ["node", script, "--experimental-config-file", missing], nil),
+            ("after-dd", ["nodejs", "--", script, "--experimental-config-file", missing], nil),
+            ("run-missing", ["node", "--run", "codex", "--experimental-config-file", missing], nil),
+            ("run-watch", ["node.exe", "--run", "codex", "--experimental-config-file", watch], nil),
+            ("default-missing", ["node", "--experimental-default-config-file", script], emptyDir.path),
+            ("default-equals", ["nodejs", "--experimental-default-config-file=true", script], emptyDir.path),
+            ("relative-no-cwd", ["node", "--experimental-config-file", "rel.json", script], nil),
+            ("empty-equals", ["node", "--experimental-config-file=", script], root.path),
+            ("dash-word", ["nodejs", "--experimental-config-file", "--watch", script], root.path),
+            ("spaces", ["node", "--experimental-config-file", " ", script], root.path),
+            ("first-missing", [
+                "node.exe", "--experimental-config-file", missing,
+                "--experimental-config-file", good, script,
+            ], nil),
+            ("flag-only", ["node", "--experimental-config-file"], nil),
+            ("cli-fips", ["node", "--enable-fips", script], nil),
+        ]
+        for (name, argv, cwd) in rejected {
+            let exited = process(4, argv[0], argv: argv, cwd: cwd)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(name) beat claude")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(name) stayed the group leader"
+            )
+        }
+        let alone = process(
+            4, "node",
+            argv: ["node", "--experimental-config-file", missing, script]
+        )
+        #expect(Diagnoser.cpuSamplePid([alone]) == 4)
+
+        let kept: [(String, [String], String?)] = [
+            ("title", ["node", "--experimental-config-file", good, script], nil),
+            ("equals", ["nodejs", "--experimental-config-file=\(good)", script], nil),
+            ("exe", ["node.exe", "--experimental-config-file", emptyObject, script], nil),
+            ("schema", ["node", "--experimental-config-file", schemaOnly, script], nil),
+            ("watch-false", ["nodejs", "--experimental-config-file", watchFalse, script], nil),
+            ("heap4", ["node", "--experimental-config-file", heap4, script], nil),
+            ("cpu", ["node.exe", "--experimental-config-file", cpuOk, script], nil),
+            ("port", ["node", "--experimental-config-file", port9229, script], nil),
+            ("largepages-off", ["nodejs", "--experimental-config-file", largepagesOff, script], nil),
+            ("percent50", ["node", "--experimental-config-file", percent50, script], nil),
+            ("snapshot-flag", ["node", "--experimental-config-file", snapshotFlag, script], nil),
+            ("allow-ok", ["node.exe", "--experimental-config-file", allowOk, script], nil),
+            ("conditions", ["node", "--experimental-config-file", conditions, script], nil),
+            ("title-comma", ["nodejs", "--experimental-config-file", titleComma, script], nil),
+            ("trailing", ["node", "--experimental-config-file", trailing, script], nil),
+            ("bom", ["node", "--experimental-config-file", bomPath, script], nil),
+            ("link", ["node.exe", "--experimental-config-file", link, script], nil),
+            ("script-first", ["node", script, "--experimental-config-file", good], nil),
+            ("flag-after-script", ["nodejs", script, "--experimental-config-file"], nil),
+            ("run", ["node", "--run", "codex", "--experimental-config-file", emptyObject], nil),
+            ("default", ["node", "--experimental-default-config-file", script], root.path),
+            ("default-equals", ["node.exe", "--experimental-default-config-file=", script], root.path),
+            ("relative", ["nodejs", "--experimental-config-file", "../rel.json", script], sub.path),
+            ("equals-wins", [
+                "node", "--experimental-config-file=\(good)",
+                "--experimental-config-file", missing, script,
+            ], nil),
+            ("huge", ["node", "--experimental-config-file", huge.path, script], nil),
+            ("cli-snapshot", ["node", "--node-snapshot", script], nil),
+            ("cli-verify", ["nodejs", "--verify-base-objects", script], nil),
+            ("cli-shadow", ["node.exe", "--experimental-shadow-realm", script], nil),
+            ("cli-debug", ["node", "--debug-arraybuffer-allocations", script], nil),
+        ]
+        for (name, argv, cwd) in kept {
+            let running = process(20, argv[0], argv: argv, cwd: cwd)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(name) lost to the helper")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, running], foregroundProcessGroupId: 20) == 20,
+                "\(name) lost the group"
+            )
+        }
+
+        let missingLetta = process(
+            8, "node",
+            argv: ["node", "--experimental-config-file", missing, "/tmp/letta"]
+        )
+        let goodLetta = process(
+            40, "nodejs",
+            argv: ["nodejs", "--experimental-config-file", emptyObject, "/tmp/letta"]
+        )
+        let prompted = process(
+            8, "node.exe",
+            argv: [
+                "node.exe", "--experimental-config-file", good, "/tmp/letta", "--prompt", "hi",
+            ]
+        )
+        #expect(Diagnoser.cpuSamplePid([missingLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([missingLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([helper, goodLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([goodLetta, interactive]) == 40)
+        #expect(Diagnoser.cpuSamplePid([prompted, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([prompted, interactive]) == 30)
+
+        let python = process(
+            4, "python3",
+            argv: ["python3", "--experimental-config-file", good, script]
+        )
+        #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
+    }
 }

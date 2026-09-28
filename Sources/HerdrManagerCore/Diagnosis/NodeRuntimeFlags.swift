@@ -33,6 +33,7 @@ enum NodeRuntimeFlags {
 --allow-worker
 --build-snapshot
 --cpu-prof
+--debug-arraybuffer-allocations
 --deprecation
 --disable-sigusr1
 --disable-wasm-trap-handler
@@ -55,6 +56,7 @@ enum NodeRuntimeFlags {
 --experimental-print-required-tla
 --experimental-repl-await
 --experimental-require-module
+--experimental-shadow-realm
 --experimental-sqlite
 --experimental-strip-types
 --experimental-test-coverage
@@ -96,6 +98,7 @@ enum NodeRuntimeFlags {
 --no-network-family-autoselection
 --no-warnings
 --node-memory-debug
+--node-snapshot
 --openssl-legacy-provider
 --openssl-shared-config
 --pending-deprecation
@@ -137,6 +140,7 @@ enum NodeRuntimeFlags {
 --use-env-proxy
 --use-openssl-ca
 --use-system-ca
+--verify-base-objects
 --warnings
 --watch
 --watch-preserve-output

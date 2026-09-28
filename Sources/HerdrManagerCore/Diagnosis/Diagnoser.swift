@@ -1171,7 +1171,7 @@ private enum ShellForeground {
                 return .notLetta
             }
         }
-        if let index = lettaEntrypointIndex(argv) {
+        if let index = lettaEntrypointIndex(argv, cwd: process.cwd) {
             let cli = Array(argv.dropFirst(index + 1))
             return lettaArgsAreInteractive(cli) ? .interactive : .noninteractive
         }
@@ -1192,7 +1192,7 @@ private enum ShellForeground {
     /// herdr uses. Eval, including `-e` glued to its code, is not a script.
     /// `bun run` and `bun x` are subcommands, so the entrypoint is the
     /// word after them. `node run` is a program named `run`.
-    private static func lettaEntrypointIndex(_ argv: [String]) -> Int? {
+    private static func lettaEntrypointIndex(_ argv: [String], cwd: String?) -> Int? {
         if let first = argv.first, isLettaProgram(first) {
             return 0
         }
@@ -1210,6 +1210,11 @@ private enum ShellForeground {
         // JSON, not the positional. `--run` is not this check: the
         // package script still runs, and `runtimeScript` names it.
         if isNodeRuntime(runtimeName) {
+            // A config Node cannot use exits before the positional, so
+            // that path is not Letta. A valid file still names it.
+            if case .exits = NodeConfigFile.effect(argv: argv, cwd: cwd) {
+                return nil
+            }
             let prefix = nodePrefixFlags(argv)
             if prefix.seaConfig || prefix.conflicts || prefix.snapshotConfigExits
                 || prefix.snapshotConfigSkipsScript || prefix.testEqualsSkipsScript {
@@ -1888,13 +1893,33 @@ private enum ShellForeground {
 
     private static func runtimeScript(_ argv: [String], cwd: String? = nil) -> String? {
         let runtime = argv.first.map { shellBase($0) } ?? ""
+        // The config file is read before `--run` and before the positional.
+        // A file Node cannot use exits, and so does `watch: true` or a
+        // `watch-path`, because that check runs on the config's own argv,
+        // which has no script. A package script and a file written first
+        // do not get past it. A valid file's `nodeOptions` are inserted
+        // in front of the real argv, which is where Node applies them.
+        var argv = argv
+        if isNodeRuntime(runtime) {
+            switch NodeConfigFile.effect(argv: argv, cwd: cwd) {
+            case .exits:
+                return nil
+            case .absent:
+                break
+            case .flags(let words):
+                if !words.isEmpty, let program = argv.first {
+                    argv = [program] + words + Array(argv.dropFirst())
+                }
+            }
+        }
         // Node exits before the file when two booleans cannot be set
         // together, when `--test` is combined with `--interactive`
         // (`-i` is the same flag) or with `--watch-path`, and when
         // `--watch` is combined with `--interactive` or
         // `--test-force-exit`. `--watch-path` implies `--watch`. A
-        // script written first is already the program: options after
-        // it are arguments, and that prefix has no conflict. `--watch`
+        // script written first is already the program for these pairs:
+        // options after it are arguments. The config file is the
+        // exception, and it was applied above. `--watch`
         // without a path still runs beside `--test`. A later `--no-`
         // wins. A test-runner operand the harness rejects, including
         // a name or skip pattern, is `nodeOption`, and only while the
