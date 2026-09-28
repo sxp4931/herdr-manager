@@ -2932,13 +2932,20 @@ private enum ShellForeground {
     /// (`nodePackageProgram`). `--test=true` is still this boolean.
     /// Whether the process runs the file is `testEqualsSkipsScript`:
     /// the child that keeps `--test=` does not, and `--no-test` or
-    /// isolation `none` does. `--use-strict` and `--harmony` are
-    /// V8 booleans: the bare flag and `--no-harmony` name the file, and
-    /// `--harmony=true` does not. `--max-old-space-size=4096` names the
-    /// file. A separate word (`--max-old-space-size 4096`) is not a
-    /// value. `--help`, `--version`, `--v8-options`, and
-    /// `--completion-bash` print and exit. Anything else, including
-    /// `--not-a-flag` and `--revision`, exits before the file runs.
+    /// isolation `none` does. `--inspect`, `--inspect-brk`,
+    /// `--inspect-wait`, and `--inspect-brk-node` are booleans, so a
+    /// separate word is the script. Their `=` form is the inspector
+    /// address (`nodeInspectHostPortRejects`): `--inspect=9229` names
+    /// the file and `--inspect=80` does not. An empty `--inspect=` is
+    /// a missing argument. `--no-inspect` names the file, and
+    /// `--no-inspect=80` is not a boolean. `--use-strict` and
+    /// `--harmony` are V8 booleans: the bare flag and `--no-harmony`
+    /// name the file, and `--harmony=true` does not.
+    /// `--max-old-space-size=4096` names the file. A separate word
+    /// (`--max-old-space-size 4096`) is not a value. `--help`,
+    /// `--version`, `--v8-options`, and `--completion-bash` print and
+    /// exit. Anything else, including `--not-a-flag` and `--revision`,
+    /// exits before the file runs.
     private static func nodeLongOption(
         _ arg: String,
         argv: [String],
@@ -2978,12 +2985,25 @@ private enum ShellForeground {
             // `--test=` is not an exit at this word. The file body
             // runs or skips from the final prefix, after a later
             // `--no-test` or isolation value has been seen.
+            // `--inspect=80` is the port alias, not that boolean.
+            if let value, nodeInspectEqualsSetsPort(name) {
+                if value.isEmpty || nodeInspectHostPortRejects(String(value)) {
+                    return .exits
+                }
+            }
             return .skip(1)
         }
         if let positive = nodeNegatedFlag(name) {
             let nodeLike = NodeRuntimeFlags.scriptBooleans.contains(positive)
                 || NodeRuntimeFlags.printFlags.contains(positive)
-            if nodeLike { return .skip(1) }
+            if nodeLike {
+                // `--no-inspect` is the boolean. `--no-inspect=80` is
+                // the port alias, which is not a boolean negation.
+                if value != nil, nodeInspectEqualsSetsPort(positive) {
+                    return .exits
+                }
+                return .skip(1)
+            }
             let v8Like = NodeRuntimeFlags.v8Booleans.contains(positive)
                 || NodeRuntimeFlags.v8NegationOnly.contains(positive)
             if v8Like {
@@ -3110,6 +3130,10 @@ private enum ShellForeground {
     /// source scalar above U+FFFF is one code point when `u` or `v`
     /// is set, and a lead/trail pair otherwise, so a legacy range
     /// across that pair is the same check.
+    /// `--inspect-port` and `--debug-port` are `SplitHostPort`. A port
+    /// outside 0 and 1024...65535 exits. Node records every address, so
+    /// a later 9229 does not erase an earlier 80. `9229`, `0`, `[::1]`,
+    /// and `localhost:` still run. A script written first is not this check.
     private static func nodeRejectedOperand(
         name: String,
         value: String,
@@ -3118,6 +3142,12 @@ private enum ShellForeground {
     ) -> Bool {
         if let allowed = nodeEnumValues[name] {
             return !allowed.contains(value)
+        }
+        if name == "--inspect-port" || name == "--debug-port" {
+            // The last address is not the only one checked. Node
+            // records an error for every value, so 80 beside 9229
+            // still exits. `[::1]` and `65536abc` (a hostname) do not.
+            return nodeInspectHostPortRejects(value)
         }
         if name == "--inspect-publish-uid" {
             return !nodePublishUID(value)
@@ -3171,6 +3201,74 @@ private enum ShellForeground {
         default:
             return false
         }
+    }
+
+    /// `--inspect=`, `--inspect-brk=`, `--inspect-wait=`, and
+    /// `--inspect-brk-node=`. The bare flag is a boolean. The `=`
+    /// form is the inspector address.
+    private static func nodeInspectEqualsSetsPort(_ name: String) -> Bool {
+        switch name {
+        case "--inspect", "--inspect-brk", "--inspect-wait", "--inspect-brk-node":
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// True when Node 22.23's `SplitHostPort` rejects this address.
+    ///
+    /// A word that starts with `[` and ends with `]` is a host with
+    /// the default port, including `[::1]:80]`. Otherwise the text
+    /// after the last `:`, or the whole word when every character is
+    /// a digit, is `from_chars` into `uint16_t`. Overflow, and a value
+    /// that is not 0 and is below 1024, exit. No digit (`abc`, `+1024`,
+    /// a leading space) leaves the port at 0 and still runs. Trailing
+    /// junk after a colon is ignored once a prefix fits
+    /// (`host:1024abc` runs, `host:1023abc` and `host:65536abc` do not).
+    /// `65536abc` with no colon is a hostname. `::1` is port 1.
+    /// `--inspect 80` is not this check: the separate word is the script.
+    private static func nodeInspectHostPortRejects(_ value: String) -> Bool {
+        let scalars = Array(value.unicodeScalars)
+        if scalars.count >= 2, scalars[0].value == 91, scalars[scalars.count - 1].value == 93 {
+            return false
+        }
+        if let colon = scalars.lastIndex(where: { $0.value == 58 }) {
+            let port = Array(scalars[scalars.index(after: colon)...])
+            return nodeInspectPortNumberRejects(port)
+        }
+        let allDigits = !scalars.isEmpty && scalars.allSatisfy { $0.value >= 48 && $0.value <= 57 }
+        if allDigits {
+            return nodeInspectPortNumberRejects(scalars)
+        }
+        return false
+    }
+
+    /// `std::from_chars` base 10 into `uint16_t`, then Node's range.
+    /// The digit run stops at the first non-digit. No digit is port 0,
+    /// which is allowed. A run that does not fit in `uint16_t` is an
+    /// error even when junk follows. A value that fits ignores that
+    /// junk. 0 is allowed. 1...1023 is not. 1024...65535 is allowed.
+    private static func nodeInspectPortNumberRejects(_ scalars: [Unicode.Scalar]) -> Bool {
+        var index = 0
+        var magnitude: UInt64 = 0
+        var digits = 0
+        var overflow = false
+        let limit = UInt64(UInt16.max)
+        while index < scalars.count {
+            let code = scalars[index].value
+            guard code >= 48, code <= 57 else { break }
+            let digit = UInt64(code - 48)
+            if magnitude > (limit - digit) / 10 {
+                overflow = true
+                break
+            }
+            magnitude = magnitude * 10 + digit
+            digits += 1
+            index += 1
+        }
+        if digits == 0 { return false }
+        if overflow { return true }
+        return magnitude != 0 && magnitude < 1024
     }
 
     /// `stderr` and `http`, comma-separated. An empty segment is

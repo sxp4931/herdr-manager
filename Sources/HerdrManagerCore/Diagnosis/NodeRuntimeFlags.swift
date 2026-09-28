@@ -74,6 +74,7 @@ enum NodeRuntimeFlags {
 --insecure-http-parser
 --inspect
 --inspect-brk
+--inspect-brk-node
 --inspect-wait
 --interactive
 --network-family-autoselection

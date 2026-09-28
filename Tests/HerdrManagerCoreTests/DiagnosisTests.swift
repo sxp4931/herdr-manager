@@ -9097,4 +9097,147 @@ struct DiagnoserUnclassifiableScopeTests {
         )
         #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
     }
+
+    @Test("a node inspector port the runtime rejects is not the agent script")
+    func nodeInspectPortRejectsBeforeTheFile() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23's SplitHostPort rejects a port that is not 0 and
+        // not in 1024...65535. Every address is checked, so a later
+        // 9229 does not save an earlier 80. The `=` form of --inspect,
+        // --inspect-brk, --inspect-wait, and --inspect-brk-node is that
+        // address. A separate word after those booleans is the script.
+        let rejected: [(String, [String])] = [
+            ("port-80", ["node", "--inspect-port", "80", "/usr/local/bin/codex"]),
+            ("port-1023", ["nodejs", "--inspect-port=1023", "/tmp/codex"]),
+            ("port-1", ["node.exe", "--inspect-port", "1", "/usr/local/bin/codex"]),
+            ("zeros-1023", ["node", "--inspect-port", "0001023", "/tmp/codex"]),
+            ("65536", ["nodejs", "--inspect-port", "65536", "/usr/local/bin/codex"]),
+            ("zeros-65536", ["node.exe", "--inspect-port=00065536", "/tmp/codex"]),
+            ("debug-80", ["node", "--debug-port", "80", "/usr/local/bin/codex"]),
+            ("debug-080", ["nodejs", "--debug-port=080", "/tmp/codex"]),
+            ("host-80", ["node", "--inspect-port", "127.0.0.1:80", "/usr/local/bin/codex"]),
+            ("bracket-1023", ["node.exe", "--inspect-port=[::1]:1023", "/tmp/codex"]),
+            ("unbracketed-v6", ["node", "--inspect-port", "::1", "/usr/local/bin/codex"]),
+            ("equals-v6", ["nodejs", "--inspect-port=::1", "/tmp/codex"]),
+            ("colon-80", ["node", "--inspect-port", ":80", "/usr/local/bin/codex"]),
+            ("junk-1023", ["node.exe", "--inspect-port", "h:1023abc", "/tmp/codex"]),
+            ("junk-65536", ["node", "--inspect-port", "h:65536abc", "/usr/local/bin/codex"]),
+            ("inspect-equals", ["nodejs", "--inspect=80", "/tmp/codex"]),
+            ("brk-equals", ["node", "--inspect-brk=1", "/usr/local/bin/codex"]),
+            ("wait-equals", ["node.exe", "--inspect-wait=1023", "/tmp/codex"]),
+            ("brk-node-equals", ["node", "--inspect-brk-node=80", "/usr/local/bin/codex"]),
+            ("inspect-empty", ["nodejs", "--inspect=", "/tmp/codex"]),
+            ("brk-empty", ["node", "--inspect-brk=", "/usr/local/bin/codex"]),
+            ("wait-empty", ["node.exe", "--inspect-wait=", "/tmp/codex"]),
+            ("brk-node-empty", ["node", "--inspect-brk-node=", "/usr/local/bin/codex"]),
+            ("no-inspect-equals", ["nodejs", "--no-inspect=80", "/tmp/codex"]),
+            ("no-brk-equals", ["node", "--no-inspect-brk=9229", "/usr/local/bin/codex"]),
+            ("no-brk-node-empty", ["node.exe", "--no-inspect-brk-node=", "/tmp/codex"]),
+            ("bad-then-good", [
+                "node", "--inspect-port", "80", "--inspect-port", "9229", "/usr/local/bin/codex",
+            ]),
+            ("good-then-bad", [
+                "nodejs", "--inspect-port", "9229", "--inspect=80", "/tmp/codex",
+            ]),
+            ("port-then-run", ["node", "--inspect-port", "80", "--run", "codex"]),
+            ("run-then-port", ["node.exe", "--run", "codex", "--inspect-port", "80"]),
+            ("inspect-then-run", ["nodejs", "--inspect=80", "--run", "codex"]),
+            ("brk-separate", ["node", "--inspect-brk", "80", "/usr/local/bin/codex"]),
+            ("wait-separate", ["node.exe", "--inspect-wait", "1023", "/tmp/codex"]),
+            ("brk-node-separate", ["nodejs", "--inspect-brk-node", "80", "/usr/local/bin/codex"]),
+            // Bun does not parse the port. The next word is the script,
+            // so `80` is that script and the agent path is an argument.
+            ("bun", ["bun", "--inspect-port", "80", "/usr/local/bin/codex"]),
+        ]
+        for (name, argv) in rejected {
+            let exited = process(4, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(name) beat claude")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(name) stayed the group leader"
+            )
+        }
+        let alone = process(
+            4, "node", argv: ["node", "--inspect-port", "80", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([alone]) == 4)
+
+        // 0 and 1024...65535 run. A failed from_chars is port 0.
+        // A bracketed host uses the default port. No colon and a
+        // non-digit is a hostname, so 65536abc still runs the file.
+        // --inspect-brk-node is the boolean --inspect-brk was already.
+        let kept: [(String, [String])] = [
+            ("9229", ["node", "--inspect-port", "9229", "/usr/local/bin/codex"]),
+            ("zero", ["nodejs", "--inspect-port", "0", "/tmp/codex"]),
+            ("1024", ["node.exe", "--inspect-port=1024", "/usr/local/bin/codex"]),
+            ("65535", ["node", "--inspect-port", "65535", "/tmp/codex"]),
+            ("zeros-1024", ["nodejs", "--inspect-port", "0001024", "/usr/local/bin/codex"]),
+            ("zeros", ["node", "--inspect-port=0000", "/tmp/codex"]),
+            ("hostname-junk", ["node.exe", "--inspect-port=1024abc", "/usr/local/bin/codex"]),
+            ("hostname-overflow", ["node", "--inspect-port", "65536abc", "/tmp/codex"]),
+            ("localhost", ["nodejs", "--inspect-port", "localhost:9229", "/usr/local/bin/codex"]),
+            ("bracket", ["node", "--inspect-port=[::1]", "/tmp/codex"]),
+            ("bracket-port", ["node.exe", "--inspect-port", "[::1]:9229", "/usr/local/bin/codex"]),
+            ("bracket-zero", ["node", "--inspect-port=[::1]:0", "/tmp/codex"]),
+            ("bracket-junk", ["nodejs", "--inspect-port", "[::1]:80]", "/usr/local/bin/codex"]),
+            ("empty-port", ["node", "--inspect-port", "localhost:", "/tmp/codex"]),
+            ("colon-9229", ["node.exe", "--inspect-port", ":9229", "/usr/local/bin/codex"]),
+            ("colon", ["node", "--inspect-port", ":", "/tmp/codex"]),
+            ("star", ["nodejs", "--inspect-port", "*", "/usr/local/bin/codex"]),
+            ("dash-host", ["node", "--inspect-port=-", "/tmp/codex"]),
+            ("plus", ["node.exe", "--inspect-port", "+1024", "/usr/local/bin/codex"]),
+            ("dotted", ["node", "--inspect-port", "1024.5", "/tmp/codex"]),
+            ("prefix-1024", ["nodejs", "--inspect-port", "h:1024abc", "/usr/local/bin/codex"]),
+            ("space-port", ["node", "--inspect-port", "h: 80", "/tmp/codex"]),
+            ("inspect-9229", ["node.exe", "--inspect=9229", "/usr/local/bin/codex"]),
+            ("inspect-true", ["node", "--inspect=true", "/tmp/codex"]),
+            ("inspect-zero", ["nodejs", "--inspect=0", "/usr/local/bin/codex"]),
+            ("brk-1024", ["node", "--inspect-brk=1024", "/tmp/codex"]),
+            ("brk-zero", ["node.exe", "--inspect-brk=0", "/usr/local/bin/codex"]),
+            ("wait-9229", ["nodejs", "--inspect-wait=9229", "/tmp/codex"]),
+            ("brk-node", ["node", "--inspect-brk-node", "/usr/local/bin/codex"]),
+            ("brk-node-9229", ["node.exe", "--inspect-brk-node=9229", "/tmp/codex"]),
+            ("brk-node-true", ["nodejs", "--inspect-brk-node=true", "/usr/local/bin/codex"]),
+            ("no-inspect", ["node", "--no-inspect", "/tmp/codex"]),
+            ("no-brk", ["node.exe", "--no-inspect-brk", "/usr/local/bin/codex"]),
+            ("no-brk-node", ["nodejs", "--no-inspect-brk-node", "/tmp/codex"]),
+            ("brk-file", ["node", "--inspect-brk", "/usr/local/bin/codex"]),
+            ("script-first", ["node.exe", "/usr/local/bin/codex", "--inspect-port", "80"]),
+            ("good-then-run", ["node", "--inspect-port", "9229", "--run", "codex"]),
+            ("inspect-then-run", ["nodejs", "--inspect=9229", "--run", "codex"]),
+            ("brk-node-then-run", ["node", "--inspect-brk-node", "--run", "codex"]),
+        ]
+        for (name, argv) in kept {
+            let running = process(20, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(name) lost to the helper")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, running], foregroundProcessGroupId: 20) == 20,
+                "\(name) lost the group"
+            )
+        }
+
+        let badLetta = process(
+            8, "node", argv: ["node", "--inspect-brk=80", "/tmp/letta"]
+        )
+        let brkNodeLetta = process(
+            40, "nodejs", argv: ["nodejs", "--inspect-brk-node", "/tmp/letta"]
+        )
+        let portLetta = process(
+            40, "node.exe", argv: ["node.exe", "--inspect-port", "9229", "/tmp/letta"]
+        )
+        #expect(Diagnoser.cpuSamplePid([badLetta, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([badLetta, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([helper, brkNodeLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([brkNodeLetta, interactive]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, portLetta]) == 40)
+
+        let python = process(
+            4, "python3", argv: ["python3", "--inspect-port", "80", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
+    }
 }
