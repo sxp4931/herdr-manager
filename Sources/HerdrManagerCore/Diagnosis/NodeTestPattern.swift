@@ -3,11 +3,14 @@
 ///
 /// The wrapper is `^/(.*)/([a-z]*)$`: a match is `new RegExp(pattern, flags)`,
 /// and anything else is `new RegExp(text)` with empty flags. The pattern
-/// grammar is V8 12.4 (the engine in Node 22.23.2). Two throws are not
-/// decided here, because each needs data this walker does not have:
-/// a `v` flag's character-class grammar, and whether a `\p{…}` name is a
-/// real Unicode property. A scalar above U+FFFF is a surrogate pair in
-/// the legacy parser, so that pattern is not decided either.
+/// grammar is V8 12.4 (the engine in Node 22.23.2). A `v` flag's character
+/// class is that engine's unicodeSets grammar: union, range, `&&`, `--`,
+/// and `\q`. Two throws are still not decided. Whether a `\p{…}` or
+/// `\P{…}` name is a real property, and whether that property contains
+/// strings, needs the Unicode database. A scalar above U+FFFF is a
+/// surrogate pair in the legacy parser, so that pattern is not decided
+/// either. A class nested more than 64 deep is not decided: the file
+/// stays the script.
 enum NodeTestPattern {
     private static let quantifierInfinity = 2_147_483_647
 
@@ -17,12 +20,10 @@ enum NodeTestPattern {
         if pattern.unicodeScalars.contains(where: { $0.value > 0xFFFF }) {
             return false
         }
-        if flags.contains("v"), pattern.contains("[") {
-            return false
-        }
         var parser = Parser(
             text: pattern,
-            unicode: flags.contains("u") || flags.contains("v")
+            unicode: flags.contains("u") || flags.contains("v"),
+            sets: flags.contains("v")
         )
         return parser.fails()
     }
@@ -72,7 +73,11 @@ enum NodeTestPattern {
         private let scalars: [UInt32]
         private var index = 0
         private let unicode: Bool
+        private let sets: Bool
         private var failed = false
+        /// A class nested past the recursion limit. `fails` then reports
+        /// that the pattern does not throw, so a deep class is not hidden.
+        private var undecided = false
         private var capturesStarted = 0
         private var names: [String] = []
         private var namedRefs: [String] = []
@@ -88,13 +93,15 @@ enum NodeTestPattern {
             case lookbehind
         }
 
-        init(text: String, unicode: Bool) {
+        init(text: String, unicode: Bool, sets: Bool) {
             scalars = text.unicodeScalars.map(\.value)
             self.unicode = unicode
+            self.sets = sets
         }
 
         mutating func fails() -> Bool {
             parse()
+            if undecided { return false }
             if failed { return true }
             if unicode {
                 if namedRefs.contains(where: { !names.contains($0) }) { return true }
@@ -139,7 +146,7 @@ enum NodeTestPattern {
         }
 
         private mutating func parse() {
-            while !failed {
+            while !failed, !undecided {
                 let scalar = current
                 var atom = false
                 var kind: GroupKind?
@@ -171,8 +178,12 @@ enum NodeTestPattern {
                     openParenthesis()
                     continue
                 } else if matches(scalar, "[") {
-                    characterClass()
-                    if failed { return }
+                    if sets {
+                        _ = classSetExpression(depth: 0)
+                    } else {
+                        characterClass()
+                    }
+                    if failed || undecided { return }
                     atom = true
                 } else if matches(scalar, "\\") {
                     if atomEscape() == .assertion { continue }
@@ -389,6 +400,340 @@ enum NodeTestPattern {
 
         private func identifierPart(_ value: UInt32) -> Bool {
             identifierStart(value) || isDigit(value)
+        }
+
+        /// One operand of a `v` class. A range is only produced inside
+        /// a union, after both sides were characters. `\q` of a single
+        /// code point is still a string disjunction: it cannot be a
+        /// range endpoint.
+        private struct ClassPiece {
+            enum Kind {
+                case character
+                case range
+                case escape
+                case stringDisjunction
+                case nested
+            }
+
+            var kind: Kind
+            var character: UInt32 = 0
+            var mayContainStrings = false
+        }
+
+        /// `(` `)` `[` `]` `{` `}` `/` `-` `\` `|`. Unescaped, each is an
+        /// error inside a `v` class. `[` and `]` are handled before this
+        /// check, as a nested class and the closer.
+        private func isClassSetSyntaxCharacter(_ value: UInt32) -> Bool {
+            switch value {
+            case Unicode.Scalar("(").value, Unicode.Scalar(")").value,
+                 Unicode.Scalar("[").value, Unicode.Scalar("]").value,
+                 Unicode.Scalar("{").value, Unicode.Scalar("}").value,
+                 Unicode.Scalar("/").value, Unicode.Scalar("-").value,
+                 Unicode.Scalar("\\").value, Unicode.Scalar("|").value:
+                return true
+            default:
+                return false
+            }
+        }
+
+        /// The punctuators `\-` and its siblings may escape inside a `v`
+        /// class. `$` `*` `+` `.` `?` `^` are doubled-punctuator
+        /// characters and are not in this set.
+        private func isClassSetReservedPunctuator(_ value: UInt32) -> Bool {
+            switch value {
+            case Unicode.Scalar("&").value, Unicode.Scalar("-").value,
+                 Unicode.Scalar("!").value, Unicode.Scalar("#").value,
+                 Unicode.Scalar("%").value, Unicode.Scalar(",").value,
+                 Unicode.Scalar(":").value, Unicode.Scalar(";").value,
+                 Unicode.Scalar("<").value, Unicode.Scalar("=").value,
+                 Unicode.Scalar(">").value, Unicode.Scalar("@").value,
+                 Unicode.Scalar("`").value, Unicode.Scalar("~").value:
+                return true
+            default:
+                return false
+            }
+        }
+
+        /// `&&` `!!` and the other doubled marks. The second character
+        /// is only peeked at. `--` is the subtraction operator, not one
+        /// of these, and `-` is a syntax character on its own.
+        private func isClassSetReservedDoublePunctuator(_ value: UInt32) -> Bool {
+            switch value {
+            case Unicode.Scalar("&").value, Unicode.Scalar("!").value,
+                 Unicode.Scalar("#").value, Unicode.Scalar("$").value,
+                 Unicode.Scalar("%").value, Unicode.Scalar("*").value,
+                 Unicode.Scalar("+").value, Unicode.Scalar(",").value,
+                 Unicode.Scalar(".").value, Unicode.Scalar(":").value,
+                 Unicode.Scalar(";").value, Unicode.Scalar("<").value,
+                 Unicode.Scalar("=").value, Unicode.Scalar(">").value,
+                 Unicode.Scalar("?").value, Unicode.Scalar("@").value,
+                 Unicode.Scalar("^").value, Unicode.Scalar("`").value,
+                 Unicode.Scalar("~").value:
+                return nextScalar == value
+            default:
+                return false
+            }
+        }
+
+        /// A `v` class. `^` immediately after `[` negates it. `[]` and
+        /// `[^]` are empty. The operand after that chooses the
+        /// operation: `--` subtracts, `&&` intersects, and anything else
+        /// is a union, which is also where a single `-` is a range.
+        /// Past 64 nested classes the pattern is left undecided.
+        private mutating func classSetExpression(depth: Int) -> Bool {
+            if depth >= 64 {
+                undecided = true
+                return false
+            }
+            advance()
+            var negated = false
+            if matches(current, "^") {
+                negated = true
+                advance()
+            }
+            if matches(current, "]") {
+                advance()
+                return false
+            }
+            guard let first = classSetOperand(depth: depth) else { return false }
+            if undecided { return false }
+            if matches(current, "-"), matches(nextScalar, "-") {
+                return classSetSubtraction(negated: negated, first: first, depth: depth)
+            }
+            if matches(current, "&"), matches(nextScalar, "&") {
+                return classSetIntersection(negated: negated, first: first, depth: depth)
+            }
+            return classSetUnion(negated: negated, first: first, depth: depth)
+        }
+
+        private mutating func classSetOperand(depth: Int) -> ClassPiece? {
+            if undecided { return nil }
+            if matches(current, "\\") {
+                if matches(nextScalar, "q") {
+                    let strings = classStringDisjunction()
+                    if failed { return nil }
+                    return ClassPiece(kind: .stringDisjunction, mayContainStrings: strings)
+                }
+                if classSetEscape() {
+                    if failed { return nil }
+                    // `\p` may contain strings. The property database is
+                    // not consulted, so this escape is treated as none.
+                    return ClassPiece(kind: .escape)
+                }
+            }
+            if matches(current, "[") {
+                let strings = classSetExpression(depth: depth + 1)
+                if failed || undecided { return nil }
+                return ClassPiece(kind: .nested, mayContainStrings: strings)
+            }
+            guard let character = classSetCharacter() else { return nil }
+            return ClassPiece(kind: .character, character: character)
+        }
+
+        /// `\q{a|bc}`. `|` starts another alternative and `}` closes
+        /// the escape. An alternative whose length is not 1 is a
+        /// string. The characters are class-set characters, so `&&`
+        /// inside the string is still a doubled punctuator.
+        private mutating func classStringDisjunction() -> Bool {
+            advance(2)
+            guard matches(current, "{") else {
+                failed = true
+                return false
+            }
+            advance()
+            var mayContainStrings = false
+            var length = 0
+            while !failed, current != nil, !matches(current, "}") {
+                if matches(current, "|") {
+                    if length != 1 { mayContainStrings = true }
+                    length = 0
+                    advance()
+                    continue
+                }
+                guard classSetCharacter() != nil else { return false }
+                length += 1
+            }
+            if failed { return false }
+            if length != 1 { mayContainStrings = true }
+            guard matches(current, "}") else {
+                failed = true
+                return false
+            }
+            advance()
+            return mayContainStrings
+        }
+
+        /// `\d` and the other class escapes, including `\p` and `\P`.
+        /// False when the backslash is some other escape, which the
+        /// caller then reads as a character. A bad property name does
+        /// not fail here: any non-empty `{…}` is accepted.
+        private mutating func classSetEscape() -> Bool {
+            guard matches(current, "\\") else { return false }
+            let following = nextScalar
+            if matches(following, "d") || matches(following, "D")
+                || matches(following, "s") || matches(following, "S")
+                || matches(following, "w") || matches(following, "W") {
+                advance(2)
+                return true
+            }
+            if matches(following, "p") || matches(following, "P") {
+                advance(2)
+                if !propertyName() { failed = true }
+                return true
+            }
+            return false
+        }
+
+        /// One code point of a `v` class. `\b` is backspace. A syntax
+        /// character and a doubled punctuator both throw. Any other
+        /// character, including a single `&` or `!`, is literal.
+        private mutating func classSetCharacter() -> UInt32? {
+            if matches(current, "\\") {
+                if matches(nextScalar, "b") {
+                    advance(2)
+                    return 8
+                }
+                if nextScalar == nil {
+                    failed = true
+                    return nil
+                }
+                let value = characterEscape(inClass: true)
+                if failed { return nil }
+                return value
+            }
+            guard let scalar = current else {
+                failed = true
+                return nil
+            }
+            if isClassSetSyntaxCharacter(scalar) {
+                failed = true
+                return nil
+            }
+            if isClassSetReservedDoublePunctuator(scalar) {
+                failed = true
+                return nil
+            }
+            advance()
+            return scalar
+        }
+
+        /// Characters and ranges side by side. `--` here is a mix with
+        /// subtraction and throws. A `-` is a range only when both
+        /// sides are single characters and the left is not above the
+        /// right. The comparison is the code point, before case folding.
+        private mutating func classSetUnion(
+            negated: Bool,
+            first: ClassPiece,
+            depth: Int
+        ) -> Bool {
+            var mayContainStrings = first.mayContainStrings
+            var last = first
+            while !failed, !undecided, let scalar = current, !matches(scalar, "]") {
+                if matches(scalar, "-") {
+                    if matches(nextScalar, "-") {
+                        failed = true
+                        return false
+                    }
+                    advance()
+                    if current == nil { break }
+                    guard last.kind == .character else {
+                        failed = true
+                        return false
+                    }
+                    let from = last.character
+                    guard let next = classSetOperand(depth: depth) else { return false }
+                    guard next.kind == .character else {
+                        failed = true
+                        return false
+                    }
+                    if from > next.character {
+                        failed = true
+                        return false
+                    }
+                    last = ClassPiece(kind: .range)
+                    continue
+                }
+                guard let next = classSetOperand(depth: depth) else { return false }
+                mayContainStrings = mayContainStrings || next.mayContainStrings
+                last = next
+            }
+            if undecided { return false }
+            if failed { return false }
+            if current == nil {
+                failed = true
+                return false
+            }
+            if negated, mayContainStrings {
+                failed = true
+                return false
+            }
+            advance()
+            return mayContainStrings
+        }
+
+        /// Every separator is `&&`. A third `&` throws. Strings survive
+        /// only when every operand has them, so `[^a&&\q{ab}]` does not
+        /// and `[^\q{ab}&&\q{cd}]` does.
+        private mutating func classSetIntersection(
+            negated: Bool,
+            first: ClassPiece,
+            depth: Int
+        ) -> Bool {
+            var mayContainStrings = first.mayContainStrings
+            while !failed, !undecided, let scalar = current, !matches(scalar, "]") {
+                if !matches(scalar, "&") || !matches(nextScalar, "&") {
+                    failed = true
+                    return false
+                }
+                advance(2)
+                if matches(current, "&") {
+                    failed = true
+                    return false
+                }
+                guard let next = classSetOperand(depth: depth) else { return false }
+                mayContainStrings = mayContainStrings && next.mayContainStrings
+            }
+            if undecided { return false }
+            if failed || current == nil {
+                failed = true
+                return false
+            }
+            if negated, mayContainStrings {
+                failed = true
+                return false
+            }
+            advance()
+            return mayContainStrings
+        }
+
+        /// Every separator is `--`. Whether the result contains strings
+        /// follows the first operand only, and a negated class checks
+        /// that before the rest is read. `[^a--\q{ab}]` is legal.
+        /// `[^\q{ab}--a]` is not.
+        private mutating func classSetSubtraction(
+            negated: Bool,
+            first: ClassPiece,
+            depth: Int
+        ) -> Bool {
+            if negated, first.mayContainStrings {
+                failed = true
+                return false
+            }
+            while !failed, !undecided, let scalar = current, !matches(scalar, "]") {
+                if !matches(scalar, "-") || !matches(nextScalar, "-") {
+                    failed = true
+                    return false
+                }
+                advance(2)
+                guard classSetOperand(depth: depth) != nil else { return false }
+            }
+            if undecided { return false }
+            if failed || current == nil {
+                failed = true
+                return false
+            }
+            advance()
+            return first.mayContainStrings
         }
 
         private mutating func characterClass() {
@@ -733,6 +1078,13 @@ enum NodeTestPattern {
                     return 0
                 }
                 return Unicode.Scalar("u").value
+            }
+            // `/v` allows a ClassSetReservedPunctuator as an identity
+            // escape inside a class. `-` is one, so `\-` is a dash.
+            // `$`, `*`, `+`, `.`, `?`, and `^` are not in that set.
+            if sets, inClass, isClassSetReservedPunctuator(scalar) {
+                advance()
+                return scalar
             }
             if unicode {
                 if !syntaxOrSlash(scalar) {

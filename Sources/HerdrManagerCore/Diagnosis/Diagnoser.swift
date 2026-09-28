@@ -1235,7 +1235,8 @@ private enum ShellForeground {
                 // the harness rejects is not Letta. `1/2`, a timeout
                 // of `2147483647`, and `--test-reporter spec` still
                 // are. A `--test-name-pattern` or `--test-skip-pattern`
-                // that Node's regexp parser rejects is not Letta.
+                // that Node's regexp parser rejects is not Letta,
+                // including a `v` class the unicodeSets grammar rejects.
                 // `ok`, `/foo/i`, and `/[a--b]/v` still are. `--no-test`
                 // leaves a bad shard and `(` as Letta.
                 // Bun rejects `-W`,
@@ -2881,7 +2882,8 @@ private enum ShellForeground {
     /// skip pattern are `nodeTestHarnessRejects`. They throw inside
     /// the test runner, and only when the final `--test` state is on.
     /// A pattern throws when `convertStringToRegExp` throws. A `v`
-    /// flag's character class, an unknown `\p` name, and a scalar
+    /// class the unicodeSets grammar rejects does too. An unknown
+    /// `\p` name, a property that contains strings, and a scalar
     /// above U+FFFF are not that decision.
     private static func nodeRejectedOperand(
         name: String,

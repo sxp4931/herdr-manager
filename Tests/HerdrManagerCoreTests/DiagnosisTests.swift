@@ -6338,7 +6338,7 @@ struct DiagnoserCpuSamplePidTests {
         )
 
         // A pattern Node runs still names the file. `/[a--b]/v` is a
-        // unicodeSets class and is not the legacy range error.
+        // unicodeSets difference and the grammar accepts it.
         // `/\p{NotAThing}/u` throws in Node because the property name
         // is unknown; that database is not checked here, so the file
         // stays the script. `\-*` keeps its backslash.
@@ -6408,6 +6408,200 @@ struct DiagnoserCpuSamplePidTests {
         )
         let python = process(
             4, "python3", argv: ["python3", "--test", "--test-name-pattern", "(", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([bun]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)
+        #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
+    }
+
+    @Test("a node v-flag character class the unicodeSets grammar rejects is not the agent script")
+    func nodeUnicodeSetsClassIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23's `v` class is the unicodeSets grammar. `(`, a
+        // trailing dash, a range whose ends are not both characters,
+        // a doubled punctuator, and a string inside a negated class
+        // throw before the file. `[a--b]` is subtraction and runs.
+        // `\p` is not looked up, and a class nested past 64 is left
+        // as the script.
+        let rejected = [
+            "/[(]/v",
+            "/[)]/v",
+            "/[/]/v",
+            "/[|]/v",
+            "/[{]/v",
+            "/[a-]/v",
+            "/[-a]/v",
+            "/[a-b-c]/v",
+            "/[a-\\w]/v",
+            "/[\\w-a]/v",
+            "/[a---b]/v",
+            "/[ab--c]/v",
+            "/[a&&b--c]/v",
+            "/[&&]/v",
+            "/[!!]/v",
+            "/[$$]/v",
+            "/[..]/v",
+            "/[^^^]/v",
+            "/[a&&&b]/v",
+            "/[a&&]/v",
+            "/[^\\q{ab}]/v",
+            "/[^\\q{}]/v",
+            "/[^\\q{a|}]/v",
+            "/[^\\q{a|ab}]/v",
+            "/[^\\q{ab}--a]/v",
+            "/[^\\q{ab}&&\\q{cd}]/v",
+            "/[^[\\q{ab}]]/v",
+            "/[\\q]/v",
+            "/[\\q{a]/v",
+            "/[\\q{&&}]/v",
+            "/[\\q{a-b}]/v",
+            "/[\\q{a}-b]/v",
+            "/[a-A]/v",
+            "/[a-A]/vi",
+            "/[\\r-\\n]/v",
+            "/[\\u{1F601}-\\u{1F600}]/v",
+            "/[\\u{110000}]/v",
+            "/[a](/v",
+            "/[a]{2,1}/v",
+            "/(?<n>[a--b])\\k<m>/v",
+            "/[]]/v",
+            "/[[]/v",
+            "/[[[(]/v",
+        ]
+        for raw in rejected {
+            #expect(NodeTestPattern.rejects(raw), "\(raw) stayed the script")
+        }
+        let shallow = String(repeating: "[", count: 8) + "(" + String(repeating: "]", count: 8)
+        #expect(NodeTestPattern.rejects("/\(shallow)/v"))
+
+        let kept = [
+            "/[a--b]/v",
+            "/[a&&b]/v",
+            "/[a-b]/v",
+            "/[a-bc]/v",
+            "/[\\w--_]/v",
+            "/[\\d&&[0-9]]/v",
+            "/[[a-z]--[0-9]]/v",
+            "/[a&&b&&c]/v",
+            "/[a--b--c]/v",
+            "/[[a--b]&&c]/v",
+            "/[a&&[b--c]]/v",
+            "/[]/v",
+            "/[^]/v",
+            "/[^^]/v",
+            "/[a^b]/v",
+            "/[&]/v",
+            "/[!]/v",
+            "/[\\-]/v",
+            "/[\\&]/v",
+            "/[\\(]/v",
+            "/[\\]]/v",
+            "/[\\q{a}]/v",
+            "/[\\q{ab}]/v",
+            "/[\\q{a|b}]/v",
+            "/[^\\q{a}]/v",
+            "/[^\\q{a|b}]/v",
+            "/[^a--\\q{ab}]/v",
+            "/[\\q{ab}--a]/v",
+            "/[^\\q{a}&&\\q{ab}]/v",
+            "/[^a&&\\q{abc}]/v",
+            "/[\\q{a\\&\\&b}]/v",
+            "/[\\q{a\\-b}]/v",
+            "/[\\n-\\r]/v",
+            "/[\\u{1F600}-\\u{1F601}]/v",
+            "/[a]*/v",
+            "/[a]{1,2}/v",
+            "/[[a]](b)/v",
+            "/(?<n>[a--b])\\k<n>/v",
+            "/^[a--b]$/v",
+            "/[a-]/u",
+            "/\\p{NotAThing}/v",
+            "/[\\p{NotAThing}]/v",
+            "/[^\\p{RGI_Emoji}]/v",
+            "/[\\p{L}]/v",
+        ]
+        for raw in kept {
+            #expect(!NodeTestPattern.rejects(raw), "\(raw) was dropped")
+        }
+        // `/[a--b]/u` is the legacy range error and does throw.
+        #expect(NodeTestPattern.rejects("/[a--b]/u"))
+        let nested = String(repeating: "[", count: 8) + "a--b" + String(repeating: "]", count: 8)
+        #expect(!NodeTestPattern.rejects("/\(nested)/v"))
+        let deep = String(repeating: "[", count: 70) + "a" + String(repeating: "]", count: 70)
+        #expect(!NodeTestPattern.rejects("/\(deep)/v"))
+
+        let rejectedArgv: [(String, [String])] = [
+            ("paren", ["node", "--test", "--test-name-pattern", "/[(]/v", "/usr/local/bin/codex"]),
+            ("dash", ["nodejs", "--test", "--test-name-pattern", "/[a-]/v", "/tmp/codex"]),
+            ("range", ["node.exe", "--test", "--test-skip-pattern", "/[a-b-c]/v", "/usr/local/bin/codex"]),
+            ("string", ["node", "--test", "--test-name-pattern=/[^\\q{ab}]/v", "/tmp/codex"]),
+            ("outside", ["nodejs", "--test", "--test-name-pattern", "/[a](/v", "/usr/local/bin/codex"]),
+            ("later", [
+                "node.exe", "--test", "--test-name-pattern", "/[a--b]/v",
+                "--test-skip-pattern", "/[(]/v", "/tmp/codex",
+            ]),
+        ]
+        for (label, argv) in rejectedArgv {
+            let exited = process(4, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(label) ranked the path")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(label) took the sample from the leader slot"
+            )
+        }
+        #expect(
+            Diagnoser.cpuSamplePid([
+                process(4, "node", argv: ["node", "--test", "--test-name-pattern", "/[(]/v", "/usr/local/bin/codex"])
+            ]) == 4
+        )
+
+        let keptArgv: [(String, [String])] = [
+            ("diff", ["node", "--test", "--test-name-pattern", "/[a--b]/v", "/usr/local/bin/codex"]),
+            ("word", ["nodejs", "--test", "--test-name-pattern", "/[\\w--_]/v", "/tmp/codex"]),
+            ("string", ["node.exe", "--test", "--test-name-pattern", "/[\\q{ab}]/v", "/usr/local/bin/codex"]),
+            ("char", ["node", "--test", "--test-name-pattern", "/[^\\q{a}]/v", "/tmp/codex"]),
+            ("legacy", ["nodejs", "--test", "--test-name-pattern", "/[a-]/u", "/usr/local/bin/codex"]),
+            ("property", ["node.exe", "--test", "--test-name-pattern", "/[^\\p{RGI_Emoji}]/v", "/tmp/codex"]),
+            ("off", ["node", "--test-name-pattern", "/[(]/v", "/usr/local/bin/codex"]),
+            ("no-test", ["nodejs", "--test", "--no-test", "--test-name-pattern", "/[(]/v", "/tmp/codex"]),
+        ]
+        for (label, argv) in keptArgv {
+            let running = process(20, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(label) dropped the script")
+        }
+
+        let badClass = process(
+            8, "node", argv: ["node", "--test", "--test-name-pattern", "/[(]/v", "/tmp/letta"]
+        )
+        let badString = process(
+            8, "nodejs", argv: ["nodejs", "--test", "--test-name-pattern", "/[^\\q{ab}]/v", "/tmp/letta"]
+        )
+        let keptLetta = process(
+            40, "node.exe", argv: ["node.exe", "--test", "--test-name-pattern", "/[\\w--_]/v", "/tmp/letta"]
+        )
+        let oneShot = process(
+            40,
+            "node",
+            argv: ["node", "--test", "--test-name-pattern", "/[a--b]/v", "/tmp/letta", "--prompt"]
+        )
+        #expect(Diagnoser.cpuSamplePid([badClass, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badClass, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([badString, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([helper, keptLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, oneShot]) == 10)
+        #expect(Diagnoser.cpuSamplePid([oneShot, interactive]) == 30)
+
+        // Bun does not take the pattern's next word, so `/[(]/v` is
+        // the script. Python exits on the unknown option.
+        let bun = process(
+            20, "bun", argv: ["bun", "--test", "--test-name-pattern", "/[(]/v", "/usr/local/bin/codex"]
+        )
+        let python = process(
+            4, "python3", argv: ["python3", "--test", "--test-name-pattern", "/[(]/v", "/usr/local/bin/codex"]
         )
         #expect(Diagnoser.cpuSamplePid([bun]) == 20)
         #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)
