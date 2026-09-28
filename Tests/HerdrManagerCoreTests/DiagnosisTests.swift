@@ -6877,10 +6877,8 @@ struct DiagnoserCpuSamplePidTests {
             "/\u{1F600}?/u",
             "/[\\p{L}\u{1F600}]/v",
             "/[^\u{1F600}&&\\p{RGI_Emoji}]/v",
-            // Node rejects a name that is not ID_Start. This check still
-            // accepts every non-ASCII scalar, the same as `\u{1F600}`.
-            "/(?<\u{1F600}>a)/u",
-            "/(?<\u{1F600}>a)/",
+            // A capture name that is not ID_Start is the next test.
+            // `\u{1F600}` here is a character, which `u` accepts.
             "/\\u{1F600}/u",
         ]
         for raw in kept {
@@ -6971,6 +6969,187 @@ struct DiagnoserCpuSamplePidTests {
         )
         let python = process(
             4, "python3", argv: ["python3", "--test", "--test-name-pattern", "/\\p{NotAThing}\u{1F600}/u", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([bun]) == 20)
+        #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)
+        #expect(Diagnoser.cpuSamplePid([python, claude]) == 12)
+    }
+
+    @Test("a capture name Node rejects is not the agent script")
+    func nodeCaptureNameIsNotTheScript() {
+        let helper = process(10, "node", argv: ["node", "server.js"])
+        let claude = process(12, "claude", argv: ["claude"])
+        let mcp = process(10, "node", argv: ["node", "/tmp/mcp/bin/codex"])
+        let interactive = process(30, "letta", argv: ["letta"])
+
+        // Node 22.23's name production is an IdentifierName and forces
+        // Unicode. An emoji, a digit, a mark, ZWJ, or ZWNJ cannot start
+        // the name. A 4-digit lead surrogate pairs with a 4-digit trail.
+        // A braced escape does not pair. `>` decoded from `\u003E` closes
+        // the name. `$` and `_` are starts. U+00E9 and U+20000 are
+        // ID_Start, including when the legacy source splits the second.
+        let rejected = [
+            "/(?<\u{1F600}>a)/u",
+            "/(?<\u{1F600}>a)/",
+            "/(?<\u{1F600}>a)/v",
+            "(?<\u{1F600}>a)",
+            "/(?<\\u{1F600}>a)/",
+            "/(?<\\u{1F600}>a)/u",
+            "/(?<\\uD83D\\uDE00>a)/",
+            "/(?<\\uD83D\\uDE00>a)/u",
+            "/(?<\\u{D83D}\\u{DE00}>a)/u",
+            "/(?<\\u{D83D}\\uDE00>a)/",
+            "/(?<1a>a)/",
+            "/(?<>a)/",
+            "/(?< >a)/",
+            "/(?<a >a)/",
+            "/(?<\\\\>a)/",
+            "/(?<\\u005C>a)/u",
+            "/(?<\\u0301>x)/",
+            "/(?<\\u200C>x)/",
+            "/(?<\\u200D>x)/",
+            "/(?<\\u0660>a)/",
+            "/(?<\\u00B7>a)/",
+            "/(?<\\u{101FD}>x)/",
+            "/(?<\u{101FD}>x)/",
+            "/(?<\u{101FD}>x)/u",
+            "/(?<a\u{1F600}>a)/",
+            "/(?<a\u{1F600}>a)/u",
+            "/(?<\\uD800>a)/",
+            "/(?<\\uD800>a)/u",
+            "/(?<a\\uD800\\u{DC00}>b)/u",
+            "/(?<\\u{10FFFF}>b)/u",
+            "/(?<A>a)\\k<a>/",
+            "/(?<\\u00E9>a)(?<\u{00E9}>b)/",
+            "/(?<\u{20000}>a)(?<\\uD840\\uDC00>b)/",
+            "/(?<\u{1F600}>a)+/",
+            "/(?<a\\u0301>x)\\k<\u{00E1}>/",
+            "/(?<n>a)\\k<m>/",
+        ]
+        for raw in rejected {
+            #expect(NodeTestPattern.rejects(raw), "\(raw) stayed the script")
+        }
+
+        let kept = [
+            "/(?<\u{00E9}>a)/",
+            "/(?<\u{00E9}>a)/u",
+            "/(?<\u{00E9}>a)/v",
+            "/(?<\u{00E9}>a)\\k<\u{00E9}>/",
+            "/(?<\u{00E9}>a)\\k<\\u00E9>/",
+            "/(?<\\u00E9>a)\\k<\u{00E9}>/",
+            "/(?<_>a)/",
+            "/(?<$>a)/",
+            "/(?<a$>a)/",
+            "/(?<a1>a)/",
+            "/(?<$1>a)/",
+            "/(?<if>a)/",
+            "/(?<a\\u0301>x)/",
+            "/(?<a\\u0301>x)\\k<a\\u0301>/",
+            "/(?<a\\u200C>x)/",
+            "/(?<a\\u200D>x)/",
+            "/(?<\\u2118>a)/",
+            "/(?<a\\u00B7>a)/",
+            "/(?<a\\u0660>a)/",
+            "/(?<\u{20000}>a)/",
+            "/(?<\u{20000}>a)/u",
+            "/(?<\\u{20000}>a)/",
+            "/(?<\\uD840\\uDC00>a)/",
+            "/(?<\\ud840\\udc00>a)/",
+            "/(?<\\uD840\\uDC000>a)/",
+            "/(?<\u{20000}>a)\\k<\\uD840\\uDC00>/",
+            "/(?<a\\u003Eb)/",
+            "/(?<a\\u003E>b)/u",
+            "/(?<\\u0041>a)\\k<A>/",
+            "/(?<\u{00E9}>a)+/",
+            "/(?<a\u{101FD}>x)/",
+            "/(?<a\u{101FD}>x)/u",
+            "/(?<a\\u{101FD}>x)/",
+            "/(?<a\\u{101FD}>x)/u",
+            "/(?<n>a)\\k<n>/",
+            "/(?<\u{00E9}>a)(?<\u{00F6}>b)/",
+        ]
+        for raw in kept {
+            #expect(!NodeTestPattern.rejects(raw), "\(raw) was dropped")
+        }
+
+        let rejectedArgv: [(String, [String])] = [
+            ("emoji", ["node", "--test", "--test-name-pattern", "/(?<\u{1F600}>a)/", "/usr/local/bin/codex"]),
+            ("emoji-eq", ["nodejs", "--test", "--test-name-pattern=/(?<\u{1F600}>a)/u", "/tmp/codex"]),
+            ("pair", ["node.exe", "--test", "--test-skip-pattern", "(?<\\uD83D\\uDE00>a)", "/usr/local/bin/codex"]),
+            ("digit", ["node", "--test", "--test-name-pattern", "(?<1a>a)", "/tmp/codex"]),
+            ("mark", ["nodejs", "--test", "--test-name-pattern", "(?<\\u0301>x)", "/usr/local/bin/codex"]),
+            ("later", [
+                "node.exe", "--test", "--test-name-pattern", "(?<\u{00E9}>a)",
+                "--test-skip-pattern", "(?<\u{1F600}>a)", "/tmp/codex",
+            ]),
+        ]
+        for (label, argv) in rejectedArgv {
+            let exited = process(4, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([exited, claude]) == 12, "\(label) ranked the path")
+            #expect(
+                Diagnoser.cpuSamplePid([mcp, exited], foregroundProcessGroupId: 4) == 10,
+                "\(label) took the sample from the leader slot"
+            )
+        }
+        #expect(
+            Diagnoser.cpuSamplePid([
+                process(4, "node", argv: ["node", "--test", "--test-name-pattern", "(?<\u{1F600}>a)", "/usr/local/bin/codex"])
+            ]) == 4
+        )
+
+        let keptArgv: [(String, [String])] = [
+            ("accent", ["node", "--test", "--test-name-pattern", "(?<\u{00E9}>a)", "/usr/local/bin/codex"]),
+            ("cjk", ["nodejs", "--test", "--test-name-pattern", "(?<\u{20000}>a)", "/tmp/codex"]),
+            ("pair", ["node.exe", "--test", "--test-name-pattern", "(?<\\uD840\\uDC00>a)", "/usr/local/bin/codex"]),
+            ("dollar", ["node", "--test", "--test-name-pattern", "(?<$>a)", "/tmp/codex"]),
+            ("off", ["nodejs", "--test-name-pattern", "(?<\u{1F600}>a)", "/usr/local/bin/codex"]),
+            ("no-test", ["node", "--test", "--no-test", "--test-name-pattern", "(?<\u{1F600}>a)", "/tmp/codex"]),
+            ("script-first", ["node.exe", "/usr/local/bin/codex", "--test", "--test-name-pattern", "(?<\u{1F600}>a)"]),
+        ]
+        for (label, argv) in keptArgv {
+            let running = process(20, argv[0], argv: argv)
+            #expect(Diagnoser.cpuSamplePid([helper, running]) == 20, "\(label) dropped the script")
+        }
+        let leader = process(
+            20,
+            "node",
+            argv: ["node", "--test", "--test-name-pattern", "(?<\u{00E9}>a)", "/usr/local/bin/codex"]
+        )
+        #expect(Diagnoser.cpuSamplePid([mcp, leader], foregroundProcessGroupId: 20) == 20)
+
+        let badEmoji = process(
+            8, "node", argv: ["node", "--test", "--test-name-pattern", "(?<\u{1F600}>a)", "/tmp/letta"]
+        )
+        let badDigit = process(
+            8, "nodejs", argv: ["nodejs", "--test", "--test-name-pattern", "(?<1a>a)", "/tmp/letta"]
+        )
+        let keptLetta = process(
+            40, "node.exe", argv: ["node.exe", "--test", "--test-name-pattern", "(?<\u{00E9}>a)", "/tmp/letta"]
+        )
+        let keptCJK = process(
+            40, "node", argv: ["node", "--test", "--test-name-pattern", "(?<\\uD840\\uDC00>a)", "/tmp/letta"]
+        )
+        let oneShot = process(
+            40,
+            "nodejs",
+            argv: ["nodejs", "--test", "--test-name-pattern", "(?<\u{20000}>a)", "/tmp/letta", "--prompt"]
+        )
+        #expect(Diagnoser.cpuSamplePid([badEmoji, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badEmoji, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([badDigit, interactive]) == 30)
+        #expect(Diagnoser.cpuSamplePid([badDigit, claude]) == 12)
+        #expect(Diagnoser.cpuSamplePid([helper, keptLetta]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, keptCJK]) == 40)
+        #expect(Diagnoser.cpuSamplePid([helper, oneShot]) == 10)
+        #expect(Diagnoser.cpuSamplePid([oneShot, interactive]) == 30)
+
+        // Bun does not take the pattern's next word, so the name is the
+        // script. Python exits on the unknown option.
+        let bun = process(
+            20, "bun", argv: ["bun", "--test", "--test-name-pattern", "(?<\u{1F600}>a)", "/usr/local/bin/codex"]
+        )
+        let python = process(
+            4, "python3", argv: ["python3", "--test", "--test-name-pattern", "(?<\u{1F600}>a)", "/usr/local/bin/codex"]
         )
         #expect(Diagnoser.cpuSamplePid([bun]) == 20)
         #expect(Diagnoser.cpuSamplePid([helper, bun]) == 10)

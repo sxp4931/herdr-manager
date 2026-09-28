@@ -10,8 +10,10 @@
 /// still contains one throws. The source is UTF-16. With `u` or `v` a
 /// surrogate pair is one code point; without those flags each unit is a
 /// character, so a scalar above U+FFFF can put a legacy range out of
-/// order. A class nested more than 64 deep is not decided: the file
-/// stays the script.
+/// order. A capture name is an IdentifierName. The name production
+/// forces Unicode, so a surrogate pair in the name is one code point
+/// even without `u` or `v`. A class nested more than 64 deep is not
+/// decided: the file stays the script.
 enum NodeTestPattern {
     private static let quantifierInfinity = 2_147_483_647
 
@@ -360,35 +362,22 @@ enum NodeTestPattern {
             failed = true
         }
 
-        /// `(?<name>`. `\u` escapes are decoded, including in a legacy
-        /// pattern: the name production forces Unicode. A non-ASCII
-        /// scalar is accepted, so a name V8's ID_Start set would refuse
-        /// is not this check. `>` ends the name and is consumed.
+        /// `(?<name>`. The name production forces Unicode, including in
+        /// a legacy pattern: a surrogate pair is one code point, and
+        /// `\u{...}` is legal. The first character is an identifier
+        /// start. Each later character, until `>`, is an identifier
+        /// part. `>` from a `\u` escape closes the name. A backslash
+        /// that is not a `\u` escape is not a name character.
         private mutating func captureName() -> String? {
             var units: [UInt32] = []
             var atStart = true
             while !failed {
-                guard let scalar = current else {
+                guard let decoded = readCaptureNameCodePoint() else {
                     failed = true
                     return nil
-                }
-                let decoded: UInt32
-                if matches(scalar, "\\"), matches(nextScalar, "u") {
-                    advance(2)
-                    guard let value = unicodeEscape(forceBraces: true) else {
-                        failed = true
-                        return nil
-                    }
-                    decoded = value
-                } else if matches(scalar, "\\") {
-                    failed = true
-                    return nil
-                } else {
-                    decoded = scalar
-                    advance()
                 }
                 if atStart {
-                    guard identifierStart(decoded) else {
+                    guard NodeIdentifier.isStart(decoded) else {
                         failed = true
                         return nil
                     }
@@ -396,7 +385,7 @@ enum NodeTestPattern {
                     atStart = false
                 } else if decoded == Unicode.Scalar(">").value {
                     break
-                } else if identifierPart(decoded) {
+                } else if NodeIdentifier.isPart(decoded) {
                     units.append(decoded)
                 } else {
                     failed = true
@@ -414,14 +403,49 @@ enum NodeTestPattern {
             return text
         }
 
-        private func identifierStart(_ value: UInt32) -> Bool {
-            if value > 127 { return true }
-            if (value >= 65 && value <= 90) || (value >= 97 && value <= 122) { return true }
-            return value == Unicode.Scalar("$").value || value == Unicode.Scalar("_").value
+        /// One code point of a capture name. A raw lead and trail are
+        /// one character because this production forces Unicode. So are
+        /// a 4-digit `\u` lead and a following 4-digit `\u` trail. A
+        /// braced `\u{...}` does not pair with the next escape.
+        private mutating func readCaptureNameCodePoint() -> UInt32? {
+            guard let scalar = current else { return nil }
+            if matches(scalar, "\\") {
+                guard matches(nextScalar, "u") else { return nil }
+                advance(2)
+                return captureNameUnicodeEscape()
+            }
+            advance()
+            if isLeadSurrogate(scalar), let trail = current, isTrailSurrogate(trail) {
+                advance()
+                return combineSurrogate(scalar, trail)
+            }
+            return scalar
         }
 
-        private func identifierPart(_ value: UInt32) -> Bool {
-            identifierStart(value) || isDigit(value)
+        private mutating func captureNameUnicodeEscape() -> UInt32? {
+            let braced = matches(current, "{")
+            guard let value = unicodeEscape(forceBraces: true) else { return nil }
+            if braced || !isLeadSurrogate(value) { return value }
+            guard matches(current, "\\"), matches(nextScalar, "u") else { return value }
+            let saved = index
+            advance(2)
+            if let trail = hexEscape(length: 4), isTrailSurrogate(trail) {
+                return combineSurrogate(value, trail)
+            }
+            index = saved
+            return value
+        }
+
+        private func isLeadSurrogate(_ value: UInt32) -> Bool {
+            value >= 0xD800 && value <= 0xDBFF
+        }
+
+        private func isTrailSurrogate(_ value: UInt32) -> Bool {
+            value >= 0xDC00 && value <= 0xDFFF
+        }
+
+        private func combineSurrogate(_ lead: UInt32, _ trail: UInt32) -> UInt32 {
+            0x10000 + (lead - 0xD800) * 0x400 + (trail - 0xDC00)
         }
 
         /// One operand of a `v` class. A range is only produced inside
