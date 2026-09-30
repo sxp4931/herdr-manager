@@ -34,7 +34,7 @@ test("stale last-known quota keeps its original sample time", async ({ page }) =
   await page.goto("/");
   const claude = page.getByRole("region", { name: "Claude", exact: true });
   await expect(claude).toContainText("Stale");
-  await expect(claude).toContainText("2026-09-29T15:45:00.000Z");
+  await expect(claude.locator('time[datetime="2026-09-29T15:45:00.000Z"]').first()).toBeVisible();
   await expect(claude).toContainText("10% used, 90% left");
   await expect(claude.locator("progress.meter-stale")).toHaveCount(2);
   await expect(claude.locator("progress.meter-fresh")).toHaveCount(0);
@@ -136,5 +136,21 @@ test("shows loading, empty, and unavailable states", async ({ page }) => {
   });
   await page.reload();
   await expect(page.getByRole("alert")).toContainText("Dashboard unavailable");
+  expectQuiet(guards);
+});
+
+test("says Live on the real stream and warns when the stream drops", async ({ page }) => {
+  const guards = watchPage(page);
+  await page.goto("/");
+  await expect(page.locator(".connection").getByRole("status")).toHaveText("Live");
+  await expect(page.locator(".connection time")).toHaveAttribute("datetime", "2026-09-29T16:00:00.000Z");
+  await expect(page.getByText("Lost the live connection")).toHaveCount(0);
+
+  // A stream that ends at once makes EventSource retry. The last snapshot stays, labelled as not live.
+  await fulfillSnapshot(page, readSnapshot("stale.json"));
+  await page.reload();
+  await expect(page.locator(".connection").getByRole("status")).toHaveText("Reconnecting");
+  await expect(page.getByRole("alert")).toContainText("Lost the live connection");
+  await expect(page.getByRole("heading", { name: "Claude", exact: true })).toBeVisible();
   expectQuiet(guards);
 });

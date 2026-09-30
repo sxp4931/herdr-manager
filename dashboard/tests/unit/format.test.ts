@@ -3,10 +3,12 @@ import {
   describeUsage,
   eligibilityLine,
   formatAbsolute,
+  evidenceRow,
+  formatClock,
   formatCountdown,
   healthLabel,
   meterKind,
-  sourceLine,
+  reasonPhrase,
 } from "../../apps/web/src/format.js";
 
 const NOW = "2026-09-29T16:00:00.000Z";
@@ -25,8 +27,10 @@ describe("quota text", () => {
     expect(formatCountdown("not-a-time", NOW)).toBe("Unknown reset");
   });
 
-  it("prints America/New_York absolute time with the original ISO", () => {
-    expect(formatAbsolute("2026-09-29T20:00:00.000Z")).toBe("Sep 29, 2026, 4:00 PM EDT (2026-09-29T20:00:00.000Z)");
+  it("prints America/New_York absolute time without repeating the ISO", () => {
+    expect(formatAbsolute("2026-09-29T20:00:00.000Z")).toBe("Sep 29, 2026, 4:00 PM EDT");
+    expect(formatAbsolute("2026-12-01T20:00:00.000Z")).toBe("Dec 1, 2026, 3:00 PM EST");
+    expect(formatClock("2026-09-29T16:00:05.000Z")).toBe("12:00:05 PM EDT");
     expect(formatAbsolute(null)).toBe("Unknown");
     expect(formatAbsolute("not-a-time")).toBe("Unknown");
   });
@@ -61,8 +65,17 @@ describe("quota text", () => {
     expect(eligibilityLine({ eligibility: "ineligible", eligibilityReason: null })).toBe(
       "Ineligible. Cannot be used before expiry",
     );
-    expect(sourceLine({ sourceId: "codex-quota", status: "disabled", reasonCode: "probes_disabled" })).toBe(
-      "codex-quota — Disabled — Probes disabled",
-    );
+    expect(healthLabel("disabled")).toBe("Disabled");
+    expect(reasonPhrase("probes_disabled")).toBe("Probes disabled");
+    expect(reasonPhrase("ok")).toBeNull();
+    expect(reasonPhrase("collector_error")).toBe("Collector failed");
+  });
+
+  it("turns alert evidence into readable rows without dropping unknown keys", () => {
+    expect(evidenceRow("remainingPercent", 80, NOW)).toEqual({ label: "Remaining", value: "80%" });
+    expect(evidenceRow("resetsAt", "2026-10-01T04:00:00.000Z", NOW)).toEqual({ label: "Resets", value: "Oct 1, 2026, 12:00 AM EDT" });
+    expect(evidenceRow("dwellMs", 12 * 60_000, NOW)).toEqual({ label: "Idle for", value: "12 minutes" });
+    expect(evidenceRow("eligibilityReason", null, NOW)).toEqual({ label: "Reason", value: "none" });
+    expect(evidenceRow("novelKey", true, NOW)).toEqual({ label: "novelKey", value: "true" });
   });
 });

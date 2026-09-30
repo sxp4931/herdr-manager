@@ -22,10 +22,12 @@ test("shows fixture quotas, banked resets, and demo data", async ({ page }) => {
   const grok = page.getByRole("region", { name: "Grok", exact: true });
 
   await expect(claude.getByRole("region", { name: "5 hour", exact: true })).toContainText("10% used, 90% left");
-  await expect(claude.getByRole("region", { name: "5 hour", exact: true })).toContainText("2026-09-29T20:00:00.000Z");
+  await expect(claude.getByRole("region", { name: "5 hour", exact: true }).locator('time[datetime="2026-09-29T20:00:00.000Z"]').first()).toBeVisible();
+  await expect(claude.getByRole("region", { name: "5 hour", exact: true })).toContainText("Resets Sep 29, 2026, 4:00 PM EDT");
+  await expect(claude.getByRole("region", { name: "5 hour", exact: true })).not.toContainText("(2026-09-29T20:00:00.000Z)");
   await expect(claude.getByRole("region", { name: "5 hour", exact: true })).toContainText("4 hours left");
   await expect(claude.getByRole("region", { name: "Weekly", exact: true })).toContainText("20% used, 80% left");
-  await expect(claude.getByRole("region", { name: "Weekly", exact: true })).toContainText("2026-10-01T04:00:00.000Z");
+  await expect(claude.getByRole("region", { name: "Weekly", exact: true }).locator('time[datetime="2026-10-01T04:00:00.000Z"]').first()).toBeVisible();
   await expect(claude.getByRole("region", { name: "Weekly", exact: true })).toContainText("36 hours left");
   await expect(claude.locator("progress.meter-fresh")).toHaveCount(2);
   await expect(claude.locator("progress.meter-stale")).toHaveCount(0);
@@ -35,13 +37,13 @@ test("shows fixture quotas, banked resets, and demo data", async ({ page }) => {
   await expect(codex.getByRole("region", { name: "5 hour", exact: true })).toContainText("35% used, 65% left");
   await expect(codex.getByRole("region", { name: "5 hour", exact: true })).toContainText("4 hours left");
   await expect(codex.getByRole("region", { name: "Weekly", exact: true })).toContainText("25% used, 75% left");
-  await expect(codex.getByRole("region", { name: "Weekly", exact: true })).toContainText("2026-10-01T05:00:00.000Z");
+  await expect(codex.getByRole("region", { name: "Weekly", exact: true }).locator('time[datetime="2026-10-01T05:00:00.000Z"]').first()).toBeVisible();
   await expect(codex.getByRole("region", { name: "Weekly", exact: true })).toContainText("37 hours left");
 
   const banked = codex.getByRole("region", { name: "Codex banked resets", exact: true });
   await expect(banked).toContainText("codex-reset-expiring");
   await expect(banked).toContainText("codex-reset-unusable");
-  await expect(banked).toContainText("2026-09-30T16:00:00.000Z");
+  await expect(banked.locator('time[datetime="2026-09-30T16:00:00.000Z"]').first()).toBeVisible();
   await expect(banked.getByText("24 hours left")).toHaveCount(2);
   await expect(banked).toContainText("Eligible");
   await expect(banked).toContainText("redeemable only after expiry");
@@ -52,7 +54,7 @@ test("shows fixture quotas, banked resets, and demo data", async ({ page }) => {
   await expect(grokFive).toContainText("Not applicable");
   await expect(grokFive.locator("progress")).toHaveCount(0);
   await expect(grok.getByRole("region", { name: "Weekly", exact: true })).toContainText("15% used, 85% left");
-  await expect(grok.getByRole("region", { name: "Weekly", exact: true })).toContainText("2026-10-01T15:00:00.000Z");
+  await expect(grok.getByRole("region", { name: "Weekly", exact: true }).locator('time[datetime="2026-10-01T15:00:00.000Z"]').first()).toBeVisible();
   await expect(grok.getByRole("region", { name: "Weekly", exact: true })).toContainText("47 hours left");
   await expect(grok.locator("progress.meter-fresh")).toHaveCount(1);
 

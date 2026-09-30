@@ -1,4 +1,4 @@
-import type { BankedReset, QuotaWindow, SourceHealth, SourceStatus } from "@herdr/contracts";
+import type { BankedReset, QuotaWindow, SourceStatus } from "@herdr/contracts";
 
 const ZONE = "America/New_York";
 
@@ -31,13 +31,8 @@ export function reasonPhrase(code: string): string | null {
   if (code === "socket_missing") return "Socket missing";
   if (code === "tmux_missing") return "Tmux missing";
   if (code === "profile_unsafe") return "Probe profile unsafe";
+  if (code === "collector_error") return "Collector failed";
   return code;
-}
-
-export function sourceLine(source: Pick<SourceHealth, "sourceId" | "status" | "reasonCode">): string {
-  const reason = reasonPhrase(source.reasonCode);
-  const label = healthLabel(source.status);
-  return reason ? `${source.sourceId} — ${label} — ${reason}` : `${source.sourceId} — ${label}`;
 }
 
 export function windowKindLabel(kind: QuotaWindow["kind"]): string {
@@ -66,11 +61,12 @@ export function meterKind(
   return "none";
 }
 
+/** Reset and expiry times read in America/New_York. The exact ISO instant lives on the <time> element. */
 export function formatAbsolute(iso: string | null): string {
   if (iso === null) return "Unknown";
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "Unknown";
-  const local = new Intl.DateTimeFormat("en-US", {
+  return new Intl.DateTimeFormat("en-US", {
     timeZone: ZONE,
     month: "short",
     day: "numeric",
@@ -79,7 +75,50 @@ export function formatAbsolute(iso: string | null): string {
     minute: "2-digit",
     timeZoneName: "short",
   }).format(date);
-  return `${local} (${iso})`;
+}
+
+/** Clock time for the "updated" line, in the same zone as reset times. */
+export function formatClock(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "unknown time";
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: ZONE,
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+  }).format(date);
+}
+
+const EVIDENCE_LABELS: Record<string, string> = {
+  remainingPercent: "Remaining",
+  usedPercent: "Used",
+  weeklyRemainingPercent: "Weekly remaining",
+  resetsAt: "Resets",
+  expiresAt: "Expires",
+  redeemableAt: "Redeemable",
+  lastSuccessAt: "Last success",
+  eligibility: "Eligibility",
+  eligibilityReason: "Reason",
+  reasonCode: "Reason",
+  sourceId: "Source",
+  status: "Status",
+  scope: "Scope",
+  dwellMs: "Idle for",
+};
+
+/** Alert evidence as short human rows. Unknown keys keep their name so nothing is hidden. */
+export function evidenceRow(key: string, value: string | number | boolean | null, nowIso: string): { label: string; value: string } {
+  const label = EVIDENCE_LABELS[key] ?? key;
+  if (value === null) return { label, value: "none" };
+  if (typeof value === "number" && key.endsWith("Percent")) return { label, value: `${String(value)}%` };
+  if (typeof value === "number" && key === "dwellMs") {
+    return { label, value: formatElapsed(new Date(Date.parse(nowIso) - value).toISOString(), nowIso) };
+  }
+  if (typeof value === "string" && key.endsWith("At") && !Number.isNaN(Date.parse(value))) {
+    return { label, value: formatAbsolute(value) };
+  }
+  return { label, value: String(value) };
 }
 
 export function formatElapsed(startIso: string, nowIso: string): string {

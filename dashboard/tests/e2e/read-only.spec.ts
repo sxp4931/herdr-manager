@@ -200,7 +200,7 @@ test("missing, disabled, and stale sources keep the dashboard usable", async ({ 
   });
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "herdr dashboard" })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Claude", exact: true })).toContainText("2026-09-29T15:45:00.000Z");
+  await expect(page.getByRole("region", { name: "Claude", exact: true }).locator('time[datetime="2026-09-29T15:45:00.000Z"]').first()).toBeVisible();
   await expect(page.getByRole("region", { name: "Codex", exact: true })).toContainText("Unknown");
   await expect(page.getByRole("region", { name: "Grok", exact: true })).toContainText("Unknown");
   await fitsViewport(page);
