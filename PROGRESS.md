@@ -65,3 +65,15 @@ Entries record the milestone message and the HEAD that preceded the commit. The 
   - `npm run test:integration -- tests/integration/git.test.ts` — exit 0. 4 passed, 0 failed, 0 skipped.
   - `npm run check` — exit 0. Unit 12 passed. Python 1 passed. Integration 17 passed.
 - Results: a synthetic temporary repository produced exactly two allowed worktrees on distinct branches, with main counts 1 staged / 1 modified / 1 untracked and the feature worktree counting a rename plus a staged-and-modified file as 2 staged / 1 modified. A filename containing a space and a filename containing a newline stayed one status record each. The outside worktree was returned as disabled `outside_root` and was never passed to `status` or `log`. HEAD, porcelain status, and worktree file bytes were unchanged. A separate conflict fixture counted 1 conflict. Detached HEAD, an unborn branch, a locked worktree, a missing prunable path, an empty directory, and an empty root list were reported without writing. Commit subjects redact `SYNTHETIC_SECRET_SENTINEL`. The fixture author is local to the temporary repo. No live account data.
+
+## Milestone 06 — Collect tmux agents and optional loop manifests
+
+- Status: complete
+- Date (UTC): 2026-09-30
+- Preceding HEAD: `4572670` `feat: collect git worktree activity`
+- Commit message: `feat: observe tmux sessions and loop manifests`
+- Commands and results:
+  - `npm run test:unit -- tests/unit/identity.test.ts` — exit 0. 5 passed, 0 failed, 0 skipped.
+  - `npm run test:integration -- tests/integration/tmux.test.ts` — exit 0. 1 passed, 0 failed, 0 skipped.
+  - `npm run check` — exit 0. Unit 17 passed. Python 1 passed. Integration 18 passed.
+- Results: a private `tmux -L chhaya-dashboard-test-<random>` server with synthetic Node scripts named claude, codex, and grok produced three agent rows and omitted the shell pane. Each process-only row has status `unknown` and a null loop. A fresh `.herdr-dashboard/run.json` whose pid, start ticks, provider, and cwd match identifies `goal`/`running` from the manifest; a 31s-old manifest and a manifest whose start ticks differ by one do not. The adapter argv contains `list-panes` and never `send-keys`, `capture-pane`, `kill-session`, `kill-server`, or `new-session`. Worktree bytes were unchanged across collection. A missing private server reports `tmux_server_missing` with no sessions. A missing tmux binary reports `tmux_missing` without a spawn. No live user tmux server, no real Claude/Codex/Grok CLI, and no live account data. `LANG=C.UTF-8` is required because tmux 3.5a rewrites tab separators to underscores under the C locale.

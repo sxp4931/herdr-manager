@@ -116,6 +116,29 @@ export const providerQuotaSchema = z
     }
   });
 
+export const loopManifestSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    sessionIdentity: z.string().min(1).max(120),
+    provider: z.enum(["claude", "codex", "grok"]),
+    pid: z.number().int().positive().safe(),
+    processStartTicks: z.number().int().nonnegative().safe(),
+    kind: z.enum(["goal", "loop", "workflow", "custom", "unknown"]),
+    state: z.enum(["running", "waiting", "finished", "unknown"]),
+    iteration: z.number().int().nonnegative().nullable(),
+    objective: z.string().max(160).nullable(),
+    updatedAt: isoUtcSchema,
+  })
+  .strict()
+  .superRefine((manifest, ctx) => {
+    if (hasControlCharacter(manifest.sessionIdentity)) {
+      ctx.addIssue("manifest session identity contains control characters");
+    }
+    if (manifest.objective !== null && hasControlCharacter(manifest.objective)) {
+      ctx.addIssue("manifest objective contains control characters");
+    }
+  });
+
 export const loopInfoSchema = z
   .object({
     kind: z.enum(["goal", "loop", "workflow", "custom", "unknown"]),
@@ -233,6 +256,7 @@ export type QuotaWindow = z.infer<typeof quotaWindowSchema>;
 export type BankedReset = z.infer<typeof bankedResetSchema>;
 export type ProviderQuota = z.infer<typeof providerQuotaSchema>;
 export type ProviderId = ProviderQuota["provider"];
+export type LoopManifest = z.infer<typeof loopManifestSchema>;
 export type LoopInfo = z.infer<typeof loopInfoSchema>;
 export type AgentSession = z.infer<typeof agentSessionSchema>;
 export type GitCommit = z.infer<typeof gitCommitSchema>;

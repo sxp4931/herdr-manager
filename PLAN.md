@@ -319,10 +319,10 @@ Expected: every command exits 0; preflight JSON has `coreReady:true`, `platform:
 
 **Done:**
 
-- [ ] tmux absence supported.
-- [ ] Unknown classification honest.
-- [ ] Loop evidence validated.
-- [ ] Commit `feat: observe tmux sessions and loop manifests`.
+- [x] tmux absence supported.
+- [x] Unknown classification honest.
+- [x] Loop evidence validated.
+- [x] Commit `feat: observe tmux sessions and loop manifests`.
 
 ### 07. Implement the Linux herdr read adapter
 
