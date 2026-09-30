@@ -28,6 +28,9 @@ const SENSITIVE_ENV = /(?:^|_)(?:API_KEY|APIKEY|TOKEN|SECRET|PASSWORD|CREDENTIAL
 const GIT_EXEC_INJECTION = /^GIT_(?:SSH_COMMAND|ASKPASS|EDITOR|PAGER|EXTERNAL_DIFF|SEQUENCE_EDITOR|PROXY_COMMAND)/i;
 const GIT_CONFIG_ALLOW = new Set(["core.hooksPath=/dev/null", "core.fsmonitor="]);
 const GIT_PATCH_FLAG = /^(?:-p|--patch|-u|--stat|--raw|--numstat|--name-only|--name-status)$|^(?:--unified(?:=|$)|-U)/;
+/** Options that write a file (`log --output`) or point git at other helper binaries. */
+const GIT_WRITE_OR_EXEC_FLAG = /^--(?:output|exec-path)(?:=|$)/;
+const GIT_REF_DELETE_FLAG = /^(?:-d|--delete)$/;
 const TMUX_VALUE_FLAGS = new Set(["-S", "-L", "-f", "-F"]);
 
 export class CommandDeniedError extends Error {
@@ -108,6 +111,9 @@ function assertGit(args: readonly string[]): void {
     if (arg === "--git-dir" || arg.startsWith("--git-dir=") || arg === "--work-tree" || arg.startsWith("--work-tree=")) {
       throw new CommandDeniedError("git directory override denied");
     }
+    if (GIT_WRITE_OR_EXEC_FLAG.test(arg)) {
+      throw new CommandDeniedError("git output or exec-path override denied");
+    }
     if (GIT_PATCH_FLAG.test(arg)) {
       throw new CommandDeniedError("git diff output denied");
     }
@@ -129,7 +135,7 @@ function assertGit(args: readonly string[]): void {
   if (!GIT_READ.has(command)) {
     throw new CommandDeniedError("git command denied");
   }
-  if (command === "symbolic-ref" && positionals.length !== 2) {
+  if (command === "symbolic-ref" && (positionals.length !== 2 || args.some((arg) => GIT_REF_DELETE_FLAG.test(arg)))) {
     throw new CommandDeniedError("git symbolic-ref write denied");
   }
 }
