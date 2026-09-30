@@ -81,6 +81,32 @@ const root = readJson("package.json");
 if (root.packageManager !== "npm@10.9.3") fail("packageManager must be npm@10.9.3");
 if (root.engines?.node !== "22.23.2") fail("engines.node must be 22.23.2");
 if (root.engines?.npm !== "10.9.3") fail("engines.npm must be 10.9.3");
+
+const examplePath = "config/dashboard.example.json";
+if (!existsSync(examplePath)) fail("missing config/dashboard.example.json");
+else {
+  const example = readJson(examplePath);
+  if (example.host !== "127.0.0.1") fail("example host must be 127.0.0.1");
+  if (example.mode !== "passive") fail("example mode must be passive");
+  if (example.quotaProbesEnabled !== false) fail("example quota probes must be disabled");
+  const poll = example.poll ?? {};
+  if (poll.sessionsSeconds < 10 || poll.gitSeconds < 30 || poll.quotaSeconds < 300) {
+    fail("example poll intervals are below the minimums");
+  }
+}
+
+const runnerPath = "apps/server/src/adapters/command-runner.ts";
+if (!existsSync(runnerPath)) fail("missing command runner");
+else {
+  const runner = readFileSync(runnerPath, "utf8");
+  if (!runner.includes("shell: false")) fail("command runner must set shell: false");
+  if (/shell\s*:\s*true/.test(runner)) fail("command runner enables a shell");
+  if (!runner.includes("GIT_OPTIONAL_LOCKS")) fail("command runner must force GIT_OPTIONAL_LOCKS=0");
+  if (!runner.includes("GIT_TERMINAL_PROMPT")) fail("command runner must force GIT_TERMINAL_PROMPT=0");
+  for (const denied of ["send-keys", "capture-pane", "kill-session"]) {
+    if (!runner.includes(denied)) fail(`command runner does not name denied tmux command ${denied}`);
+  }
+}
 for (const name of Object.keys(expectedDirect)) {
   const present = manifests.some((file) => {
     const json = readJson(file);
@@ -106,6 +132,8 @@ for (const rootDir of sourceRoots) {
   for (const file of files) {
     const text = readFileSync(file, "utf8");
     if (forbiddenRoute.test(text)) fail(`${file} registers a mutating HTTP method`);
+    if (/shell\s*:\s*true/.test(text)) fail(`${file} enables a shell`);
+    if (/\bexecSync\s*\(/.test(text)) fail(`${file} uses execSync`);
     if (/agent\.(answer|say|stop)|session\.spawn|send-keys|capture-pane/.test(text) && !text.includes("deny") && !text.includes("forbidden")) {
       if (/["'`](agent\.(answer|say|stop)|session\.spawn)["'`]/.test(text)) {
         fail(`${file} references a write method`);

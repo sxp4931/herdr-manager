@@ -42,3 +42,15 @@ Entries record the milestone message and the HEAD that preceded the commit. The 
   - `npm run test:integration -- tests/integration/sqlite.test.ts` — exit 0. 4 passed, 0 failed, 0 skipped.
   - `npm run check` — exit 0. Unit 12 passed. Python 1 passed. Integration 5 passed.
 - Results: migration `001` applies twice and leaves one `schema_migrations` row. Restart keeps the quota sample and the original session dwell; a changed session identity resets dwell; an older observation does not overwrite a newer one. A sample older than seven days is pruned. The database file and WAL are mode `0600` and the directory is `0700`. A corrupt file raises `StorageCorruptionError` and is not deleted. A locked database fails inside five seconds and is left in place. Stored bytes, log lines, read-back JSON, and the HTTP 404 body do not contain `SYNTHETIC_SECRET_SENTINEL`. Fixture data only.
+
+## Milestone 04 — Bound process execution and configuration
+
+- Status: complete
+- Date (UTC): 2026-09-29
+- Preceding HEAD: `bfa7baa` `feat: persist sanitized observations locally`
+- Commit message: `feat: constrain local collector execution`
+- Commands and results:
+  - `npm run test:integration -- tests/integration/probe-boundary.test.ts` — exit 0. 7 passed, 0 failed, 0 skipped.
+  - `npm run check:policy` — exit 0. `policy ok`.
+  - `npm run check` — exit 0. Unit 12 passed. Python 1 passed. Integration 12 passed.
+- Results: the example config keeps probes disabled, mode `passive`, and host `127.0.0.1`. A `0.0.0.0` host is rejected. Fixture mode without `HERDR_FIXTURE=1` is rejected, and that env forces fixture mode. A shell metacharacter stayed a literal argv entry and did not create a sentinel file. API keys, `OPENAI_BASE_URL`, and `GIT_CONFIG_COUNT` were stripped. A flooded child was truncated at 1024 bytes and killed. A timed-out process group, including its `sleep` child, was reaped. Shells, `git reset`, `git -c` config overrides, `git log -p`, and `tmux send-keys` are denied before spawn. `tmux -S <socket> list-panes` is allowed and did not create a server socket. A world-writable working directory is rejected. `node scripts/probe-doctor.mjs --json` reported three providers with `liveProbe: false` and did not launch a CLI. `--live` exits 2. No live usage probe was run.

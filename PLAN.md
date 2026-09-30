@@ -273,10 +273,10 @@ Expected: every command exits 0; preflight JSON has `coreReady:true`, `platform:
 
 **Done:**
 
-- [ ] Command allowlist.
-- [ ] Env filtering.
-- [ ] Cancellation cleanup.
-- [ ] Commit `feat: constrain local collector execution`.
+- [x] Command allowlist.
+- [x] Env filtering.
+- [x] Cancellation cleanup.
+- [x] Commit `feat: constrain local collector execution`.
 
 ### 05. Collect git repositories and worktrees
 

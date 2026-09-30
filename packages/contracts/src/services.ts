@@ -17,6 +17,8 @@ export interface CommandResult {
   code: number | null;
   stdout: string;
   stderr: string;
+  timedOut: boolean;
+  truncated: boolean;
 }
 
 export interface CommandRunner {
