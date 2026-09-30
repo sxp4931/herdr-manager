@@ -1,17 +1,53 @@
-import { z } from "zod";
+export {
+  agentSessionSchema,
+  alertSchema,
+  bankedResetSchema,
+  dashboardSnapshotSchema,
+  gitWorktreeSchema,
+  healthSchema as HealthSchema,
+  isoUtcSchema,
+  loopInfoSchema,
+  parseDashboardSnapshot,
+  parseHealth,
+  providerQuotaSchema,
+  quotaWindowSchema,
+  sourceHealthSchema,
+} from "./schemas.js";
 
-/** Loopback health payload. Source failures are reported separately. */
-export const HealthSchema = z
-  .object({
-    status: z.literal("ok"),
-    schemaVersion: z.literal(1),
-    mode: z.enum(["passive", "live", "fixture"]),
-    readOnly: z.literal(true),
-  })
-  .strict();
+export type {
+  AgentSession,
+  Alert,
+  BankedReset,
+  DashboardSnapshot,
+  GitCommit,
+  GitWorktree,
+  Health,
+  LoopInfo,
+  Provenance,
+  ProviderId,
+  ProviderQuota,
+  QuotaWindow,
+  SourceHealth,
+  SourceStatus,
+} from "./schemas.js";
 
-export type Health = z.infer<typeof HealthSchema>;
+export type {
+  AlertCoverage,
+  AlertEngine,
+  Clock,
+  CommandRequest,
+  CommandResult,
+  CommandRunner,
+  GitCollectResult,
+  GitSource,
+  Observation,
+  QuotaSource,
+  SessionCollectResult,
+  SessionSource,
+  SnapshotRepository,
+} from "./services.js";
 
-export function parseHealth(input: unknown): Health {
-  return HealthSchema.parse(input);
-}
+export { frozenClock, systemClock } from "./services.js";
+
+export { FIXTURE_NOW, fixtureIso, idleSeed, scenarioNames, scenarios } from "./fixtures.js";
+export type { ScenarioName } from "./fixtures.js";

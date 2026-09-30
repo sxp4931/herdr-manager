@@ -227,10 +227,10 @@ Expected: every command exits 0; preflight JSON has `coreReady:true`, `platform:
 
 **Done:**
 
-- [ ] Models match tables.
-- [ ] Fixtures synthetic and labeled.
-- [ ] Null semantics enforced.
-- [ ] Commit `feat: define quota and herd contracts`.
+- [x] Models match tables.
+- [x] Fixtures synthetic and labeled.
+- [x] Null semantics enforced.
+- [x] Commit `feat: define quota and herd contracts`.
 
 ### 03. Add local SQLite storage, migrations, and redaction
 

@@ -19,3 +19,14 @@ Entries record the milestone message and the HEAD that preceded the commit. The 
   - `node scripts/preflight.mjs --require-core` — exit 0.
   - `node scripts/check-policy.mjs` — exit 0.
 - Notes: fixtures are not involved yet. SQLite availability was checked with an in-memory `node:sqlite` database. Node prints an experimental-SQLite warning on stderr; it does not change the JSON result.
+
+## Milestone 02 — Define normalized contracts and deterministic fixture catalog
+
+- Status: complete
+- Date (UTC): 2026-09-29
+- Preceding HEAD: `868bd0c` `chore: bootstrap Linux dashboard workspace`
+- Commit message: `feat: define quota and herd contracts`
+- Commands and results:
+  - `npm run test:unit -- tests/unit/contracts.test.ts` — exit 0. 9 passed, 0 failed, 0 skipped.
+  - `npm run check` — exit 0. Lint, typecheck, unit (9), Python (1), build, integration (1).
+- Results: daily snapshot has exactly Claude, Codex, and Grok. Claude 5h is 10% used and weekly is 20% used. Codex 5h is 65% left (35% used / 65% remaining) and weekly is 75% left. Grok weekly is 15% used and the 5h window is `not_applicable` with null percentages. Unknown banked inventory is null; the partial Codex inventory is a known empty array. Invalid percents, invalid dates, missing provenance, and zero-for-unknown are rejected. Scenario files are synthetic fixtures, not live-account captures. The milestone also drops an accidentally tracked Python bytecode file from the tree.

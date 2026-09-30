@@ -1,0 +1,166 @@
+{
+  "schemaVersion": 1,
+  "sequence": 1,
+  "generatedAt": "2026-09-29T16:00:00.000Z",
+  "providers": [
+    {
+      "provider": "claude",
+      "windows": [
+        {
+          "kind": "five_hour",
+          "scope": "all",
+          "availability": "unknown",
+          "usedPercent": null,
+          "remainingPercent": null,
+          "resetsAt": null,
+          "resetRaw": null,
+          "sourceTimezone": "America/New_York",
+          "sampledAt": "2026-09-29T16:00:00.000Z",
+          "confidence": "unknown"
+        },
+        {
+          "kind": "weekly",
+          "scope": "all",
+          "availability": "known",
+          "usedPercent": 20,
+          "remainingPercent": 80,
+          "resetsAt": "2026-10-01T04:00:00.000Z",
+          "resetRaw": "in 36h",
+          "sourceTimezone": "America/New_York",
+          "sampledAt": "2026-09-29T16:00:00.000Z",
+          "confidence": "exact"
+        }
+      ],
+      "bankedResets": null,
+      "bankedStatus": "unknown",
+      "health": {
+        "sourceId": "claude-quota",
+        "status": "ok",
+        "checkedAt": "2026-09-29T16:00:00.000Z",
+        "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+        "reasonCode": "ok",
+        "cliVersion": "fixture-1",
+        "parserVersion": "fixture-1",
+        "provenance": "fixture"
+      }
+    },
+    {
+      "provider": "codex",
+      "windows": [
+        {
+          "kind": "five_hour",
+          "scope": "all",
+          "availability": "known",
+          "usedPercent": 35,
+          "remainingPercent": 65,
+          "resetsAt": "2026-09-29T20:00:00.000Z",
+          "resetRaw": "in 4h",
+          "sourceTimezone": "America/New_York",
+          "sampledAt": "2026-09-29T16:00:00.000Z",
+          "confidence": "exact"
+        },
+        {
+          "kind": "weekly",
+          "scope": "all",
+          "availability": "unknown",
+          "usedPercent": null,
+          "remainingPercent": null,
+          "resetsAt": null,
+          "resetRaw": null,
+          "sourceTimezone": "America/New_York",
+          "sampledAt": "2026-09-29T16:00:00.000Z",
+          "confidence": "unknown"
+        }
+      ],
+      "bankedResets": [],
+      "bankedStatus": "known",
+      "health": {
+        "sourceId": "codex-quota",
+        "status": "ok",
+        "checkedAt": "2026-09-29T16:00:00.000Z",
+        "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+        "reasonCode": "ok",
+        "cliVersion": "fixture-1",
+        "parserVersion": "fixture-1",
+        "provenance": "fixture"
+      }
+    },
+    {
+      "provider": "grok",
+      "windows": [
+        {
+          "kind": "five_hour",
+          "scope": "all",
+          "availability": "not_applicable",
+          "usedPercent": null,
+          "remainingPercent": null,
+          "resetsAt": null,
+          "resetRaw": null,
+          "sourceTimezone": "America/New_York",
+          "sampledAt": "2026-09-29T16:00:00.000Z",
+          "confidence": "unknown"
+        },
+        {
+          "kind": "weekly",
+          "scope": "all",
+          "availability": "unknown",
+          "usedPercent": null,
+          "remainingPercent": null,
+          "resetsAt": null,
+          "resetRaw": null,
+          "sourceTimezone": "America/New_York",
+          "sampledAt": "2026-09-29T16:00:00.000Z",
+          "confidence": "unknown"
+        }
+      ],
+      "bankedResets": null,
+      "bankedStatus": "unknown",
+      "health": {
+        "sourceId": "grok-quota",
+        "status": "missing",
+        "checkedAt": "2026-09-29T16:00:00.000Z",
+        "lastSuccessAt": null,
+        "reasonCode": "cli_missing",
+        "cliVersion": null,
+        "parserVersion": "fixture-1",
+        "provenance": "fixture"
+      }
+    }
+  ],
+  "sessions": [],
+  "worktrees": [],
+  "alerts": [],
+  "sources": [
+    {
+      "sourceId": "claude-quota",
+      "status": "ok",
+      "checkedAt": "2026-09-29T16:00:00.000Z",
+      "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+      "reasonCode": "ok",
+      "cliVersion": "fixture-1",
+      "parserVersion": "fixture-1",
+      "provenance": "fixture"
+    },
+    {
+      "sourceId": "codex-quota",
+      "status": "ok",
+      "checkedAt": "2026-09-29T16:00:00.000Z",
+      "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+      "reasonCode": "ok",
+      "cliVersion": "fixture-1",
+      "parserVersion": "fixture-1",
+      "provenance": "fixture"
+    },
+    {
+      "sourceId": "grok-quota",
+      "status": "missing",
+      "checkedAt": "2026-09-29T16:00:00.000Z",
+      "lastSuccessAt": null,
+      "reasonCode": "cli_missing",
+      "cliVersion": null,
+      "parserVersion": "fixture-1",
+      "provenance": "fixture"
+    }
+  ],
+  "mode": "fixture"
+}
