@@ -34,6 +34,9 @@ Screenshots (fixture data, gitignored under `dashboard/screenshots/`) compare `b
   - Provider cards across the top, then the full-width agent table with inline filters and a count.
   - Alerts and source status side by side, worktrees last.
   - "Demo data" is a pill beside the title, which keeps the first agent rows above the fold at 1440×900. PLAN requires this and the e2e suite asserts it.
+  - The first agent row ends at about 783 px locally, leaving margin for runners whose fonts are taller. The first push measured 875 px here and 917 px on GitHub's ubuntu-22.04 runner.
+  - To get there, the header was tightened and banked-reset eligibility sits on the item's header line when it is a one-word verdict.
+  - The filter labels are visually hidden. They are still real `<label>`s and the controls keep their accessible names, and the option text ("All providers", "All statuses") and the search placeholder say what each control does.
 - **Times:** one readable America/New_York time, as PLAN.md specifies, inside a `<time datetime>` with the ISO instant as a tooltip. Raw CLI reset text appears only when it could not be parsed into a time. Otherwise it is on the tooltip.
 - **Alerts:** a severity tag, a readable kind, and the message, with evidence collapsed behind "Evidence" and shown as labelled, formatted values.
 - **Status:**

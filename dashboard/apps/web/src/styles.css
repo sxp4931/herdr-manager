@@ -72,7 +72,7 @@ h2 {
 
 h1 {
   margin: 0;
-  font-size: 2.5rem;
+  font-size: 2.1rem;
   line-height: 1.1;
 }
 
@@ -125,7 +125,7 @@ time,
 .shell {
   max-width: 1320px;
   margin: 0 auto;
-  padding: 28px 24px 72px;
+  padding: 20px 24px 72px;
 }
 
 .topbar {
@@ -133,7 +133,7 @@ time,
   justify-content: space-between;
   align-items: flex-end;
   gap: 20px;
-  padding-bottom: 18px;
+  padding-bottom: 12px;
   border-bottom: 1px solid var(--line-strong);
 }
 
@@ -155,7 +155,7 @@ time,
 }
 
 .lede {
-  margin-top: 8px;
+  margin-top: 4px;
   color: var(--ink-2);
 }
 
@@ -298,7 +298,7 @@ time,
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
-  margin-top: 18px;
+  margin-top: 14px;
   align-items: start;
 }
 
@@ -446,7 +446,7 @@ progress.meter-stale::-moz-progress-bar {
 }
 
 .banked li {
-  padding: 8px 10px;
+  padding: 6px 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--paper);
@@ -460,9 +460,13 @@ progress.meter-stale::-moz-progress-bar {
 
 .banked-head {
   display: flex;
-  justify-content: space-between;
-  gap: 8px;
+  align-items: baseline;
+  gap: 4px 10px;
   flex-wrap: wrap;
+}
+
+.banked-head h4 {
+  margin-right: auto;
 }
 
 .banked h4 {
@@ -490,7 +494,7 @@ progress.meter-stale::-moz-progress-bar {
 
 .panel {
   min-width: 0;
-  margin-top: 24px;
+  margin-top: 22px;
 }
 
 .panel h2 {
@@ -509,7 +513,7 @@ progress.meter-stale::-moz-progress-bar {
 .panel-head {
   display: flex;
   justify-content: space-between;
-  align-items: flex-end;
+  align-items: center;
   gap: 12px 24px;
   flex-wrap: wrap;
 }
@@ -553,7 +557,7 @@ progress.meter-stale::-moz-progress-bar {
 
 .table-wrap {
   max-width: 100%;
-  margin-top: 12px;
+  margin-top: 10px;
   overflow-x: auto;
   background: var(--surface);
   border: 1px solid var(--line-strong);
@@ -575,8 +579,8 @@ td {
 }
 
 thead th {
-  padding-top: 10px;
-  padding-bottom: 10px;
+  padding-top: 7px;
+  padding-bottom: 7px;
   background: var(--paper);
   color: var(--muted);
   font-size: 0.78rem;

@@ -41,7 +41,7 @@ export function AgentTable({
         </h2>
         <div className="filters">
           <label>
-            Provider
+            <span className="visually-hidden">Provider</span>
             <select aria-label="Provider" value={provider} onChange={(event) => setProvider(event.target.value)}>
               {PROVIDER_OPTIONS.map((option) => (
                 <option key={option} value={option}>
@@ -51,7 +51,7 @@ export function AgentTable({
             </select>
           </label>
           <label>
-            Status
+            <span className="visually-hidden">Status</span>
             <select aria-label="Status" value={status} onChange={(event) => setStatus(event.target.value)}>
               {STATUS_OPTIONS.map((option) => (
                 <option key={option} value={option}>
@@ -61,7 +61,7 @@ export function AgentTable({
             </select>
           </label>
           <label>
-            Search agents
+            <span className="visually-hidden">Search agents</span>
             <input
               type="search"
               aria-label="Search agents"

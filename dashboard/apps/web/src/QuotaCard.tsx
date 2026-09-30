@@ -143,8 +143,10 @@ function BankedList({
             <div className="banked-head">
               <h4>{reset.id}</h4>
               <span className="banked-qty">Quantity {reset.quantity}</span>
+              {reset.eligibility === "ineligible" ? null : <span className="eligibility">{eligibilityLine(reset)}</span>}
             </div>
-            <p className={reset.eligibility === "ineligible" ? "eligibility eligibility-no" : "eligibility"}>{eligibilityLine(reset)}</p>
+            {/* An ineligible reset carries a sentence of reason, so it gets its own line. */}
+            {reset.eligibility === "ineligible" ? <p className="eligibility eligibility-no">{eligibilityLine(reset)}</p> : null}
             <p>
               Expires <Timestamp iso={reset.expiresAt} /> <span className="countdown">· {formatCountdown(reset.expiresAt, generatedAt)}</span>
             </p>
