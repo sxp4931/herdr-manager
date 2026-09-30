@@ -32,6 +32,10 @@ export interface DashboardStore {
   applyGit(worktrees: GitWorktree[]): void;
   applyHealth(health: SourceHealth): void;
   latestQuota(provider: ProviderId): ProviderQuota | null;
+  listQuotas(): ProviderQuota[];
+  listSessions(): AgentSession[];
+  listWorktrees(): GitWorktree[];
+  listHealth(): SourceHealth[];
   session(id: string): AgentSession | null;
   counts(): { quotas: number; sessions: number; migrations: number };
   prune(): void;
@@ -225,6 +229,32 @@ class SqliteStore implements DashboardStore {
       return null;
     }
     return parseStored(providerQuotaSchema, row.payload_json);
+  }
+
+  listQuotas(): ProviderQuota[] {
+    const quotas: ProviderQuota[] = [];
+    for (const provider of ["claude", "codex", "grok"] as const) {
+      const quota = this.latestQuota(provider);
+      if (quota) quotas.push(quota);
+    }
+    return quotas;
+  }
+
+  listSessions(): AgentSession[] {
+    const rows = this.db.prepare("SELECT payload_json FROM session_state ORDER BY id").all() as { payload_json: string }[];
+    return rows.map((row) => parseStored(agentSessionSchema, row.payload_json));
+  }
+
+  listWorktrees(): GitWorktree[] {
+    const rows = this.db.prepare("SELECT payload_json FROM git_cache ORDER BY id").all() as { payload_json: string }[];
+    return rows.map((row) => parseStored(gitWorktreeSchema, row.payload_json));
+  }
+
+  listHealth(): SourceHealth[] {
+    const rows = this.db.prepare("SELECT payload_json FROM source_health ORDER BY source_id").all() as {
+      payload_json: string;
+    }[];
+    return rows.map((row) => parseStored(sourceHealthSchema, row.payload_json));
   }
 
   session(id: string): AgentSession | null {

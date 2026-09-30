@@ -412,10 +412,10 @@ Expected: every command exits 0; preflight JSON has `coreReady:true`, `platform:
 
 **Done:**
 
-- [ ] Cached API never waits for CLI.
-- [ ] TTLs visible.
-- [ ] Shutdown bounded.
-- [ ] Commit `feat: serve scheduled read-only dashboard snapshots`.
+- [x] Cached API never waits for CLI.
+- [x] TTLs visible.
+- [x] Shutdown bounded.
+- [x] Commit `feat: serve scheduled read-only dashboard snapshots`.
 
 ### 11. Implement capacity and expiry alerts
 

@@ -12,6 +12,11 @@ export function authorityAllowed(hostHeader: string | undefined, port: number): 
   return expected.has(hostHeader.trim().toLowerCase());
 }
 
+export function fetchSiteAllowed(site: string | undefined): boolean {
+  if (site === undefined || site === "") return true;
+  return site !== "cross-site";
+}
+
 export function originAllowed(origin: string | undefined, port: number, dev = false): boolean {
   if (!origin) {
     return true;
