@@ -162,9 +162,20 @@ async function serveStatic(res: ServerResponse, webDist: string, urlPath: string
       "Content-Type": MIME[ext] ?? "application/octet-stream",
       "Content-Length": info.size,
     });
-    createReadStream(file).pipe(res);
+    const stream = createReadStream(file);
+    stream.on("error", () => res.destroy());
+    stream.pipe(res);
   } catch {
     writeError(res, 404, "not_found", "not found");
+  }
+}
+
+/** A malformed absolute-form target must not throw inside the request listener. */
+function requestUrl(target: string | undefined, port: number): URL | null {
+  try {
+    return new URL(target ?? "/", `http://127.0.0.1:${port}`);
+  } catch {
+    return null;
   }
 }
 
@@ -194,7 +205,11 @@ export function createDashboardServer(options: ServerOptions): Server {
       return;
     }
     const method = req.method ?? "GET";
-    const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
+    const url = requestUrl(req.url, port);
+    if (!url) {
+      writeError(res, 400, "bad_request", "request target is not a valid path");
+      return;
+    }
     if (url.pathname.startsWith("/api/")) {
       if (method !== "GET" && method !== "HEAD") {
         writeError(res, 405, "method_not_allowed", "this dashboard is read-only", { Allow: "GET" });
