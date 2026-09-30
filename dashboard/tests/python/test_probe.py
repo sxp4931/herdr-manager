@@ -303,6 +303,18 @@ class ProbeTransportTest(unittest.TestCase):
         self.assertEqual(payload["reason"], "not_absolute")
         self.assertFalse((cwd / "pid").exists())
 
+    def test_fixture_profile_refuses_an_executable_outside_the_helpers(self) -> None:
+        cwd = self.make("usage")
+        outside = self.make(None) / "outside-cli.py"
+        outside.write_bytes(FAKE.read_bytes())
+        outside.chmod(0o700)
+        for profile in ("fixture-v1", "claude-fixture-v1"):
+            args = ProbeArgs(executable=str(outside), profile=profile, cwd=str(cwd), deadline_ms=2_000)
+            with mock.patch("probes.probe.subprocess.Popen", side_effect=AssertionError("launched")):
+                payload = execute(args)
+            self.assertEqual(payload["reason"], "fixture_executable_denied")
+            self.assertEqual(payload["sent"], [])
+
     def test_unsafe_profile_does_not_spawn(self) -> None:
         cwd = self.make("usage")
         args = ProbeArgs(executable=str(FAKE), profile="claude", cwd=str(cwd), deadline_ms=2_000)

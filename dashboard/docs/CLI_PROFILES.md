@@ -29,7 +29,7 @@ This transport profile accepts version `fixture-1.0.0` exactly, not the rest of 
 
 ## Provider fixture profiles
 
-These profiles are launchable only against the synthetic programs in `tests/helpers/`. Each accepts the version token `fixture-1` exactly. They are not the live `claude`, `codex`, or `grok` profiles.
+These profiles are launchable only against the synthetic programs in `tests/helpers/`. Each accepts the version token `fixture-1` exactly. They are not the live `claude`, `codex`, or `grok` profiles. Any other executable, including a real provider binary, stops with `fixture_executable_denied` before a PTY is opened.
 
 | Profile | Program | Commands | Recognized text |
 | --- | --- | --- | --- |
