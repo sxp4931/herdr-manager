@@ -1,0 +1,9 @@
+SYNTHETIC fixture screen. Not a live Grok account.
+Grok fixture-1
+
+Weekly limit
+15% used
+Resets in 47h
+
+5h limit
+not applicable

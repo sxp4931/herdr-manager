@@ -1,0 +1,10 @@
+SYNTHETIC fixture screen. Not a live Claude account.
+Claude Code fixture-1
+
+Current session
+10% used
+Resets in 4h
+
+Weekly limit
+20% used
+Resets in 36h

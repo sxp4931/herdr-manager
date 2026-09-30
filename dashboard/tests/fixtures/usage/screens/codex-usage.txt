@@ -1,0 +1,17 @@
+SYNTHETIC fixture screen. Not a live Codex account.
+Codex fixture-1
+
+Earned resets
+
+id: codex-reset-expiring
+quantity: 1
+expires in 24h
+redeemable in 1h
+eligibility: eligible
+
+id: codex-reset-unusable
+quantity: 1
+expires in 24h
+redeemable in 25h
+eligibility: ineligible
+reason: redeemable only after expiry
