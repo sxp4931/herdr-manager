@@ -557,11 +557,11 @@ Expected both runs exit0 and last line `VERIFY herdr-dashboard PASS`; status has
 
 **Done:**
 
-- [ ] All16 milestones logged/committed.
-- [ ] Independent script twice green.
-- [ ] No required test skipped.
-- [ ] Live gaps disclosed.
-- [ ] Commit `chore: finalize reproducible dashboard verification`.
+- [x] All16 milestones logged/committed.
+- [x] Independent script twice green.
+- [x] No required test skipped.
+- [x] Live gaps disclosed.
+- [x] Commit `chore: finalize reproducible dashboard verification`.
 
 ## 4. Test strategy and final verifier
 

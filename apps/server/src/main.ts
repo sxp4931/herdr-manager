@@ -71,7 +71,12 @@ export function resolveMode(
   if ((fixtureFlag || configured === "fixture") && env.HERDR_FIXTURE !== "1") {
     throw new Error("refusing --fixture without HERDR_FIXTURE=1");
   }
-  if (env.HERDR_FIXTURE === "1" || fixtureFlag) return "fixture";
+  if (env.HERDR_FIXTURE === "1" || fixtureFlag) {
+    if (env.HERDR_ALLOW_NETWORK !== "0") {
+      throw new Error("refusing fixture mode without HERDR_ALLOW_NETWORK=0");
+    }
+    return "fixture";
+  }
   return configured === "live" ? "live" : "passive";
 }
 

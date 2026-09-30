@@ -2,6 +2,8 @@
 
 The dashboard observes. It does not answer panes, redeem resets, start or stop coding loops, or copy account tokens into this repository.
 
+Fixture mode starts only when `HERDR_FIXTURE=1` and `HERDR_ALLOW_NETWORK=0`. Those fixture collectors serve the synthetic catalog and do not open host git, tmux, herdr, or a usage PTY.
+
 ## CLI profile updates
 
 Live probe profiles live in `probes/profiles.py` under the ids `claude`, `codex`, and `grok`. Each has `launch_allowed` false and the reason `startup hooks and MCP are not proven inert`.

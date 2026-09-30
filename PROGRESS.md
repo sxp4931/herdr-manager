@@ -195,3 +195,25 @@ Entries record the milestone message and the HEAD that preceded the commit. The 
   - `node scripts/check-policy.mjs` — exit 0. `policy ok`.
   - `node scripts/check-ci.mjs` — exit 0. JSON `hostedActionsExecuted` false, `runsOn` `ubuntu-22.04`, Node `22.23.2`, Python `3.13.7`, permissions `contents: read`, `ok` true. This machine did not run hosted Actions.
 - Results: README lists `npm ci`, the Python venv, `npm run build`, `npm start`, the local config copy, and passive, live, and fixture modes. Ctrl+C maps to the existing SIGINT and SIGTERM shutdown. The doctor prints status codes and does not launch a usage PTY. `.github/workflows/ci.yml` names the hosted pins and the root scripts `check:policy`, `check`, and `test:e2e`. B-01, B-02, B-03, and B-04 stay open. The run did not create `.local/dashboard.sqlite`. The existing user tmux server was left running.
+
+## Milestone 16 — Deliver independent reproducible evidence
+
+- Status: complete
+- Date (UTC): 2026-09-30
+- Preceding HEAD: `c7dce81` `docs: add Linux operations and offline verification CI` (`c7dce81d3bd37b79d6992a0ce6010aa86c595d80`)
+- Commit message: `chore: finalize reproducible dashboard verification`
+- Commands and results:
+  - `npm run test:unit -- tests/unit/database-path.test.ts` — exit 0. 4 passed, 0 failed, 0 skipped. Fixture mode throws unless `HERDR_ALLOW_NETWORK=0`.
+  - `npm run test:integration -- tests/integration/smoke.test.ts` — exit 0. 2 passed, 0 failed, 0 skipped. The smoke script read a real fixture server, including the 15 second SSE heartbeat, and wrote evidence with `ok` true and `skippedTests` 0.
+  - `npm run test:integration -- tests/integration/http.test.ts tests/integration/read-only-audit.test.ts` — exit 0. 10 passed, 0 failed, 0 skipped.
+  - `bash scripts/verify.sh` — exit 0 at 2026-09-30T05:48:22Z and again at 2026-09-30T05:50:14Z. Each last line was `VERIFY herdr-dashboard PASS`. Inside a run: `npm ci` exit 0, `pip check` found no broken requirements, `check:policy` printed `policy ok`, `npm run check` exit 0 (unit 58, Python 29 OK, integration 49, zero skips), `npm run test:e2e` exit 0 (15 passed), smoke printed `smoke ok`, artifact policy printed `policy ok`.
+- Evidence from `.artifacts/verify/smoke.json` on that run: `ok` true, `skippedTests` 0, and these checks passed: health, providers, banked-inventory, provenance, sessions, worktrees, alerts, unknown-api, mutations, hostile-host, headers, page, sse.
+
+| Surface | Evidence |
+| --- | --- |
+| Fake CLI PTY | Python probe tests and `tests/integration/collector.test.ts` ran inside `npm run check` |
+| Herdr Unix socket | `tests/integration/herdr.test.ts` ran inside `npm run check` |
+| Git worktrees | `tests/integration/git.test.ts` ran inside `npm run check` |
+| Production page | Playwright 15 passed, and smoke read `/` plus the fixture snapshot on `127.0.0.1:14317` |
+
+- Results: The verifier uses a fresh `HERDR_STATE_DIR` and does not reuse port 14317 when something is already listening. Fixture mode refuses to start unless `HERDR_ALLOW_NETWORK=0`. B-01, B-02, B-03, and B-04 stay open. The run did not create `.local/dashboard.sqlite`. The existing user tmux server was left running. A second pair of `bash scripts/verify.sh` runs is executed after this commit so the final tree stays clean.

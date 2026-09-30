@@ -33,6 +33,7 @@ export function isolatedChildEnv(home: string, extra: NodeJS.ProcessEnv = {}): N
   delete env.TMUX;
   delete env.TMUX_PANE;
   if (!extra.HERDR_FIXTURE) delete env.HERDR_FIXTURE;
+  if (!extra.HERDR_ALLOW_NETWORK) delete env.HERDR_ALLOW_NETWORK;
   return env;
 }
 
@@ -69,9 +70,11 @@ export async function startDashboardProcess(options: {
     options.databasePath,
   ];
   if (options.fixture) args.push("--fixture");
+  const extra = { ...options.env };
+  if (options.fixture && extra.HERDR_ALLOW_NETWORK === undefined) extra.HERDR_ALLOW_NETWORK = "0";
   const child: ChildProcess = spawn(process.execPath, args, {
     cwd: repoRoot,
-    env: isolatedChildEnv(home, options.env),
+    env: isolatedChildEnv(home, extra),
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stderr = "";

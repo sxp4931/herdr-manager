@@ -1,6 +1,6 @@
 # Blockers
 
-Optional live CLIs and tmux are reported by `scripts/preflight.mjs` and do not affect `coreReady`. Open items are external capability gaps only.
+Optional live CLIs and tmux are reported by `scripts/preflight.mjs` and do not affect `coreReady`. Open items are external capability gaps only. Milestone 16 verification ran the fixture catalog, the fake CLI PTYs, the private herdr socket, and temporary git worktrees. It did not clear the items below.
 
 ## B-01
 

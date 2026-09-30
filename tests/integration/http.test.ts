@@ -309,7 +309,7 @@ describe.sequential("loopback server", () => {
     const emptyPath = mkdtempSync(path.join(tmpdir(), "herdr-empty-path-"));
     const started = await boot({
       fixture: true,
-      env: { HERDR_FIXTURE: "1", PATH: emptyPath },
+      env: { HERDR_FIXTURE: "1", HERDR_ALLOW_NETWORK: "0", PATH: emptyPath },
     });
     try {
       const deadline = Date.now() + 3_000;

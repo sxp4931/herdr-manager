@@ -48,7 +48,7 @@ Set `"mode": "live"` and `"quotaProbesEnabled": true`. Live mode requires probes
 
 ### Fixture
 
-The synthetic catalog. `HERDR_FIXTURE=1` selects fixture mode. `--fixture` refuses to start unless that variable is set. The scheduler clock is `2026-09-29T16:00:00.000Z`. Verification sets `HERDR_FIXTURE_NOW` to that same instant and sets `HERDR_ALLOW_NETWORK=0`.
+The synthetic catalog. `HERDR_FIXTURE=1` selects fixture mode. `--fixture` refuses to start unless that variable is set. Fixture mode also refuses to start unless `HERDR_ALLOW_NETWORK=0`. The scheduler clock is `2026-09-29T16:00:00.000Z`. Verification sets `HERDR_FIXTURE_NOW` to that same instant.
 
 ```bash
 HERDR_FIXTURE=1 \

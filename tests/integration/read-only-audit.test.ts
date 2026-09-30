@@ -177,7 +177,7 @@ describe("read-only adapter and route audit", () => {
       databasePath,
       fixture: true,
       home,
-      env: { HERDR_FIXTURE: "1" },
+      env: { HERDR_FIXTURE: "1", HERDR_ALLOW_NETWORK: "0" },
     });
     try {
       const methods = ["POST", "PUT", "PATCH", "DELETE", "TRACE"];
