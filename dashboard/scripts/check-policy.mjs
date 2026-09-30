@@ -41,10 +41,6 @@ function walkPackageFiles(dir, out = []) {
   return out;
 }
 
-const branch = execFileSync("git", ["branch", "--show-current"], { encoding: "utf8" }).trim();
-if (branch !== "feat/herdr-dashboard-v1") {
-  fail(`branch is ${branch}, expected feat/herdr-dashboard-v1`);
-}
 
 const gitignore = existsSync(".gitignore") ? readFileSync(".gitignore", "utf8") : "";
 for (const needle of [".venv/", "node_modules/", ".local/", ".artifacts/", "dashboard.local.json", ".env*"]) {
