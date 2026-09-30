@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "host": "127.0.0.1",
+  "port": 4317,
+  "timezone": "America/New_York",
+  "mode": "passive",
+  "repositoryRoots": [],
+  "herdrSocket": null,
+  "tmuxSocket": null,
+  "quotaProbesEnabled": false,
+  "providers": {
+    "claude": { "executable": "claude", "profile": null },
+    "codex": { "executable": "codex", "profile": null },
+    "grok": { "executable": "grok", "profile": null }
+  },
+  "poll": {
+    "sessionsSeconds": 10,
+    "gitSeconds": 30,
+    "quotaSeconds": 300
+  }
+}

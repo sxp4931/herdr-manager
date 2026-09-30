@@ -1,0 +1,382 @@
+{
+  "schemaVersion": 1,
+  "sequence": 1,
+  "generatedAt": "2026-09-29T16:00:00.000Z",
+  "providers": [
+    {
+      "provider": "claude",
+      "windows": [
+        {
+          "kind": "five_hour",
+          "scope": "all",
+          "availability": "known",
+          "usedPercent": 10,
+          "remainingPercent": 90,
+          "resetsAt": "2026-09-29T20:00:00.000Z",
+          "resetRaw": "in 4h",
+          "sourceTimezone": "America/New_York",
+          "sampledAt": "2026-09-29T16:00:00.000Z",
+          "confidence": "exact"
+        },
+        {
+          "kind": "weekly",
+          "scope": "all",
+          "availability": "known",
+          "usedPercent": 20,
+          "remainingPercent": 80,
+          "resetsAt": "2026-10-01T04:00:00.000Z",
+          "resetRaw": "in 36h",
+          "sourceTimezone": "America/New_York",
+          "sampledAt": "2026-09-29T16:00:00.000Z",
+          "confidence": "exact"
+        }
+      ],
+      "bankedResets": null,
+      "bankedStatus": "not_applicable",
+      "health": {
+        "sourceId": "claude-quota",
+        "status": "ok",
+        "checkedAt": "2026-09-29T16:00:00.000Z",
+        "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+        "reasonCode": "ok",
+        "cliVersion": "fixture-1",
+        "parserVersion": "fixture-1",
+        "provenance": "fixture"
+      }
+    },
+    {
+      "provider": "codex",
+      "windows": [
+        {
+          "kind": "five_hour",
+          "scope": "all",
+          "availability": "known",
+          "usedPercent": 35,
+          "remainingPercent": 65,
+          "resetsAt": "2026-09-29T20:00:00.000Z",
+          "resetRaw": "in 4h",
+          "sourceTimezone": "America/New_York",
+          "sampledAt": "2026-09-29T16:00:00.000Z",
+          "confidence": "exact"
+        },
+        {
+          "kind": "weekly",
+          "scope": "all",
+          "availability": "known",
+          "usedPercent": 25,
+          "remainingPercent": 75,
+          "resetsAt": "2026-10-01T05:00:00.000Z",
+          "resetRaw": "in 37h",
+          "sourceTimezone": "America/New_York",
+          "sampledAt": "2026-09-29T16:00:00.000Z",
+          "confidence": "exact"
+        }
+      ],
+      "bankedResets": [
+        {
+          "id": "codex-reset-expiring",
+          "quantity": 1,
+          "earnedAt": "2026-09-27T16:00:00.000Z",
+          "expiresAt": "2026-09-30T16:00:00.000Z",
+          "redeemableAt": "2026-09-29T17:00:00.000Z",
+          "eligibility": "eligible",
+          "eligibilityReason": null,
+          "sampledAt": "2026-09-29T16:00:00.000Z"
+        },
+        {
+          "id": "codex-reset-unusable",
+          "quantity": 1,
+          "earnedAt": "2026-09-27T16:00:00.000Z",
+          "expiresAt": "2026-09-30T16:00:00.000Z",
+          "redeemableAt": "2026-09-30T17:00:00.000Z",
+          "eligibility": "ineligible",
+          "eligibilityReason": "redeemable only after expiry",
+          "sampledAt": "2026-09-29T16:00:00.000Z"
+        }
+      ],
+      "bankedStatus": "known",
+      "health": {
+        "sourceId": "codex-quota",
+        "status": "ok",
+        "checkedAt": "2026-09-29T16:00:00.000Z",
+        "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+        "reasonCode": "ok",
+        "cliVersion": "fixture-1",
+        "parserVersion": "fixture-1",
+        "provenance": "fixture"
+      }
+    },
+    {
+      "provider": "grok",
+      "windows": [
+        {
+          "kind": "five_hour",
+          "scope": "all",
+          "availability": "not_applicable",
+          "usedPercent": null,
+          "remainingPercent": null,
+          "resetsAt": null,
+          "resetRaw": null,
+          "sourceTimezone": "America/New_York",
+          "sampledAt": "2026-09-29T16:00:00.000Z",
+          "confidence": "unknown"
+        },
+        {
+          "kind": "weekly",
+          "scope": "all",
+          "availability": "known",
+          "usedPercent": 15,
+          "remainingPercent": 85,
+          "resetsAt": "2026-10-01T15:00:00.000Z",
+          "resetRaw": "in 47h",
+          "sourceTimezone": "America/New_York",
+          "sampledAt": "2026-09-29T16:00:00.000Z",
+          "confidence": "exact"
+        }
+      ],
+      "bankedResets": null,
+      "bankedStatus": "not_applicable",
+      "health": {
+        "sourceId": "grok-quota",
+        "status": "ok",
+        "checkedAt": "2026-09-29T16:00:00.000Z",
+        "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+        "reasonCode": "ok",
+        "cliVersion": "fixture-1",
+        "parserVersion": "fixture-1",
+        "provenance": "fixture"
+      }
+    }
+  ],
+  "sessions": [
+    {
+      "id": "herdr:fixture:ws-claude:pane-claude",
+      "provider": "claude",
+      "runtime": "herdr",
+      "sessionIdentity": "claude-session-1",
+      "workspaceId": "ws-claude",
+      "paneId": "pane-claude",
+      "label": "daily-claude-worker",
+      "cwd": "/work/demo",
+      "status": "working",
+      "stateChangeSeq": 4,
+      "enteredAt": "2026-09-29T15:40:00.000Z",
+      "lastOutputAt": "2026-09-29T15:59:00.000Z",
+      "observedAt": "2026-09-29T16:00:00.000Z",
+      "evidenceSource": "herdr",
+      "confidence": "exact",
+      "pid": 4101,
+      "loop": null
+    },
+    {
+      "id": "herdr:fixture:ws-codex:pane-codex",
+      "provider": "codex",
+      "runtime": "herdr",
+      "sessionIdentity": "codex-session-1",
+      "workspaceId": "ws-codex",
+      "paneId": "pane-codex",
+      "label": "daily-codex-worker",
+      "cwd": "/work/demo",
+      "status": "working",
+      "stateChangeSeq": 7,
+      "enteredAt": "2026-09-29T15:45:00.000Z",
+      "lastOutputAt": "2026-09-29T15:59:30.000Z",
+      "observedAt": "2026-09-29T16:00:00.000Z",
+      "evidenceSource": "herdr",
+      "confidence": "exact",
+      "pid": 4102,
+      "loop": null
+    },
+    {
+      "id": "herdr:fixture:ws-grok:pane-grok",
+      "provider": "grok",
+      "runtime": "herdr",
+      "sessionIdentity": "grok-session-1",
+      "workspaceId": "ws-grok",
+      "paneId": "pane-grok",
+      "label": "daily-grok-worker",
+      "cwd": "/work/demo",
+      "status": "working",
+      "stateChangeSeq": 2,
+      "enteredAt": "2026-09-29T15:50:00.000Z",
+      "lastOutputAt": "2026-09-29T15:59:40.000Z",
+      "observedAt": "2026-09-29T16:00:00.000Z",
+      "evidenceSource": "herdr",
+      "confidence": "exact",
+      "pid": 4103,
+      "loop": null
+    },
+    {
+      "id": "manifest:fixture:goal-1",
+      "provider": "claude",
+      "runtime": "manifest",
+      "sessionIdentity": "goal-session-1",
+      "workspaceId": "ws-goal",
+      "paneId": "pane-goal",
+      "label": "goal-runner",
+      "cwd": "/work/demo",
+      "status": "working",
+      "stateChangeSeq": 1,
+      "enteredAt": "2026-09-29T15:30:00.000Z",
+      "lastOutputAt": "2026-09-29T15:58:00.000Z",
+      "observedAt": "2026-09-29T16:00:00.000Z",
+      "evidenceSource": "manifest",
+      "confidence": "exact",
+      "pid": 4202,
+      "loop": {
+        "kind": "goal",
+        "state": "running",
+        "iteration": 2,
+        "objective": "Refresh the dashboard fixture",
+        "source": "manifest"
+      }
+    },
+    {
+      "id": "tmux:fixture:%9",
+      "provider": "codex",
+      "runtime": "tmux",
+      "sessionIdentity": null,
+      "workspaceId": "tmux-session",
+      "paneId": "%9",
+      "label": "codex-process-only",
+      "cwd": "/work/other",
+      "status": "unknown",
+      "stateChangeSeq": 0,
+      "enteredAt": "2026-09-29T14:00:00.000Z",
+      "lastOutputAt": null,
+      "observedAt": "2026-09-29T16:00:00.000Z",
+      "evidenceSource": "tmux",
+      "confidence": "unknown",
+      "pid": 4303,
+      "loop": {
+        "kind": "unknown",
+        "state": "unknown",
+        "iteration": null,
+        "objective": null,
+        "source": "process"
+      }
+    },
+    {
+      "id": "herdr:fixture:ws-label:pane-label",
+      "provider": "grok",
+      "runtime": "herdr",
+      "sessionIdentity": "label-session",
+      "workspaceId": "ws-label",
+      "paneId": "pane-label",
+      "label": "<img src=x onerror=alert(1)>",
+      "cwd": null,
+      "status": "done",
+      "stateChangeSeq": 1,
+      "enteredAt": "2026-09-29T13:00:00.000Z",
+      "lastOutputAt": "2026-09-29T13:00:00.000Z",
+      "observedAt": "2026-09-29T16:00:00.000Z",
+      "evidenceSource": "herdr",
+      "confidence": "exact",
+      "pid": 4404,
+      "loop": null
+    }
+  ],
+  "worktrees": [
+    {
+      "id": "git:demo",
+      "repositoryId": "demo",
+      "path": "/work/demo",
+      "branch": "feature/demo",
+      "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "detached": false,
+      "locked": false,
+      "prunable": false,
+      "staged": 1,
+      "modified": 1,
+      "untracked": 1,
+      "conflicted": 0,
+      "recentCommits": [
+        {
+          "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "subject": "Add fixture worktree",
+          "committedAt": "2026-09-29T15:00:00.000Z"
+        },
+        {
+          "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "subject": "Initial fixture commit",
+          "committedAt": "2026-09-28T15:00:00.000Z"
+        }
+      ],
+      "observedAt": "2026-09-29T16:00:00.000Z",
+      "health": {
+        "sourceId": "git",
+        "status": "ok",
+        "checkedAt": "2026-09-29T16:00:00.000Z",
+        "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+        "reasonCode": "ok",
+        "cliVersion": "fixture-1",
+        "parserVersion": "fixture-1",
+        "provenance": "fixture"
+      }
+    }
+  ],
+  "alerts": [],
+  "sources": [
+    {
+      "sourceId": "claude-quota",
+      "status": "ok",
+      "checkedAt": "2026-09-29T16:00:00.000Z",
+      "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+      "reasonCode": "ok",
+      "cliVersion": "fixture-1",
+      "parserVersion": "fixture-1",
+      "provenance": "fixture"
+    },
+    {
+      "sourceId": "codex-quota",
+      "status": "ok",
+      "checkedAt": "2026-09-29T16:00:00.000Z",
+      "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+      "reasonCode": "ok",
+      "cliVersion": "fixture-1",
+      "parserVersion": "fixture-1",
+      "provenance": "fixture"
+    },
+    {
+      "sourceId": "grok-quota",
+      "status": "ok",
+      "checkedAt": "2026-09-29T16:00:00.000Z",
+      "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+      "reasonCode": "ok",
+      "cliVersion": "fixture-1",
+      "parserVersion": "fixture-1",
+      "provenance": "fixture"
+    },
+    {
+      "sourceId": "herdr",
+      "status": "ok",
+      "checkedAt": "2026-09-29T16:00:00.000Z",
+      "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+      "reasonCode": "ok",
+      "cliVersion": "fixture-1",
+      "parserVersion": "fixture-1",
+      "provenance": "fixture"
+    },
+    {
+      "sourceId": "tmux",
+      "status": "ok",
+      "checkedAt": "2026-09-29T16:00:00.000Z",
+      "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+      "reasonCode": "ok",
+      "cliVersion": "fixture-1",
+      "parserVersion": "fixture-1",
+      "provenance": "fixture"
+    },
+    {
+      "sourceId": "git",
+      "status": "ok",
+      "checkedAt": "2026-09-29T16:00:00.000Z",
+      "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+      "reasonCode": "ok",
+      "cliVersion": "fixture-1",
+      "parserVersion": "fixture-1",
+      "provenance": "fixture"
+    }
+  ],
+  "mode": "fixture"
+}

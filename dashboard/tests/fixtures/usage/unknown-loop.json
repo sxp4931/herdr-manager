@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "sequence": 1,
+  "generatedAt": "2026-09-29T16:00:00.000Z",
+  "providers": [],
+  "sessions": [
+    {
+      "id": "tmux:fixture:%9",
+      "provider": "codex",
+      "runtime": "tmux",
+      "sessionIdentity": null,
+      "workspaceId": "tmux-session",
+      "paneId": "%9",
+      "label": "codex-process-only",
+      "cwd": "/work/other",
+      "status": "unknown",
+      "stateChangeSeq": 0,
+      "enteredAt": "2026-09-29T14:00:00.000Z",
+      "lastOutputAt": null,
+      "observedAt": "2026-09-29T16:00:00.000Z",
+      "evidenceSource": "tmux",
+      "confidence": "unknown",
+      "pid": 4303,
+      "loop": {
+        "kind": "unknown",
+        "state": "unknown",
+        "iteration": null,
+        "objective": null,
+        "source": "process"
+      }
+    }
+  ],
+  "worktrees": [],
+  "alerts": [],
+  "sources": [
+    {
+      "sourceId": "tmux",
+      "status": "ok",
+      "checkedAt": "2026-09-29T16:00:00.000Z",
+      "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+      "reasonCode": "ok",
+      "cliVersion": "fixture-1",
+      "parserVersion": "fixture-1",
+      "provenance": "fixture"
+    }
+  ],
+  "mode": "fixture"
+}

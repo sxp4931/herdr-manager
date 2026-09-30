@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "sequence": 1,
+  "generatedAt": "2026-09-29T16:00:00.000Z",
+  "providers": [
+    {
+      "provider": "claude",
+      "windows": [
+        {
+          "kind": "weekly",
+          "scope": "all",
+          "availability": "known",
+          "usedPercent": 20,
+          "remainingPercent": 80,
+          "resetsAt": null,
+          "resetRaw": "Sun Nov 1, 2026 1:30 AM",
+          "sourceTimezone": "America/New_York",
+          "sampledAt": "2026-09-29T16:00:00.000Z",
+          "confidence": "exact"
+        }
+      ],
+      "bankedResets": null,
+      "bankedStatus": "not_applicable",
+      "health": {
+        "sourceId": "claude-quota",
+        "status": "ok",
+        "checkedAt": "2026-09-29T16:00:00.000Z",
+        "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+        "reasonCode": "ok",
+        "cliVersion": "fixture-1",
+        "parserVersion": "fixture-1",
+        "provenance": "fixture"
+      }
+    }
+  ],
+  "sessions": [],
+  "worktrees": [],
+  "alerts": [],
+  "sources": [
+    {
+      "sourceId": "claude-quota",
+      "status": "ok",
+      "checkedAt": "2026-09-29T16:00:00.000Z",
+      "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+      "reasonCode": "ok",
+      "cliVersion": "fixture-1",
+      "parserVersion": "fixture-1",
+      "provenance": "fixture"
+    }
+  ],
+  "mode": "fixture"
+}

@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "sequence": 1,
+  "generatedAt": "2026-09-29T16:00:00.000Z",
+  "providers": [
+    {
+      "provider": "codex",
+      "windows": [
+        {
+          "kind": "five_hour",
+          "scope": "all",
+          "availability": "known",
+          "usedPercent": 35,
+          "remainingPercent": 65,
+          "resetsAt": "2026-09-29T20:00:00.000Z",
+          "resetRaw": "in 4h",
+          "sourceTimezone": "America/New_York",
+          "sampledAt": "2026-09-29T16:00:00.000Z",
+          "confidence": "exact"
+        },
+        {
+          "kind": "weekly",
+          "scope": "all",
+          "availability": "known",
+          "usedPercent": 25,
+          "remainingPercent": 75,
+          "resetsAt": "2026-10-01T05:00:00.000Z",
+          "resetRaw": "in 37h",
+          "sourceTimezone": "America/New_York",
+          "sampledAt": "2026-09-29T16:00:00.000Z",
+          "confidence": "exact"
+        }
+      ],
+      "bankedResets": [
+        {
+          "id": "codex-reset-expiring",
+          "quantity": 1,
+          "earnedAt": "2026-09-27T16:00:00.000Z",
+          "expiresAt": "2026-09-30T16:00:00.000Z",
+          "redeemableAt": "2026-09-29T17:00:00.000Z",
+          "eligibility": "eligible",
+          "eligibilityReason": null,
+          "sampledAt": "2026-09-29T16:00:00.000Z"
+        },
+        {
+          "id": "codex-reset-unusable",
+          "quantity": 1,
+          "earnedAt": "2026-09-27T16:00:00.000Z",
+          "expiresAt": "2026-09-30T16:00:00.000Z",
+          "redeemableAt": "2026-09-30T17:00:00.000Z",
+          "eligibility": "ineligible",
+          "eligibilityReason": "redeemable only after expiry",
+          "sampledAt": "2026-09-29T16:00:00.000Z"
+        }
+      ],
+      "bankedStatus": "known",
+      "health": {
+        "sourceId": "codex-quota",
+        "status": "ok",
+        "checkedAt": "2026-09-29T16:00:00.000Z",
+        "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+        "reasonCode": "ok",
+        "cliVersion": "fixture-1",
+        "parserVersion": "fixture-1",
+        "provenance": "fixture"
+      }
+    }
+  ],
+  "sessions": [],
+  "worktrees": [],
+  "alerts": [],
+  "sources": [
+    {
+      "sourceId": "codex-quota",
+      "status": "ok",
+      "checkedAt": "2026-09-29T16:00:00.000Z",
+      "lastSuccessAt": "2026-09-29T16:00:00.000Z",
+      "reasonCode": "ok",
+      "cliVersion": "fixture-1",
+      "parserVersion": "fixture-1",
+      "provenance": "fixture"
+    }
+  ],
+  "mode": "fixture"
+}

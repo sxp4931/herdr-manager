@@ -1,0 +1,32 @@
+name: dashboard-ci
+"on":
+  push:
+    paths: ["dashboard/**", ".github/workflows/dashboard-ci.yml"]
+  pull_request:
+    paths: ["dashboard/**", ".github/workflows/dashboard-ci.yml"]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13.7"
+      - run: npm ci --no-audit --no-fund
+      - run: python3 -m venv .venv && .venv/bin/python -m pip install -r probes/requirements.txt
+      - run: npm exec playwright install chromium
+      - run: npm run check:policy
+      - run: npm run check
+      - run: npm run test:e2e
+        env:
+          CI: "1"

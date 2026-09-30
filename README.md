@@ -140,3 +140,8 @@ guide. Shipped code wins where they disagree.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+
+## Web dashboard (Linux)
+
+`dashboard/` holds a read-only, loopback-only web dashboard for herdr agents, loops, worktrees, CLI quotas, and banked resets. See `dashboard/README.md`. Its CI runs from `.github/workflows/dashboard-ci.yml`.

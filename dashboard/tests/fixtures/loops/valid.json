@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "sessionIdentity": "fixture-session",
+  "provider": "claude",
+  "pid": 4242,
+  "processStartTicks": 100,
+  "kind": "goal",
+  "state": "running",
+  "iteration": 2,
+  "objective": "Refresh the dashboard fixture",
+  "updatedAt": "2026-09-29T16:00:00.000Z"
+}

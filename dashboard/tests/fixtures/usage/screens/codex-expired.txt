@@ -1,0 +1,10 @@
+SYNTHETIC fixture screen. Not a live Codex account.
+Codex fixture-1
+
+Earned resets
+
+id: codex-reset-old
+quantity: 1
+expires at Sep 1, 2026 12:00 PM
+redeemable in 1h
+eligibility: eligible
