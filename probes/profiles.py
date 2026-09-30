@@ -28,6 +28,9 @@ class Profile:
     unsafe_reason: str
     menu_enter_allowed: bool = False
     startup_args: tuple[str, ...] = ()
+    capture_screens: bool = False
+    version_pattern: str = ""
+    phases: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 def _live(provider: str, command: str) -> Profile:
@@ -54,8 +57,54 @@ FIXTURE_PROFILE = Profile(
     unsafe_reason="",
 )
 
+def _provider_fixture(
+    provider: str,
+    commands: tuple[str, ...],
+    version_pattern: str,
+    phases: tuple[tuple[str, tuple[str, ...]], ...],
+) -> Profile:
+    return Profile(
+        profile_id=f"{provider}-fixture-v1",
+        provider=provider,
+        supported_versions=("fixture-1",),
+        commands=commands,
+        empty_prompt=">",
+        usage_markers=phases[-1][1],
+        launch_allowed=True,
+        unsafe_reason="",
+        capture_screens=True,
+        version_pattern=version_pattern,
+        phases=phases,
+    )
+
+
+CLAUDE_FIXTURE = _provider_fixture(
+    "claude",
+    ("/usage",),
+    r"Claude Code (fixture-1)(?![0-9.])",
+    (("usage", ("Current session", "% used", "Weekly")),),
+)
+CODEX_FIXTURE = _provider_fixture(
+    "codex",
+    ("/status", "/usage"),
+    r"(?<![A-Za-z])Codex (fixture-1)(?![0-9.])",
+    (
+        ("status", ("5h limit", "% left", "Weekly")),
+        ("usage", ("Earned resets",)),
+    ),
+)
+GROK_FIXTURE = _provider_fixture(
+    "grok",
+    ("/usage",),
+    r"(?<![A-Za-z])Grok (fixture-1)(?![0-9.])",
+    (("usage", ("Weekly", "% used", "5h limit")),),
+)
+
 PROFILES: dict[str, Profile] = {
     "fixture-v1": FIXTURE_PROFILE,
+    "claude-fixture-v1": CLAUDE_FIXTURE,
+    "codex-fixture-v1": CODEX_FIXTURE,
+    "grok-fixture-v1": GROK_FIXTURE,
     "claude": _live("claude", "/usage"),
     "codex": _live("codex", "/status"),
     "grok": _live("grok", "/usage"),
@@ -73,8 +122,9 @@ def version_supported(profile: Profile, version: str | None) -> bool:
     return version is not None and version in profile.supported_versions
 
 
-def extract_version(lines: list[str]) -> str | None:
-    match = VERSION_LINE.search("\n".join(lines))
+def extract_version(lines: list[str], pattern: re.Pattern[str] | None = None) -> str | None:
+    compiled = VERSION_LINE if pattern is None else pattern
+    match = compiled.search("\n".join(lines))
     if match is None:
         return None
     return match.group(1)
@@ -132,7 +182,7 @@ def validate_startup(profile: Profile, extra: list[str] | None = None) -> None:
 def classify_screen(lines: list[str]) -> str:
     cleaned = [line.rstrip() for line in lines]
     lowered = "\n".join(cleaned).lower()
-    if "redeem reset" in lowered:
+    if "redeem reset" in lowered or re.search(r"\bapply\b", lowered) or re.search(r"\bconfirm\b", lowered):
         return "redeem"
     if "trust this folder" in lowered or "trust this workspace" in lowered:
         return "trust"

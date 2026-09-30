@@ -388,10 +388,10 @@ Expected: every command exits 0; preflight JSON has `coreReady:true`, `platform:
 
 **Done:**
 
-- [ ] All provider adapters complete.
-- [ ] Banked gap distinguished from zero.
-- [ ] Time ambiguity tests.
-- [ ] Commit `feat: read CLI subscription quotas and reset inventory`.
+- [x] All provider adapters complete.
+- [x] Banked gap distinguished from zero.
+- [x] Time ambiguity tests.
+- [x] Commit `feat: read CLI subscription quotas and reset inventory`.
 
 ### 10. Schedule collectors and expose immutable HTTP snapshots
 

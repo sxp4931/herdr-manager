@@ -16,6 +16,7 @@ export interface QuotaProbeRequest {
   deadlineMs?: number;
   lockPath?: string;
   signal?: AbortSignal;
+  onCapture?: (phase: string, lines: string[]) => void;
 }
 
 export function clampDeadline(requested: number | undefined): number {
@@ -96,10 +97,12 @@ export async function runQuotaProbe(request: QuotaProbeRequest): Promise<ProbeRe
       },
       shell: false,
       detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: request.onCapture ? ["ignore", "pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
       windowsHide: true,
     },
   );
+
+  const captureDone = request.onCapture ? watchCapture(child.stdio[3], request.onCapture) : Promise.resolve();
 
   const stdoutChunks: Uint8Array[] = [];
   let stdoutBytes = 0;
@@ -174,6 +177,7 @@ export async function runQuotaProbe(request: QuotaProbeRequest): Promise<ProbeRe
 
   try {
     await closed;
+    await captureDone;
   } catch {
     return failure("python_missing", profile, deadlineMs);
   } finally {
@@ -297,6 +301,59 @@ function reapRecorded(cwd: string, executable: string): void {
     return;
   }
   signalProcess(pid, "SIGKILL");
+}
+
+const CAPTURE_PHASE = /^[a-z][a-z0-9_-]{0,31}$/;
+
+function watchCapture(stream: unknown, onCapture: (phase: string, lines: string[]) => void): Promise<void> {
+  if (!stream || typeof stream !== "object" || !("on" in stream)) return Promise.resolve();
+  const readable = stream as NodeJS.ReadableStream;
+  return new Promise((resolve) => {
+    let buffer = "";
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    if ("setEncoding" in readable && typeof readable.setEncoding === "function") {
+      readable.setEncoding("utf8");
+    }
+    readable.on("data", (chunk: string | Uint8Array) => {
+      buffer += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+      if (buffer.length > 256 * 1024) buffer = buffer.slice(-128 * 1024);
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        deliverCapture(buffer.slice(0, newline), onCapture);
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf("\n");
+      }
+    });
+    readable.on("end", finish);
+    readable.on("close", finish);
+    readable.on("error", finish);
+  });
+}
+
+function deliverCapture(line: string, onCapture: (phase: string, lines: string[]) => void): void {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return;
+  const record = parsed as Record<string, unknown>;
+  if ("screen" in record || "rawScreen" in record) return;
+  if (typeof record.phase !== "string" || !CAPTURE_PHASE.test(record.phase) || !Array.isArray(record.lines)) return;
+  const kept: string[] = [];
+  for (const entry of record.lines) {
+    if (typeof entry !== "string" || entry.length > 200 || kept.length >= 80) return;
+    kept.push(entry);
+  }
+  onCapture(record.phase, kept);
 }
 
 function delay(ms: number): Promise<void> {

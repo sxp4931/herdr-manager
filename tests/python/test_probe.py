@@ -325,6 +325,89 @@ class ProbeTransportTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 15)
         self.assertFalse(self.wait_dead(int((cwd / "pid").read_text(encoding="utf-8"))))
 
+    def launch_capture(self, cwd: Path, deadline: int, profile: str, executable: Path) -> tuple[dict[str, object], bytes]:
+        read_fd, write_fd = os.pipe()
+        saved: int | None
+        try:
+            saved = os.dup(3)
+        except OSError:
+            saved = None
+        os.dup2(write_fd, 3)
+        os.set_inheritable(3, True)
+        try:
+            proc = subprocess.Popen(
+                self.command(cwd, deadline, profile, str(executable)),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=self.child_env(),
+                pass_fds=(3,),
+            )
+        finally:
+            os.close(3)
+            if saved is not None:
+                os.dup2(saved, 3)
+                os.close(saved)
+        self.procs.append(proc)
+        os.close(write_fd)
+        try:
+            stdout, stderr = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            os.kill(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            self.fail("probe timed out in the test harness")
+        chunks: list[bytes] = []
+        while True:
+            piece = os.read(read_fd, 65536)
+            if not piece:
+                break
+            chunks.append(piece)
+        os.close(read_fd)
+        self.assert_clean(stdout, stderr)
+        payload = json.loads(stdout.decode("utf-8"))
+        self.assertEqual(stderr.decode("utf-8").strip(), payload["reason"])
+        return payload, b"".join(chunks)
+
+    def test_provider_fixture_ptys_capture_off_stdout(self) -> None:
+        claude = self.make("usage")
+        payload, capture = self.launch_capture(claude, 8_000, "claude-fixture-v1", ROOT / "tests" / "helpers" / "fake-claude.py")
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["sent"], ["/usage"])
+        self.assertEqual(payload["version"], "fixture-1")
+        self.assertEqual((claude / "keystrokes").read_bytes(), b"/usage\n")
+        self.assertIn(b"Current session", capture)
+        self.assertNotIn(b"Current session", json.dumps(payload).encode())
+
+        codex = self.make("usage")
+        started = time.monotonic()
+        codex_payload, codex_capture = self.launch_capture(codex, 8_000, "codex-fixture-v1", ROOT / "tests" / "helpers" / "fake-codex.py")
+        self.assertLess(time.monotonic() - started, 8)
+        self.assertTrue(codex_payload["ok"])
+        self.assertEqual(codex_payload["sent"], ["/status", "/usage"])
+        self.assertEqual(codex_payload["version"], "fixture-1")
+        self.assertTrue(codex_payload["recognized"])
+        self.assertEqual((codex / "keystrokes").read_bytes(), b"/status\n\x1b/usage\n")
+        self.assertNotIn(b"y", (codex / "keystrokes").read_bytes())
+        self.assertNotIn(b"redeem", (codex / "keystrokes").read_bytes().lower())
+        self.assertIn(b"65% left", codex_capture)
+        self.assertIn(b"Earned resets", codex_capture)
+        self.assertNotIn(b"65% left", json.dumps(codex_payload).encode())
+        self.assertNotIn(b'"screen":', json.dumps(codex_payload).encode())
+
+        plain = self.make("usage")
+        plain_payload, plain_capture = self.launch_capture(plain, 8_000, "fixture-v1", FAKE)
+        self.assertTrue(plain_payload["ok"])
+        self.assertEqual(plain_payload["sent"], ["/usage"])
+        self.assertEqual(plain_capture, b"")
+
+        trapped = self.make("redeem")
+        trapped_payload, _trapped_capture = self.launch_capture(
+            trapped, 8_000, "codex-fixture-v1", ROOT / "tests" / "helpers" / "fake-codex.py"
+        )
+        self.assertEqual(trapped_payload["reason"], "redemption_prompt")
+        self.assertEqual(trapped_payload["sent"], ["/status", "/usage"])
+        self.assertEqual((trapped / "keystrokes").read_bytes(), b"/status\n\x1b/usage\n")
+        self.assertFalse(trapped_payload["ok"])
+
     def test_fake_cli_rejects_a_pipe(self) -> None:
         cwd = self.make(None)
         proc = subprocess.run([str(FAKE)], cwd=cwd, capture_output=True, check=False)

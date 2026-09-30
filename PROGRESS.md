@@ -101,3 +101,17 @@ Entries record the milestone message and the HEAD that preceded the commit. The 
   - `npm run check` — exit 0. Unit 17 passed. Python 27 passed. Integration 34 passed.
   - `node scripts/check-policy.mjs` — exit 0. `policy ok`.
 - Results: `tests/helpers/fake-cli.py` ran on a real PTY. `tty-check` was `1` and the JSON `isatty` field was true. After an ANSI clear, the in-memory screen was `Session  10% used` and `Weekly  20% used`; probe stdout was one JSON object, stderr was the reason code, and neither contained that screen or `SYNTHETIC_SECRET_SENTINEL`. Trust, redemption (including a prompt on the same screen), login, and model traps left an empty keystroke file. Version support is exactly `fixture-1.0.0`; `99.0.0` sent nothing. A 60000ms request was clamped to 20000ms. The 2000ms hang stayed under 8s and under 22s, with no orphan child. Cancellation killed the probe process group and left a sibling `sleep` outside that group running. A held `HERDR_PROBE_LOCK` returned `probe_busy` without creating a pid file. Claude, Codex, and Grok profiles return `profile_unsafe` and were not executed. No live CLI and no account quota was read.
+
+## Milestone 09 — Parse provider quotas and Codex reset inventory
+
+- Status: complete
+- Date (UTC): 2026-09-30
+- Preceding HEAD: `ae2bc5e` `feat: add safe CLI quota probe transport`
+- Commit message: `feat: read CLI subscription quotas and reset inventory`
+- Commands and results:
+  - `npm run test:unit -- tests/unit/quota.test.ts` — exit 0. 6 passed, 0 failed, 0 skipped.
+  - `npm run test:python` — exit 0. 29 passed, 0 failed, 0 skipped.
+  - `npm run test:integration -- tests/integration/collector.test.ts` — exit 0. 3 passed, 0 failed, 0 skipped. Each fake CLI finished well under 8 seconds.
+  - `npm run check` — exit 0. Unit 23 passed. Python 29 passed. Integration 37 passed.
+  - `node scripts/check-policy.mjs` — exit 0. `policy ok`.
+- Results: Claude, Codex, and Grok fixture profiles ran on real PTYs through `fake-claude.py`, `fake-codex.py`, and `fake-grok.py`. Daily screens match milestone 02: Claude 10/20, Codex 35 used from `65% left` and 25 used from `75% left`, Grok weekly 15 with 5h `not_applicable`. Codex keystrokes are `/status`, Escape, `/usage`, with no redeem, apply, or confirm confirmation. Quantity and expiry are kept; `earnedAt` stays null. A `none` inventory is a known empty array. A redeem screen after `/status` keeps the 5h reading, sets banked status `unknown`, and does not type a confirmation. Ambiguous `Sun Nov 1, 2026 1:30 AM`, the March 8 2026 2:30 AM gap, weekday-only times, and malformed dates leave `resetsAt` null. `Nov 1, 2026 3:30 AM` is `2026-11-01T08:30:00.000Z`. Probe stdout has no screen text. Live `claude`, `codex`, and `grok` were not started; B-02, B-03, and B-04 record that external gap. B-01 stays open.

@@ -28,6 +28,7 @@ from probes.profiles import (
     extract_version,
     get_profile,
     validate_command,
+    validate_key,
     validate_startup,
     version_supported,
 )
@@ -249,7 +250,11 @@ def execute(args: ProbeArgs) -> ProbePayload:
     payload["profile"] = profile.profile_id
     try:
         validate_startup(profile)
-        validate_command(profile.commands[0], profile)
+        if not profile.commands:
+            payload["reason"] = "command_rejected"
+            return payload
+        for command_name in profile.commands:
+            validate_command(command_name, profile)
     except ProfileError as exc:
         payload["reason"] = exc.reason
         return payload
@@ -270,6 +275,7 @@ def execute(args: ProbeArgs) -> ProbePayload:
 
     master_fd = -1
     slave_fd = -1
+    capture_fd = -1
     proc: subprocess.Popen[bytes] | None = None
     slave_is_tty = False
     final = "timeout"
@@ -290,6 +296,18 @@ def execute(args: ProbeArgs) -> ProbePayload:
     previous_int = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
+    if profile.capture_screens:
+        try:
+            duplicated = os.dup(3)
+        except OSError:
+            duplicated = -1
+        if duplicated >= 0:
+            os.set_inheritable(duplicated, False)
+            try:
+                os.close(3)
+            except OSError:
+                pass
+            capture_fd = duplicated
 
     try:
         master_fd, slave_fd = pty.openpty()
@@ -312,41 +330,121 @@ def execute(args: ProbeArgs) -> ProbePayload:
         terminal = Terminal(SCREEN_COLUMNS, SCREEN_ROWS)
         deadline_at = time.monotonic() + (deadline_ms / 1000.0)
         child_gone = False
+        version_re = re.compile(profile.version_pattern) if profile.version_pattern else None
+        phase_table = profile.phases if profile.phases else tuple(("usage", profile.usage_markers) for _ in profile.commands)
+        captured_phases = [False] * len(profile.commands)
+        escape_pending = False
+
+        def emit_capture(phase: str, rows: list[str]) -> None:
+            if not profile.capture_screens:
+                return
+            kept: list[str] = []
+            for row in rows:
+                text = row.replace("SYNTHETIC_SECRET_SENTINEL", "[redacted-secret]").rstrip()
+                if not text:
+                    continue
+                kept.append(text[:200])
+                if len(kept) >= 80:
+                    break
+            if capture_fd < 0 or capture_fd in {master_fd, slave_fd}:
+                return
+            if not kept:
+                return
+            body = json.dumps({"phase": phase, "lines": kept}, ensure_ascii=True) + "\n"
+            try:
+                os.write(capture_fd, body.encode("ascii"))
+            except OSError:
+                return
+
+        def send_command(command_text: str) -> str | None:
+            nonlocal semantic
+            try:
+                validate_command(command_text, profile)
+                validate_key(command_text, screen="empty_prompt")
+            except ProfileError as exc:
+                return exc.reason
+            try:
+                os.write(master_fd, (command_text + "\n").encode("ascii"))
+            except OSError:
+                return "closed_early"
+            sent.append(command_text)
+            semantic = "command_sent"
+            return None
 
         def accept(chunk: bytes) -> str | None:
-            nonlocal output, version, semantic, recognized
+            nonlocal output, version, semantic, recognized, escape_pending
             if output + len(chunk) > max_bytes:
                 return "output_limit"
             output += len(chunk)
             terminal.feed(chunk)
             lines = terminal.display()
             kind = classify_screen(lines)
-            seen = extract_version(lines)
+            seen = extract_version(lines, version_re)
             if seen is not None:
                 version = seen
             if kind in TRAP_REASONS:
                 return TRAP_REASONS[kind]
-            if kind == "empty_prompt" and not sent:
+            if not profile.capture_screens:
+                if kind == "empty_prompt" and not sent:
+                    if version is None:
+                        return None
+                    if not version_supported(profile, version):
+                        semantic = "empty_prompt"
+                        return "unknown_version"
+                    validate_command(command, profile)
+                    semantic = "empty_prompt"
+                    try:
+                        os.write(master_fd, (command + "\n").encode("ascii"))
+                    except OSError:
+                        return "closed_early"
+                    sent.append(command)
+                    semantic = "command_sent"
+                    return None
+                if kind == "usage" and sent:
+                    semantic = "parsed"
+                    recognized = True
+                    return "ok"
+                if sent:
+                    semantic = "command_sent"
+                return None
+            if not sent:
+                if kind != "empty_prompt":
+                    return None
                 if version is None:
                     return None
                 if not version_supported(profile, version):
                     semantic = "empty_prompt"
                     return "unknown_version"
-                validate_command(command, profile)
                 semantic = "empty_prompt"
-                try:
-                    os.write(master_fd, (command + "\n").encode("ascii"))
-                except OSError:
-                    return "closed_early"
-                sent.append(command)
-                semantic = "command_sent"
-                return None
-            if kind == "usage" and sent:
-                semantic = "parsed"
+                return send_command(profile.commands[0])
+            phase_index = len(sent) - 1
+            if phase_index < len(phase_table):
+                phase_name, markers = phase_table[phase_index]
+            else:
+                phase_name, markers = "usage", profile.usage_markers
+            body = "\n".join(lines)
+            matched = bool(markers) and all(marker in body for marker in markers)
+            if matched and phase_index < len(captured_phases) and not captured_phases[phase_index]:
+                emit_capture(phase_name, lines)
+                captured_phases[phase_index] = True
+                semantic = "known_usage_screen"
+                if len(sent) < len(profile.commands):
+                    try:
+                        validate_key("\x1b", screen="known_usage_screen")
+                    except ProfileError as exc:
+                        return exc.reason
+                    try:
+                        os.write(master_fd, b"\x1b")
+                    except OSError:
+                        return "closed_early"
+                    escape_pending = True
+                    return None
                 recognized = True
+                semantic = "parsed"
                 return "ok"
-            if sent:
-                semantic = "command_sent"
+            if escape_pending and kind == "empty_prompt" and len(sent) < len(profile.commands):
+                escape_pending = False
+                return send_command(profile.commands[len(sent)])
             return None
 
         while True:
@@ -419,6 +517,8 @@ def execute(args: ProbeArgs) -> ProbePayload:
             payload["childReaped"] = proc.poll() is not None
         if lock_fd is not None and lock_fd >= 0:
             os.close(lock_fd)
+        if capture_fd >= 0:
+            os.close(capture_fd)
 
 
 def main(argv: list[str] | None = None) -> int:

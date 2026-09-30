@@ -1,3 +1,4 @@
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -92,6 +93,32 @@ class ProfileValidationTest(unittest.TestCase):
         self.assertEqual(classify_screen(["Select a model"]), "model")
         self.assertEqual(classify_screen(["Session  10% used", "Weekly  20% used"]), "usage")
         self.assertEqual(classify_screen(["fixture-cli fixture-1.0.0", ">"]), "empty_prompt")
+        self.assertEqual(classify_screen(["Apply", "Confirm"]), "redeem")
+        self.assertEqual(classify_screen(["redeemable only after expiry"]), "unrecognized")
+
+    def test_provider_fixture_profiles_are_exact_and_launchable(self) -> None:
+        claude = get_profile("claude-fixture-v1")
+        codex = get_profile("codex-fixture-v1")
+        grok = get_profile("grok-fixture-v1")
+        self.assertTrue(claude.launch_allowed)
+        self.assertTrue(claude.capture_screens)
+        self.assertEqual(claude.supported_versions, ("fixture-1",))
+        self.assertEqual(claude.commands, ("/usage",))
+        self.assertEqual(codex.commands, ("/status", "/usage"))
+        self.assertEqual(grok.commands, ("/usage",))
+        self.assertEqual(
+            extract_version(["Claude Code fixture-1", ">"], re.compile(claude.version_pattern)),
+            "fixture-1",
+        )
+        self.assertIsNone(extract_version(["Claude Code fixture-1.0.0", ">"], re.compile(claude.version_pattern)))
+        self.assertFalse(version_supported(claude, "fixture-1.0.0"))
+        self.assertTrue(version_supported(codex, "fixture-1"))
+        self.assertEqual(extract_version(["Codex fixture-1"], re.compile(codex.version_pattern)), "fixture-1")
+        self.assertIsNone(extract_version(["Claude Code fixture-1"], re.compile(codex.version_pattern)))
+        validate_startup(grok)
+        with self.assertRaises(ProfileError) as wrong:
+            validate_command("/status", claude)
+        self.assertEqual(wrong.exception.reason, "command_rejected")
 
 
 if __name__ == "__main__":
