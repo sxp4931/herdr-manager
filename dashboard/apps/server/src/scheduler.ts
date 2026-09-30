@@ -354,6 +354,8 @@ class DashboardScheduler implements Scheduler {
   private started = false;
   private stopped = false;
   private stopPromise: Promise<void> | null = null;
+  /** Session ids from the latest collection. Null until the first collection finishes. */
+  private liveSessionIds: ReadonlySet<string> | null = null;
 
   constructor(options: SchedulerOptions) {
     this.clock = options.clock;
@@ -463,9 +465,19 @@ class DashboardScheduler implements Scheduler {
       ...this.state,
       quotas,
       health: this.store.listHealth(),
-      sessions: this.store.listSessions(),
+      sessions: this.visibleSessions(),
       worktrees: this.store.listWorktrees(),
     };
+  }
+
+  /**
+   * Stored rows outlive a disappearance for 24 hours so a returning occupant keeps
+   * its dwell. The snapshot shows only what the latest collection reported.
+   */
+  private visibleSessions(): SnapshotState["sessions"] {
+    const stored = this.store.listSessions();
+    const live = this.liveSessionIds;
+    return live === null ? stored : stored.filter((session) => live.has(session.id));
   }
 
   /** A collector that throws still gets a health row, so the page does not keep showing its last success as current. */
@@ -529,6 +541,7 @@ class DashboardScheduler implements Scheduler {
     const tmuxSessions = tmux.status === "fulfilled" ? tmux.value.sessions : [];
     const sessions = reconcileSessions(herdrSessions, tmuxSessions);
     this.store.applySessions(sessions);
+    this.liveSessionIds = new Set(sessions.map((session) => session.id));
     let ok = true;
     for (const [sourceId, result] of [["herdr", herdr], ["tmux", tmux]] as const) {
       if (result.status === "fulfilled") {

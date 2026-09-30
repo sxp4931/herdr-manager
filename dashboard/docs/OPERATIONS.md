@@ -70,5 +70,6 @@ Retention uses the server clock:
 - quota samples older than 7 days are deleted
 - session and git rows keep the latest observation; an older `observedAt` is ignored
 - a session or git worktree that disappears from a later collection is removed after 24 hours. A row last seen exactly 24 hours ago stays until the next collect sees it as older than that
+- a session that the latest collection did not report leaves the snapshot and the page immediately. Its stored row stays for those 24 hours so a returning occupant keeps its dwell
 
 `StorageCorruptionError` is raised when the file header is not SQLite, `PRAGMA integrity_check` is not `ok`, or the database cannot be opened. The file is left in place. The server does not delete it and does not create a replacement over the corrupt file. Restore a copy made while the process was stopped, or move the file aside yourself and start again so a new empty database can be created.

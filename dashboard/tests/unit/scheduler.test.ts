@@ -432,6 +432,42 @@ describe("scheduler", () => {
     }
   });
 
+  it("drops a session from the snapshot once a collection no longer reports it", async () => {
+    let present = true;
+    const box = harness({
+      poll: { sessionsSeconds: 10, gitSeconds: 3600, quotaSeconds: 3600 },
+      herdr: {
+        async collect() {
+          const now = box.clock.now().toISOString();
+          return {
+            sessions: present ? [sessionOf(now, "fresh")] : [],
+            health: sourceHealth("herdr", "ok", now, now),
+          };
+        },
+      },
+      tmux: {
+        async collect() {
+          const now = box.clock.now().toISOString();
+          return { sessions: [], health: sourceHealth("tmux", "ok", now, now) };
+        },
+      },
+    });
+    try {
+      await box.scheduler.start();
+      expect(box.scheduler.current().sessions).toHaveLength(1);
+      present = false;
+      await box.clock.advance(10_000);
+      expect(box.scheduler.current().sessions).toEqual([]);
+      // The row stays stored so a reappearing occupant keeps its dwell.
+      expect(box.store.session("herdr:fixture:cadence")).not.toBeNull();
+      present = true;
+      await box.clock.advance(10_000);
+      expect(box.scheduler.current().sessions.map((session) => session.id)).toEqual(["herdr:fixture:cadence"]);
+    } finally {
+      await box.close();
+    }
+  });
+
   it("never overlaps quota probes", async () => {
     let open = 0;
     let maxOpen = 0;
