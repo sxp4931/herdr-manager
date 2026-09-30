@@ -265,6 +265,41 @@ export type Alert = z.infer<typeof alertSchema>;
 export type DashboardSnapshot = z.infer<typeof dashboardSnapshotSchema>;
 export type Health = z.infer<typeof healthSchema>;
 
+export const probeStateSchema = z.enum([
+  "started",
+  "empty_prompt",
+  "command_sent",
+  "known_usage_screen",
+  "parsed",
+  "shutdown",
+]);
+
+export const probeResultSchema = z
+  .object({
+    ok: z.boolean(),
+    provider: z.string().regex(/^[a-z0-9_-]{1,32}$/),
+    profile: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/),
+    state: probeStateSchema,
+    reason: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
+    version: z.string().regex(/^[A-Za-z0-9._+-]{1,64}$/).nullable(),
+    isatty: z.boolean(),
+    sent: z.array(z.string().regex(/^\/(usage|status)$/)).max(4),
+    childReaped: z.boolean(),
+    recognized: z.boolean(),
+    deadlineMs: z.number().int().min(100).max(20_000),
+  })
+  .strict()
+  .superRefine((result, ctx) => {
+    if (!result.ok) {
+      return;
+    }
+    if (result.reason !== "ok" || !result.recognized || result.state !== "parsed" || !result.isatty || result.sent.length === 0) {
+      ctx.addIssue("a successful probe result must be a parsed tty screen");
+    }
+  });
+
+export type ProbeResult = z.infer<typeof probeResultSchema>;
+
 export function parseHealth(input: unknown): Health {
   return healthSchema.parse(input);
 }

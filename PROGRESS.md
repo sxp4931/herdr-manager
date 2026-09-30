@@ -88,3 +88,16 @@ Entries record the milestone message and the HEAD that preceded the commit. The 
   - `npm run test:integration -- tests/integration/herdr.test.ts` — exit 0. 8 passed, 0 failed, 0 skipped.
   - `npm run check` — exit 0. Unit 17 passed. Python 1 passed. Integration 26 passed.
 - Results: a private Unix socket accepted only `agent.list` and `session.snapshot`. The agent list kept Claude, Codex, Grok, and an unknown `opencode` provider, dropped an empty agent and an empty pane id, and retained label, cwd, pid, and `stateChangeSeq`. An unrecognized status became `unknown`. Split frames, a coalesced out-of-order preface, a numeric id, and `"error": null` parsed. An oversized frame was rejected without a retry. A frame without a newline timed out inside 3.5 seconds and did not wait a second full budget. One dropped connection was retried. A removed pane disappeared, a same occupant kept `enteredAt`, and a replaced session identity reset it. After the socket was removed, health was `stale` and the previous sessions stayed. Protocol 16 is `protocol_older` / `unsupported` and protocol 18 is `protocol_newer` while both still return agents. Herdr and tmux rows merged only when provider, pid, and cwd agreed. No live herdr daemon was started. The installed `herdr` binary is absent; see `BLOCKERS.md` B-01.
+
+## Milestone 08 — Build the PTY emulator and fail-closed diagnostic state machine
+
+- Status: complete
+- Date (UTC): 2026-09-30
+- Preceding HEAD: `d74d376` `feat: reuse herdr read model on Linux`
+- Commit message: `feat: add safe CLI quota probe transport`
+- Commands and results:
+  - `npm run test:python` — exit 0. 27 passed, 0 failed, 0 skipped.
+  - `npm run test:integration -- tests/integration/probe-boundary.test.ts` — exit 0. 16 passed, 0 failed, 0 skipped. A slow fake CLI with `--deadline-ms 2000` finished in 2070ms. Its `sleep` child was reaped.
+  - `npm run check` — exit 0. Unit 17 passed. Python 27 passed. Integration 34 passed.
+  - `node scripts/check-policy.mjs` — exit 0. `policy ok`.
+- Results: `tests/helpers/fake-cli.py` ran on a real PTY. `tty-check` was `1` and the JSON `isatty` field was true. After an ANSI clear, the in-memory screen was `Session  10% used` and `Weekly  20% used`; probe stdout was one JSON object, stderr was the reason code, and neither contained that screen or `SYNTHETIC_SECRET_SENTINEL`. Trust, redemption (including a prompt on the same screen), login, and model traps left an empty keystroke file. Version support is exactly `fixture-1.0.0`; `99.0.0` sent nothing. A 60000ms request was clamped to 20000ms. The 2000ms hang stayed under 8s and under 22s, with no orphan child. Cancellation killed the probe process group and left a sibling `sleep` outside that group running. A held `HERDR_PROBE_LOCK` returned `probe_busy` without creating a pid file. Claude, Codex, and Grok profiles return `profile_unsafe` and were not executed. No live CLI and no account quota was read.

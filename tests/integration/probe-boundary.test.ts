@@ -1,10 +1,16 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { CommandDeniedError, runCommand } from "../../apps/server/src/adapters/command-runner.js";
+import { clampDeadline, interpretProbeOutput, runQuotaProbe } from "../../apps/server/src/adapters/quota-probe.js";
 import { loadConfig, loadConfigFile } from "../../apps/server/src/config.js";
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const fakeCli = path.join(repoRoot, "tests", "helpers", "fake-cli.py");
+const venvPython = path.join(repoRoot, ".venv", "bin", "python");
 
 const dirs: string[] = [];
 
@@ -325,3 +331,265 @@ describe("capability doctor", () => {
     expect(live.stderr).toContain("live probes are disabled");
   });
 });
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForText(file: string): Promise<string> {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    if (existsSync(file) && statSync(file).size > 0) {
+      return readFileSync(file, "utf8").trim();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`missing ${path.basename(file)}`);
+}
+
+async function waitDead(pid: number): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (alive(pid) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+describe("quota probe transport", () => {
+  it("clamps the deadline without waiting for the ceiling", () => {
+    expect(clampDeadline(60_000)).toBe(20_000);
+    expect(clampDeadline(undefined)).toBe(20_000);
+    expect(clampDeadline(50)).toBe(100);
+    expect(clampDeadline(2_000)).toBe(2_000);
+  });
+
+  it("drops a raw screen instead of returning helper stdout", () => {
+    const raw = '{"ok":true,"screen":"Session  10% used","secret":"SYNTHETIC_SECRET_SENTINEL"}';
+    const parsed = interpretProbeOutput(raw, { profile: "fixture-v1", deadlineMs: 20_000 });
+    expect(parsed.reason).toBe("invalid_result");
+    expect(parsed).not.toHaveProperty("screen");
+    expect(parsed).not.toHaveProperty("stdout");
+    const encoded = JSON.stringify(parsed);
+    expect(encoded).not.toContain("Session");
+    expect(encoded).not.toContain("SYNTHETIC_SECRET_SENTINEL");
+    const trailing = `${JSON.stringify({
+      ok: false,
+      provider: "fixture",
+      profile: "fixture-v1",
+      state: "started",
+      reason: "timeout",
+      version: null,
+      isatty: false,
+      sent: [],
+      childReaped: true,
+      recognized: false,
+      deadlineMs: 2000,
+    })}\n{"screen":"Weekly  20% used"}`;
+    const second = interpretProbeOutput(trailing, { profile: "fixture-v1", deadlineMs: 2_000 });
+    expect(second.reason).toBe("invalid_result");
+    expect(JSON.stringify(second)).not.toContain("Weekly");
+  });
+
+  it("reads the fake CLI through a PTY and keeps the screen out of the result", async () => {
+    const dir = tempDir();
+    writeFileSync(path.join(dir, "mode"), "usage");
+    const previous = {
+      anthropic: process.env.ANTHROPIC_API_KEY,
+      openai: process.env.OPENAI_API_KEY,
+      xai: process.env.XAI_API_KEY,
+      base: process.env.OPENAI_BASE_URL,
+    };
+    process.env.ANTHROPIC_API_KEY = "SYNTHETIC_SECRET_SENTINEL";
+    process.env.OPENAI_API_KEY = "SYNTHETIC_SECRET_SENTINEL";
+    process.env.XAI_API_KEY = "SYNTHETIC_SECRET_SENTINEL";
+    process.env.OPENAI_BASE_URL = "https://example.invalid/v1";
+    try {
+      const result = await runQuotaProbe({
+        executable: fakeCli,
+        profile: "fixture-v1",
+        cwd: dir,
+        deadlineMs: 60_000,
+      });
+      expect(result.ok).toBe(true);
+      expect(result.isatty).toBe(true);
+      expect(result.recognized).toBe(true);
+      expect(result.sent).toEqual(["/usage"]);
+      expect(result.state).toBe("parsed");
+      expect(result.version).toBe("fixture-1.0.0");
+      expect(result.deadlineMs).toBe(20_000);
+      expect(result.childReaped).toBe(true);
+      expect(result).not.toHaveProperty("screen");
+      expect(result).not.toHaveProperty("stdout");
+      const encoded = JSON.stringify(result);
+      expect(encoded).not.toContain("Session");
+      expect(encoded).not.toContain("10%");
+      expect(encoded).not.toContain("SYNTHETIC_SECRET_SENTINEL");
+      expect(encoded).not.toContain("\u001b");
+      expect(readFileSync(path.join(dir, "tty-check"), "utf8")).toBe("1");
+      expect(readFileSync(path.join(dir, "keystrokes"))).toEqual(Buffer.from("/usage\n"));
+      const audit = readFileSync(path.join(dir, "env-audit"), "utf8");
+      expect(audit).not.toContain("ANTHROPIC_API_KEY");
+      expect(audit).not.toContain("OPENAI_BASE_URL");
+      expect(audit).not.toContain("SYNTHETIC_SECRET_SENTINEL");
+    } finally {
+      restoreEnv("ANTHROPIC_API_KEY", previous.anthropic);
+      restoreEnv("OPENAI_API_KEY", previous.openai);
+      restoreEnv("XAI_API_KEY", previous.xai);
+      restoreEnv("OPENAI_BASE_URL", previous.base);
+    }
+  });
+
+  it("sends nothing to trust and redemption screens", async () => {
+    for (const [mode, reason] of [
+      ["trust", "trust_prompt"],
+      ["redeem", "redemption_prompt"],
+    ] as const) {
+      const dir = tempDir();
+      writeFileSync(path.join(dir, "mode"), mode);
+      const result = await runQuotaProbe({
+        executable: fakeCli,
+        profile: "fixture-v1",
+        cwd: dir,
+        deadlineMs: 5_000,
+      });
+      expect(result.reason).toBe(reason);
+      expect(result.sent).toEqual([]);
+      expect(result.ok).toBe(false);
+      expect(readFileSync(path.join(dir, "keystrokes"))).toEqual(Buffer.from(""));
+    }
+  });
+
+  it("reaps a timed-out probe group within 22 seconds", async () => {
+    const dir = tempDir();
+    writeFileSync(path.join(dir, "mode"), "slow");
+    const started = Date.now();
+    const result = await runQuotaProbe({
+      executable: fakeCli,
+      profile: "fixture-v1",
+      cwd: dir,
+      deadlineMs: 2_000,
+    });
+    const elapsed = Date.now() - started;
+    expect(result.reason).toBe("timeout");
+    expect(result.sent).toEqual([]);
+    expect(elapsed).toBeLessThanOrEqual(22_000);
+    expect(elapsed).toBeLessThan(8_000);
+    const pid = Number(readFileSync(path.join(dir, "pid"), "utf8"));
+    const sleepPid = Number(readFileSync(path.join(dir, "sleep.pid"), "utf8"));
+    await waitDead(pid);
+    await waitDead(sleepPid);
+    expect(alive(pid)).toBe(false);
+    expect(alive(sleepPid)).toBe(false);
+  });
+
+  it("cancels an in-flight probe without leaving the child", async () => {
+    const dir = tempDir();
+    writeFileSync(path.join(dir, "mode"), "slow");
+    const controller = new AbortController();
+    const pending = runQuotaProbe({
+      executable: fakeCli,
+      profile: "fixture-v1",
+      cwd: dir,
+      deadlineMs: 20_000,
+      signal: controller.signal,
+    });
+    const pid = Number(await waitForText(path.join(dir, "pid")));
+    const sleepPid = Number(await waitForText(path.join(dir, "sleep.pid")));
+    controller.abort();
+    const started = Date.now();
+    const result = await pending;
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(result.reason).toBe("cancelled");
+    expect(result.sent).toEqual([]);
+    await waitDead(pid);
+    await waitDead(sleepPid);
+    expect(alive(pid)).toBe(false);
+    expect(alive(sleepPid)).toBe(false);
+  });
+
+  it("does not launch an unsafe live profile or a relative executable", async () => {
+    const dir = tempDir();
+    writeFileSync(path.join(dir, "mode"), "usage");
+    const unsafe = await runQuotaProbe({
+      executable: fakeCli,
+      profile: "claude",
+      cwd: dir,
+      deadlineMs: 2_000,
+    });
+    expect(unsafe.reason).toBe("profile_unsafe");
+    expect(unsafe.sent).toEqual([]);
+    expect(existsSync(path.join(dir, "pid"))).toBe(false);
+    const relative = await runQuotaProbe({
+      executable: "fake-cli.py",
+      profile: "fixture-v1",
+      cwd: dir,
+      deadlineMs: 2_000,
+    });
+    expect(relative.reason).toBe("not_absolute");
+    expect(existsSync(path.join(dir, "pid"))).toBe(false);
+    chmodSync(dir, 0o777);
+    const open = await runQuotaProbe({
+      executable: fakeCli,
+      profile: "fixture-v1",
+      cwd: dir,
+      deadlineMs: 2_000,
+    });
+    expect(open.reason).toBe("cwd_denied");
+    expect(existsSync(path.join(dir, "pid"))).toBe(false);
+  });
+
+  it("reports a busy probe without starting the CLI", async () => {
+    const dir = tempDir();
+    writeFileSync(path.join(dir, "mode"), "usage");
+    const lock = path.join(dir, "held.lock");
+    const holder = spawn(
+      venvPython,
+      [
+        "-c",
+        "import fcntl,sys,time; fd=open(sys.argv[1],'a+'); fcntl.flock(fd, fcntl.LOCK_EX); sys.stdout.write('held\\n'); sys.stdout.flush(); time.sleep(20)",
+        lock,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("lock holder did not start")), 3_000);
+        holder.stdout?.on("data", (chunk: Uint8Array) => {
+          if (Buffer.from(chunk).toString("utf8").includes("held")) {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+      });
+      const result = await runQuotaProbe({
+        executable: fakeCli,
+        profile: "fixture-v1",
+        cwd: dir,
+        deadlineMs: 2_000,
+        lockPath: lock,
+      });
+      expect(result.reason).toBe("probe_busy");
+      expect(existsSync(path.join(dir, "pid"))).toBe(false);
+    } finally {
+      if (holder.pid) {
+        try {
+          process.kill(holder.pid, "SIGKILL");
+        } catch {
+          // The holder already exited.
+        }
+      }
+    }
+  });
+});
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+  process.env[name] = value;
+}

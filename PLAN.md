@@ -365,10 +365,10 @@ Expected: every command exits 0; preflight JSON has `coreReady:true`, `platform:
 
 **Done:**
 
-- [ ] Real PTY coverage.
-- [ ] Known empty-prompt gate.
-- [ ] Action traps tested.
-- [ ] Commit `feat: add safe CLI quota probe transport`.
+- [x] Real PTY coverage.
+- [x] Known empty-prompt gate.
+- [x] Action traps tested.
+- [x] Commit `feat: add safe CLI quota probe transport`.
 
 ### 09. Parse provider quotas and Codex reset inventory
 
