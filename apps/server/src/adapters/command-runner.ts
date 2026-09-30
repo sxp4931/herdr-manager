@@ -25,7 +25,8 @@ const TMUX_DENIED = new Set([
 ]);
 
 const SENSITIVE_ENV = /(?:^|_)(?:API_KEY|APIKEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|SESSION)(?:_|$)|^(?:LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|NODE_OPTIONS|NODE_DEBUG|PYTHONSTARTUP|PYTHONINSPECT|BASH_ENV|ENV|SHELLOPTS|PS4|ANTHROPIC_BASE_URL|ANTHROPIC_API_BASE|OPENAI_BASE_URL|OPENAI_API_BASE|XAI_BASE_URL|XAI_API_BASE)$/i;
-const GIT_CONFIG_INJECTION = /^GIT_(?:CONFIG|SSH_COMMAND|ASKPASS|EDITOR|PAGER|EXTERNAL_DIFF|SEQUENCE_EDITOR|PROXY_COMMAND)/i;
+const GIT_EXEC_INJECTION = /^GIT_(?:SSH_COMMAND|ASKPASS|EDITOR|PAGER|EXTERNAL_DIFF|SEQUENCE_EDITOR|PROXY_COMMAND)/i;
+const GIT_CONFIG_ALLOW = new Set(["core.hooksPath=/dev/null", "core.fsmonitor="]);
 const GIT_PATCH_FLAG = /^(?:-p|--patch|-u|--stat|--raw|--numstat|--name-only|--name-status)$|^(?:--unified(?:=|$)|-U)/;
 const TMUX_VALUE_FLAGS = new Set(["-S", "-L", "-f", "-F"]);
 
@@ -82,10 +83,27 @@ function positionalArgs(args: readonly string[]): string[] {
   return positionals;
 }
 
+function blockedGitControl(key: string, value: string): boolean {
+  if (GIT_EXEC_INJECTION.test(key)) return true;
+  if (!/^GIT_CONFIG/i.test(key)) return false;
+  if (key === "GIT_CONFIG_NOSYSTEM" && value === "1") return false;
+  if ((key === "GIT_CONFIG_GLOBAL" || key === "GIT_CONFIG_SYSTEM") && value === "/dev/null") return false;
+  return true;
+}
+
 function assertGit(args: readonly string[]): void {
-  for (const arg of args) {
-    if (arg === "-c" || arg.startsWith("-c") || arg === "--config-env" || arg.startsWith("--config-env=")) {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "--config-env" || arg.startsWith("--config-env=")) {
       throw new CommandDeniedError("git config override denied");
+    }
+    if (arg === "-c" || (arg.startsWith("-c") && arg.length > 2)) {
+      const value = arg === "-c" ? args[index + 1] : arg.slice(2);
+      if (arg === "-c") index += 1;
+      if (value === undefined || !GIT_CONFIG_ALLOW.has(value)) {
+        throw new CommandDeniedError("git config override denied");
+      }
+      continue;
     }
     if (arg === "--git-dir" || arg.startsWith("--git-dir=") || arg === "--work-tree" || arg.startsWith("--work-tree=")) {
       throw new CommandDeniedError("git directory override denied");
@@ -192,7 +210,7 @@ export function filterEnvironment(input: Record<string, string>, executable: str
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
       continue;
     }
-    if (key !== "HERDR_SESSION" && (SENSITIVE_ENV.test(key) || GIT_CONFIG_INJECTION.test(key))) {
+    if (key !== "HERDR_SESSION" && (SENSITIVE_ENV.test(key) || blockedGitControl(key, value))) {
       continue;
     }
     env[key] = value;

@@ -296,10 +296,10 @@ Expected: every command exits 0; preflight JSON has `coreReady:true`, `platform:
 
 **Done:**
 
-- [ ] Worktree metadata complete.
-- [ ] Read-only observation proven.
-- [ ] Detached/error states tested.
-- [ ] Commit `feat: collect git worktree activity`.
+- [x] Worktree metadata complete.
+- [x] Read-only observation proven.
+- [x] Detached/error states tested.
+- [x] Commit `feat: collect git worktree activity`.
 
 ### 06. Collect tmux agents and optional loop manifests
 

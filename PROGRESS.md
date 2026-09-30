@@ -54,3 +54,14 @@ Entries record the milestone message and the HEAD that preceded the commit. The 
   - `npm run check:policy` — exit 0. `policy ok`.
   - `npm run check` — exit 0. Unit 12 passed. Python 1 passed. Integration 12 passed.
 - Results: the example config keeps probes disabled, mode `passive`, and host `127.0.0.1`. A `0.0.0.0` host is rejected. Fixture mode without `HERDR_FIXTURE=1` is rejected, and that env forces fixture mode. A shell metacharacter stayed a literal argv entry and did not create a sentinel file. API keys, `OPENAI_BASE_URL`, and `GIT_CONFIG_COUNT` were stripped. A flooded child was truncated at 1024 bytes and killed. A timed-out process group, including its `sleep` child, was reaped. Shells, `git reset`, `git -c` config overrides, `git log -p`, and `tmux send-keys` are denied before spawn. `tmux -S <socket> list-panes` is allowed and did not create a server socket. A world-writable working directory is rejected. `node scripts/probe-doctor.mjs --json` reported three providers with `liveProbe: false` and did not launch a CLI. `--live` exits 2. No live usage probe was run.
+
+## Milestone 05 — Collect git repositories and worktrees
+
+- Status: complete
+- Date (UTC): 2026-09-29
+- Preceding HEAD: `2a9aea1` `feat: constrain local collector execution`
+- Commit message: `feat: collect git worktree activity`
+- Commands and results:
+  - `npm run test:integration -- tests/integration/git.test.ts` — exit 0. 4 passed, 0 failed, 0 skipped.
+  - `npm run check` — exit 0. Unit 12 passed. Python 1 passed. Integration 17 passed.
+- Results: a synthetic temporary repository produced exactly two allowed worktrees on distinct branches, with main counts 1 staged / 1 modified / 1 untracked and the feature worktree counting a rename plus a staged-and-modified file as 2 staged / 1 modified. A filename containing a space and a filename containing a newline stayed one status record each. The outside worktree was returned as disabled `outside_root` and was never passed to `status` or `log`. HEAD, porcelain status, and worktree file bytes were unchanged. A separate conflict fixture counted 1 conflict. Detached HEAD, an unborn branch, a locked worktree, a missing prunable path, an empty directory, and an empty root list were reported without writing. Commit subjects redact `SYNTHETIC_SECRET_SENTINEL`. The fixture author is local to the temporary repo. No live account data.

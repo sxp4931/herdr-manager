@@ -187,6 +187,18 @@ describe("command runner", () => {
         new AbortController().signal,
       ),
     ).rejects.toBeInstanceOf(CommandDeniedError);
+    const guarded = await runCommand(
+      {
+        executable: git ?? "/usr/bin/git",
+        args: ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=", "status", "--porcelain=v1", "-z"],
+        cwd: dir,
+        timeoutMs: 2_000,
+        maxBytes: 4_096,
+        allowedEnvironment: { PATH: process.env.PATH ?? "", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+      },
+      new AbortController().signal,
+    );
+    expect(guarded.code).not.toBe(0);
     await expect(
       runCommand(
         {
@@ -245,6 +257,35 @@ describe("command runner", () => {
     }
     const mode = statSync(dir).mode & 0o777;
     expect(mode & 0o002).toBe(0);
+  });
+
+  it("keeps null git config switches and strips config injection", async () => {
+    const dir = tempDir();
+    const result = await runNode(
+      dir,
+      `process.stdout.write(JSON.stringify({
+        count: process.env.GIT_CONFIG_COUNT ?? null,
+        global: process.env.GIT_CONFIG_GLOBAL ?? null,
+        system: process.env.GIT_CONFIG_SYSTEM ?? null,
+        nosystem: process.env.GIT_CONFIG_NOSYSTEM ?? null,
+      }));`,
+      [],
+      {
+        env: {
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_SYSTEM: "/tmp/evil-system",
+          GIT_CONFIG_NOSYSTEM: "1",
+        },
+      },
+    );
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      count: null,
+      global: "/dev/null",
+      system: null,
+      nosystem: "1",
+    });
   });
 
   it("rejects a world-writable working directory", async () => {
