@@ -28,7 +28,7 @@ cp config/dashboard.example.json config/dashboard.local.json
 npm start -- --config config/dashboard.local.json
 ```
 
-`npm start` runs `node apps/server/dist/main.js`. The default bind is `127.0.0.1:4317`. Any other host is refused. Flags are `--host`, `--port`, `--config`, `--database`, and `--fixture`.
+`npm start` runs `node apps/server/dist/main.js`. The bind comes from the config's `host` and `port` (`127.0.0.1:4317` in the example); `--host` and `--port` override them. Any host other than `127.0.0.1` or `localhost` is refused. Flags are `--host`, `--port`, `--config`, `--database`, and `--fixture`. If the port is taken, the server prints `cannot listen on ...` and exits 1.
 
 `config/dashboard.local.json` is gitignored. The example config is mode `passive`, with `quotaProbesEnabled` false, empty `repositoryRoots`, and null `herdrSocket` and `tmuxSocket`. Poll intervals are 10 seconds for sessions, 30 seconds for git, and 300 seconds for quota.
 
