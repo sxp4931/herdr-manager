@@ -32,6 +32,7 @@ import {
 } from "./services/snapshot.js";
 import type { DashboardStore } from "./storage/repository.js";
 
+const COLLECTOR_ERROR = "collector_error";
 const QUOTA_BACKOFF_MS = [5, 10, 20, 30].map((minutes) => minutes * 60 * 1000);
 const SESSION_BACKOFF_MS = [10_000, 20_000, 40_000, 60_000];
 
@@ -418,7 +419,16 @@ class DashboardScheduler implements Scheduler {
           ok = false;
           return;
         }
-        const quota = await this.quota.collect(provider, this.abort.signal);
+        let quota: ProviderQuota;
+        try {
+          quota = await this.quota.collect(provider, this.abort.signal);
+        } catch {
+          // One provider failing must not hide the others or leave its old status on screen.
+          if (this.abort.signal.aborted) return;
+          this.recordCollectorError(`${provider}-quota`);
+          ok = false;
+          continue;
+        }
         this.recordQuota(quota);
         if (!succeeded(quota.health.status)) ok = false;
       }
@@ -458,6 +468,24 @@ class DashboardScheduler implements Scheduler {
     };
   }
 
+  /** A collector that throws still gets a health row, so the page does not keep showing its last success as current. */
+  private recordCollectorError(sourceId: string): void {
+    const previous = this.state.health.find((health) => health.sourceId === sourceId) ?? null;
+    this.store.applyHealth(
+      sourceHealthSchema.parse({
+        sourceId,
+        status: "parse_error",
+        checkedAt: isoOf(this.clock),
+        lastSuccessAt: previous?.lastSuccessAt ?? null,
+        reasonCode: COLLECTOR_ERROR,
+        cliVersion: previous?.cliVersion ?? null,
+        parserVersion: previous?.parserVersion ?? QUOTA_PARSER_VERSION,
+        provenance: this.state.provenance,
+      }),
+    );
+    this.reload();
+  }
+
   private publish(): void {
     const now = this.clock.now();
     const generatedAt = isoOf(this.clock);
@@ -471,7 +499,13 @@ class DashboardScheduler implements Scheduler {
       generatedAt,
     };
     const snapshot = this.current();
-    for (const listener of this.listeners) listener(snapshot);
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(snapshot);
+      } catch {
+        // One broken subscriber must not stop collection or starve the others.
+      }
+    }
   }
 
   private recordQuota(quota: ProviderQuota): void {
@@ -486,19 +520,37 @@ class DashboardScheduler implements Scheduler {
   }
 
   private async collectSessions(): Promise<boolean> {
-    const [herdr, tmux] = await Promise.all([
+    const [herdr, tmux] = await Promise.allSettled([
       this.herdr.collect(this.abort.signal),
       this.tmux.collect(this.abort.signal),
     ]);
-    this.store.applySessions(reconcileSessions(herdr.sessions, tmux.sessions));
-    this.store.applyHealth(herdr.health);
-    this.store.applyHealth(tmux.health);
+    if (this.abort.signal.aborted) return false;
+    const herdrSessions = herdr.status === "fulfilled" ? herdr.value.sessions : [];
+    const tmuxSessions = tmux.status === "fulfilled" ? tmux.value.sessions : [];
+    const sessions = reconcileSessions(herdrSessions, tmuxSessions);
+    this.store.applySessions(sessions);
+    let ok = true;
+    for (const [sourceId, result] of [["herdr", herdr], ["tmux", tmux]] as const) {
+      if (result.status === "fulfilled") {
+        this.store.applyHealth(result.value.health);
+        if (!succeeded(result.value.health.status)) ok = false;
+      } else {
+        this.recordCollectorError(sourceId);
+        ok = false;
+      }
+    }
     this.reload();
-    return succeeded(herdr.health.status) && succeeded(tmux.health.status);
+    return ok;
   }
 
   private async collectGit(): Promise<boolean> {
-    const result = await this.git.collect(this.roots, this.abort.signal);
+    let result: Awaited<ReturnType<GitSource["collect"]>>;
+    try {
+      result = await this.git.collect(this.roots, this.abort.signal);
+    } catch (error) {
+      if (!this.abort.signal.aborted) this.recordCollectorError("git");
+      throw error;
+    }
     this.store.applyGit(result.worktrees);
     this.store.applyHealth(result.health);
     this.reload();
@@ -526,7 +578,12 @@ class DashboardScheduler implements Scheduler {
       }
       if (this.abort.signal.aborted) return;
       failures = ok ? 0 : failures + 1;
-      this.publish();
+      try {
+        this.publish();
+      } catch {
+        // A storage or projection failure skips this publish. The loop must
+        // survive: nothing awaits it until shutdown, so a rejection would be unhandled.
+      }
       const delay = ok || kind === "git" ? this.intervals[kind] : backoffMs(kind, failures);
       this.asleep[kind] = true;
       const slept = this.clock.sleep(delay, this.abort.signal);
