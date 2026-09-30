@@ -250,10 +250,10 @@ Expected: every command exits 0; preflight JSON has `coreReady:true`, `platform:
 
 **Done:**
 
-- [ ] Transactional migration.
-- [ ] Retention and ordering tested.
-- [ ] No raw capture persistence.
-- [ ] Commit `feat: persist sanitized observations locally`.
+- [x] Transactional migration.
+- [x] Retention and ordering tested.
+- [x] No raw capture persistence.
+- [x] Commit `feat: persist sanitized observations locally`.
 
 ### 04. Implement bounded process execution and configuration
 

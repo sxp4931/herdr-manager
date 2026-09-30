@@ -3,6 +3,7 @@ import { stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
 import { parseHealth, type Health } from "@herdr/contracts";
+import { redactText } from "./services/redaction.js";
 import { authorityAllowed, originAllowed, SECURITY_HEADERS } from "./security.js";
 
 export interface ServerOptions {
@@ -26,7 +27,7 @@ const MIME: Record<string, string> = {
 };
 
 function writeJson(res: ServerResponse, status: number, body: unknown, extra?: Record<string, string>): void {
-  const payload = JSON.stringify(body);
+  const payload = redactText(JSON.stringify(body));
   res.writeHead(status, {
     ...SECURITY_HEADERS,
     "Content-Type": "application/json; charset=utf-8",
@@ -87,8 +88,9 @@ export function createDashboardServer(options: ServerOptions): Server {
     readOnly: true,
   });
 
-  return createServer((req: IncomingMessage, res: ServerResponse) => {
-    const port = options.port;
+  const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : options.port;
     if (!authorityAllowed(req.headers.host, port)) {
       writeError(res, 403, "forbidden_host", "host is not the bound loopback authority");
       return;
@@ -130,4 +132,5 @@ export function createDashboardServer(options: ServerOptions): Server {
     }
     void serveStatic(res, options.webDist, url.pathname);
   });
+  return server;
 }

@@ -30,3 +30,15 @@ Entries record the milestone message and the HEAD that preceded the commit. The 
   - `npm run test:unit -- tests/unit/contracts.test.ts` — exit 0. 9 passed, 0 failed, 0 skipped.
   - `npm run check` — exit 0. Lint, typecheck, unit (9), Python (1), build, integration (1).
 - Results: daily snapshot has exactly Claude, Codex, and Grok. Claude 5h is 10% used and weekly is 20% used. Codex 5h is 65% left (35% used / 65% remaining) and weekly is 75% left. Grok weekly is 15% used and the 5h window is `not_applicable` with null percentages. Unknown banked inventory is null; the partial Codex inventory is a known empty array. Invalid percents, invalid dates, missing provenance, and zero-for-unknown are rejected. Scenario files are synthetic fixtures, not live-account captures. The milestone also drops an accidentally tracked Python bytecode file from the tree.
+
+## Milestone 03 — Add local SQLite storage, migrations, and redaction
+
+- Status: complete
+- Date (UTC): 2026-09-29
+- Preceding HEAD: `36d7a55` `feat: define quota and herd contracts`
+- Commit message: `feat: persist sanitized observations locally`
+- Commands and results:
+  - `npm run test:unit -- tests/unit/redaction.test.ts` — exit 0. 3 passed, 0 failed, 0 skipped.
+  - `npm run test:integration -- tests/integration/sqlite.test.ts` — exit 0. 4 passed, 0 failed, 0 skipped.
+  - `npm run check` — exit 0. Unit 12 passed. Python 1 passed. Integration 5 passed.
+- Results: migration `001` applies twice and leaves one `schema_migrations` row. Restart keeps the quota sample and the original session dwell; a changed session identity resets dwell; an older observation does not overwrite a newer one. A sample older than seven days is pruned. The database file and WAL are mode `0600` and the directory is `0700`. A corrupt file raises `StorageCorruptionError` and is not deleted. A locked database fails inside five seconds and is left in place. Stored bytes, log lines, read-back JSON, and the HTTP 404 body do not contain `SYNTHETIC_SECRET_SENTINEL`. Fixture data only.
