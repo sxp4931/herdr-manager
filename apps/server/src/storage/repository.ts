@@ -53,6 +53,15 @@ interface SessionRow {
   payload_json: string;
 }
 
+function gitObservedAt(payload: string): number {
+  try {
+    const parsed = JSON.parse(payload) as { observedAt?: unknown };
+    return typeof parsed.observedAt === "string" ? Date.parse(parsed.observedAt) : Number.NaN;
+  } catch {
+    return Number.NaN;
+  }
+}
+
 function sampleTime(quota: ProviderQuota): string {
   const stamps = quota.windows.map((window) => window.sampledAt);
   if (quota.bankedResets) {
@@ -180,12 +189,14 @@ class SqliteStore implements DashboardStore {
   }
 
   applyGit(worktrees: GitWorktree[]): void {
+    const seen = new Set<string>();
     const write = this.db.prepare(
       `INSERT INTO git_cache (id, payload_json) VALUES (?, ?)
        ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json`,
     );
     for (const worktree of worktrees) {
       const redacted = gitWorktreeSchema.parse(redactStored(worktree));
+      seen.add(redacted.id);
       const existing = this.db.prepare("SELECT payload_json FROM git_cache WHERE id = ?").get(redacted.id) as
         | { payload_json: string }
         | undefined;
@@ -200,6 +211,16 @@ class SqliteStore implements DashboardStore {
       assertNoSentinel(payload);
       write.run(redacted.id, payload);
       this.log(`git stored ${redacted.id}`);
+    }
+    const rows = this.db.prepare("SELECT id, payload_json FROM git_cache").all() as { id: string; payload_json: string }[];
+    const cutoff = this.clock.now().getTime() - DISAPPEAR_MS;
+    const remove = this.db.prepare("DELETE FROM git_cache WHERE id = ?");
+    for (const row of rows) {
+      if (seen.has(row.id)) continue;
+      if (gitObservedAt(row.payload_json) < cutoff) {
+        remove.run(row.id);
+        this.log(`git aged out ${row.id}`);
+      }
     }
   }
 

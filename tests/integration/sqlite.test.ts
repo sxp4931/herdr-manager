@@ -130,6 +130,34 @@ describe("sqlite storage", () => {
     restarted.close();
   });
 
+  it("ages out a git worktree omitted by a later collect after 24 hours", () => {
+    const dir = tempDir();
+    const file = path.join(dir, "dashboard.sqlite");
+    const clock = movableClock("2026-09-29T16:00:00.000Z");
+    const store = openStore({ file, clock });
+    const kept = structuredClone(scenarios.daily.worktrees[0]);
+    kept.observedAt = "2026-09-29T16:00:00.000Z";
+    const omitted = structuredClone(kept);
+    omitted.id = "git:omitted";
+    omitted.path = "/work/omitted";
+    store.applyGit([kept, omitted]);
+    expect(store.listWorktrees().map((worktree) => worktree.id).sort()).toEqual(["git:demo", "git:omitted"]);
+
+    clock.set("2026-09-30T16:00:00.000Z");
+    const stillFresh = structuredClone(kept);
+    stillFresh.observedAt = "2026-09-30T16:00:00.000Z";
+    store.applyGit([stillFresh]);
+    expect(store.listWorktrees().map((worktree) => worktree.id).sort()).toEqual(["git:demo", "git:omitted"]);
+
+    clock.set("2026-09-30T16:00:00.001Z");
+    const later = structuredClone(kept);
+    later.observedAt = "2026-09-30T16:00:00.001Z";
+    store.applyGit([later]);
+    expect(store.listWorktrees().map((worktree) => worktree.id)).toEqual(["git:demo"]);
+    expect(store.listWorktrees()[0]?.observedAt).toBe("2026-09-30T16:00:00.001Z");
+    store.close();
+  });
+
   it("reports corruption without deleting the file", () => {
     const dir = tempDir();
     const file = path.join(dir, "dashboard.sqlite");

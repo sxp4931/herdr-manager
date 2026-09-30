@@ -217,3 +217,15 @@ Entries record the milestone message and the HEAD that preceded the commit. The 
 | Production page | Playwright 15 passed, and smoke read `/` plus the fixture snapshot on `127.0.0.1:14317` |
 
 - Results: The verifier uses a fresh `HERDR_STATE_DIR` and does not reuse port 14317 when something is already listening. Fixture mode refuses to start unless `HERDR_ALLOW_NETWORK=0`. B-01, B-02, B-03, and B-04 stay open. The run did not create `.local/dashboard.sqlite`. The existing user tmux server was left running. A second pair of `bash scripts/verify.sh` runs is executed after this commit so the final tree stays clean.
+
+## Correction — Age out omitted git worktrees
+
+- Status: complete
+- Date (UTC): 2026-09-30
+- Preceding HEAD: `9724ca4` `chore: finalize reproducible dashboard verification` (`9724ca4d733ff2c5a676c24bd79dd79be856fec4`)
+- Commit message: `fix: age out git worktrees missing for 24 hours`
+- Commands and results:
+  - `npm run test:integration -- tests/integration/sqlite.test.ts` — exit 0. 5 passed, 0 failed, 0 skipped. The new case stores two fixture worktrees, omits one on the next `applyGit`, keeps it at exactly 24 hours, and drops it once the clock passes that mark. The worktree still present in the collect remains.
+  - `npm run check:policy` — exit 0. `policy ok`.
+  - `npm run check` — exit 0 at 2026-09-30T06:15:25Z. Lint and typecheck passed. Unit 58 passed. Python 29 passed. Build passed. Integration 50 passed. Zero failures, zero skips.
+- Results: `applyGit` now removes a `git_cache` row that a later full collect does not include once its stored `observedAt` is older than 24 hours. B-01, B-02, B-03, and B-04 stay open. The existing user tmux server was left running.
