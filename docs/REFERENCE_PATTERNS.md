@@ -32,3 +32,9 @@ Inspection only. Nothing under the reference root is modified. Hashes are the HE
 | Token meter | Not used for quota |
 
 No herdr write method is implemented.
+
+## Linux socket client
+
+The dashboard is a client of the herdr socket. It is not an MCP server, and it does not start herdr. A collect sends two NDJSON lines, `{id, method, params}`, for `agent.list` and `session.snapshot`. `agent.list` decides which panes are agents. The snapshot contributes workspace, tab, and pane labels plus the wire protocol. Request ids are decimal strings and still match when echoed as numbers. Each read waits inside a 2 second budget, accepts one reconnect, and rejects a frame above 4 MiB. Protocol 17 is the verified baseline. An older protocol is reported as unsupported and a newer protocol is reported as additive. Neither result enables a mutation.
+
+Rows that share a provider, pid, and cwd across herdr and tmux collapse into the herdr row. A missing pid, a missing cwd, or a different provider keeps both rows. A named `HERDR_SESSION` uses the documented `herdr/sessions/<name>/herdr.sock` file when that file stays inside the config directory. An unknown name is reported and the default socket is the visible fallback. The live herdr binary is not required for these checks; the integration test speaks to a private Unix socket.

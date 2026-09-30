@@ -77,3 +77,14 @@ Entries record the milestone message and the HEAD that preceded the commit. The 
   - `npm run test:integration -- tests/integration/tmux.test.ts` — exit 0. 1 passed, 0 failed, 0 skipped.
   - `npm run check` — exit 0. Unit 17 passed. Python 1 passed. Integration 18 passed.
 - Results: a private `tmux -L chhaya-dashboard-test-<random>` server with synthetic Node scripts named claude, codex, and grok produced three agent rows and omitted the shell pane. Each process-only row has status `unknown` and a null loop. A fresh `.herdr-dashboard/run.json` whose pid, start ticks, provider, and cwd match identifies `goal`/`running` from the manifest; a 31s-old manifest and a manifest whose start ticks differ by one do not. The adapter argv contains `list-panes` and never `send-keys`, `capture-pane`, `kill-session`, `kill-server`, or `new-session`. Worktree bytes were unchanged across collection. A missing private server reports `tmux_server_missing` with no sessions. A missing tmux binary reports `tmux_missing` without a spawn. No live user tmux server, no real Claude/Codex/Grok CLI, and no live account data. `LANG=C.UTF-8` is required because tmux 3.5a rewrites tab separators to underscores under the C locale.
+
+## Milestone 07 — Implement the Linux herdr read adapter
+
+- Status: complete
+- Date (UTC): 2026-09-30
+- Preceding HEAD: `808570c` `feat: observe tmux sessions and loop manifests`
+- Commit message: `feat: reuse herdr read model on Linux`
+- Commands and results:
+  - `npm run test:integration -- tests/integration/herdr.test.ts` — exit 0. 8 passed, 0 failed, 0 skipped.
+  - `npm run check` — exit 0. Unit 17 passed. Python 1 passed. Integration 26 passed.
+- Results: a private Unix socket accepted only `agent.list` and `session.snapshot`. The agent list kept Claude, Codex, Grok, and an unknown `opencode` provider, dropped an empty agent and an empty pane id, and retained label, cwd, pid, and `stateChangeSeq`. An unrecognized status became `unknown`. Split frames, a coalesced out-of-order preface, a numeric id, and `"error": null` parsed. An oversized frame was rejected without a retry. A frame without a newline timed out inside 3.5 seconds and did not wait a second full budget. One dropped connection was retried. A removed pane disappeared, a same occupant kept `enteredAt`, and a replaced session identity reset it. After the socket was removed, health was `stale` and the previous sessions stayed. Protocol 16 is `protocol_older` / `unsupported` and protocol 18 is `protocol_newer` while both still return agents. Herdr and tmux rows merged only when provider, pid, and cwd agreed. No live herdr daemon was started. The installed `herdr` binary is absent; see `BLOCKERS.md` B-01.

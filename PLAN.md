@@ -342,10 +342,10 @@ Expected: every command exits 0; preflight JSON has `coreReady:true`, `platform:
 
 **Done:**
 
-- [ ] Real Unix socket test.
-- [ ] Wire framing bounded.
-- [ ] No write methods.
-- [ ] Commit `feat: reuse herdr read model on Linux`.
+- [x] Real Unix socket test.
+- [x] Wire framing bounded.
+- [x] No write methods.
+- [x] Commit `feat: reuse herdr read model on Linux`.
 
 ### 08. Build the PTY emulator and fail-closed diagnostic state machine
 
