@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { scenarios, type DashboardSnapshot } from "@herdr/contracts";
-import { createDashboardServer } from "../../apps/server/src/http.js";
+import { createDashboardServer, formatSnapshotEvent } from "../../apps/server/src/http.js";
 
 const servers: Server[] = [];
 const dirs: string[] = [];
@@ -18,6 +18,14 @@ afterEach(async () => {
   }
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
+
+function snapshotWithLabel(label: string): DashboardSnapshot {
+  const base = structuredClone(scenarios.daily);
+  const first = base.sessions[0];
+  if (!first) throw new Error("daily fixture has no sessions");
+  base.sessions = [{ ...first, label, cwd: "/work/demo?key=abc123" }, ...base.sessions.slice(1)];
+  return base;
+}
 
 async function listen(snapshot: DashboardSnapshot): Promise<number> {
   const webDist = mkdtempSync(path.join(tmpdir(), "herdr-web-"));
@@ -49,6 +57,11 @@ function rawTarget(port: number, target: string): Promise<string> {
   });
 }
 
+async function getJson(port: number, pathname: string): Promise<unknown> {
+  const response = await fetch(`http://127.0.0.1:${port}${pathname}`);
+  return JSON.parse(await response.text()) as unknown;
+}
+
 describe("http hardening", () => {
   it("answers a malformed absolute-form target with 400 and keeps serving", async () => {
     const port = await listen(scenarios.daily);
@@ -56,5 +69,24 @@ describe("http hardening", () => {
     expect(await rawTarget(port, "http://a:b@[")).toMatch(/^HTTP\/1\.1 400/);
     const health = await fetch(`http://127.0.0.1:${port}/api/health`);
     expect(health.status).toBe(200);
+  });
+
+  it("redacts secret-looking values without corrupting the JSON body", async () => {
+    const label = "fix callback?token=abc123 then https://user:pw@example.test/x";
+    const port = await listen(snapshotWithLabel(label));
+    for (const pathname of ["/api/snapshot", "/api/sessions"]) {
+      const body = (await getJson(port, pathname)) as { sessions: { label: string; cwd: string | null }[] };
+      expect(body.sessions).toHaveLength(scenarios.daily.sessions.length);
+      expect(body.sessions[0]?.label).toBe("fix callback?token=[redacted] then https://[redacted]@example.test/x");
+      expect(body.sessions[0]?.cwd).toBe("/work/demo?key=[redacted]");
+    }
+  });
+
+  it("keeps an SSE frame parseable when a value looks like a secret", () => {
+    const frame = formatSnapshotEvent(snapshotWithLabel("a?sig=xyz"));
+    const data = frame.split("\n").find((line) => line.startsWith("data: "))?.slice("data: ".length) ?? "";
+    const parsed = JSON.parse(data) as DashboardSnapshot;
+    expect(parsed.sessions[0]?.label).toBe("a?sig=[redacted]");
+    expect(parsed.sessions).toHaveLength(scenarios.daily.sessions.length);
   });
 });
