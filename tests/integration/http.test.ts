@@ -12,6 +12,34 @@ interface RawResponse {
   body: string;
 }
 
+interface ListedAlert {
+  kind: string;
+  subjectId: string;
+  evidence: { reasonCode?: string };
+}
+
+const CAPACITY_KINDS = new Set([
+  "window_open_idle",
+  "weekly_reset_underused",
+  "banked_reset_unusable_before_expiry",
+  "banked_reset_expiring",
+]);
+
+function assertDegradedAlerts(alerts: ListedAlert[]): void {
+  expect(alerts.length).toBeGreaterThan(0);
+  const subjects = new Set(alerts.map((alert) => alert.subjectId));
+  expect(subjects.has("claude-quota")).toBe(true);
+  expect(subjects.has("codex-quota")).toBe(true);
+  expect(subjects.has("grok-quota")).toBe(true);
+  for (const alert of alerts) {
+    expect(alert.kind).toBe("source_problem");
+    expect(CAPACITY_KINDS.has(alert.kind)).toBe(false);
+    if (alert.subjectId.endsWith("-quota")) {
+      expect(alert.evidence.reasonCode).toBe("probes_disabled");
+    }
+  }
+}
+
 function writeConfig(dir: string, patch: Record<string, unknown> = {}): string {
   const example = JSON.parse(readFileSync(path.resolve("config/dashboard.example.json"), "utf8")) as Record<string, unknown>;
   const file = path.join(dir, "dashboard.json");
@@ -189,13 +217,13 @@ describe.sequential("loopback server", () => {
       const snapshot = await rawRequest(port, { path: "/api/snapshot" });
       const body = JSON.parse(snapshot.body) as {
         providers: { provider: string; health: { status: string; reasonCode: string } }[];
-        alerts: unknown[];
+        alerts: ListedAlert[];
       };
       expect(snapshot.status).toBe(200);
       expect(snapshot.headers["cache-control"]).toBe("no-store");
       expect(snapshot.headers["content-type"]).toContain("application/json");
       expect(body.providers.map((provider) => provider.provider)).toEqual(["claude", "codex", "grok"]);
-      expect(body.alerts).toEqual([]);
+      assertDegradedAlerts(body.alerts);
       for (const provider of body.providers) {
         expect(provider.health.status).toBe("disabled");
         expect(provider.health.reasonCode).toBe("probes_disabled");
@@ -219,7 +247,9 @@ describe.sequential("loopback server", () => {
       const worktrees = await rawRequest(port, { path: "/api/worktrees" });
       expect(JSON.parse(worktrees.body)).toHaveProperty("worktrees");
       const alerts = await rawRequest(port, { path: "/api/alerts" });
-      expect(JSON.parse(alerts.body)).toEqual({ alerts: [] });
+      const listed = JSON.parse(alerts.body) as { alerts: ListedAlert[] };
+      assertDegradedAlerts(listed.alerts);
+      expect(listed.alerts.some((alert) => alert.subjectId === "herdr")).toBe(true);
 
       const missing = await rawRequest(port, { path: "/api/not-a-route" });
       expect(missing.status).toBe(404);

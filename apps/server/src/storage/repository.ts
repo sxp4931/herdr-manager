@@ -1,10 +1,12 @@
 import type { DatabaseSync } from "node:sqlite";
 import {
   agentSessionSchema,
+  alertSchema,
   gitWorktreeSchema,
   providerQuotaSchema,
   sourceHealthSchema,
   type AgentSession,
+  type Alert,
   type Clock,
   type GitWorktree,
   type ProviderId,
@@ -36,6 +38,8 @@ export interface DashboardStore {
   listSessions(): AgentSession[];
   listWorktrees(): GitWorktree[];
   listHealth(): SourceHealth[];
+  listAlerts(): Alert[];
+  replaceAlerts(alerts: readonly Alert[]): void;
   session(id: string): AgentSession | null;
   counts(): { quotas: number; sessions: number; migrations: number };
   prune(): void;
@@ -255,6 +259,40 @@ class SqliteStore implements DashboardStore {
       payload_json: string;
     }[];
     return rows.map((row) => parseStored(sourceHealthSchema, row.payload_json));
+  }
+
+  listAlerts(): Alert[] {
+    const rows = this.db.prepare("SELECT payload_json FROM alerts ORDER BY id").all() as { payload_json: string }[];
+    return rows.map((row) => parseStored(alertSchema, row.payload_json));
+  }
+
+  replaceAlerts(alerts: readonly Alert[]): void {
+    const parsed = alerts.map((alert) => alertSchema.parse(redactStored(alert)));
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (parsed.length === 0) {
+        this.db.prepare("DELETE FROM alerts").run();
+      } else {
+        const placeholders = parsed.map(() => "?").join(", ");
+        this.db.prepare(`DELETE FROM alerts WHERE id NOT IN (${placeholders})`).run(...parsed.map((alert) => alert.id));
+      }
+      const write = this.db.prepare(
+        `INSERT INTO alerts (id, created_at, last_seen_at, payload_json)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           last_seen_at = excluded.last_seen_at,
+           payload_json = excluded.payload_json`,
+      );
+      for (const alert of parsed) {
+        const payload = JSON.stringify(alert);
+        assertNoSentinel(payload);
+        write.run(alert.id, alert.createdAt, alert.evaluatedAt, payload);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   session(id: string): AgentSession | null {

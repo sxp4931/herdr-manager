@@ -434,10 +434,10 @@ Expected: every command exits 0; preflight JSON has `coreReady:true`, `platform:
 
 **Done:**
 
-- [ ] Thresholds explicit.
-- [ ] False-positive suppression tested.
-- [ ] Stable identity.
-- [ ] Commit `feat: surface idle capacity and reset expiry alerts`.
+- [x] Thresholds explicit.
+- [x] False-positive suppression tested.
+- [x] Stable identity.
+- [x] Commit `feat: surface idle capacity and reset expiry alerts`.
 
 ### 12. Build quota cards, banked inventory, themes, and source status
 

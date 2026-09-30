@@ -21,6 +21,7 @@ import { createHerdrSource } from "./adapters/herdr-source.js";
 import { createTmuxSource } from "./adapters/tmux-source.js";
 import type { DashboardConfig } from "./config.js";
 import { QUOTA_PARSER_VERSION } from "./quota/parse.js";
+import { createAlertEngine, sessionCoverage } from "./services/alerts.js";
 import { reconcileSessions } from "./services/sessions.js";
 import {
   disabledQuotaHealth,
@@ -341,6 +342,7 @@ class DashboardScheduler implements Scheduler {
   private readonly intervals: Record<Kind, number>;
   private readonly probesEnabled: boolean;
   private readonly gate = new ProbeGate();
+  private readonly alertEngine: ReturnType<typeof createAlertEngine>;
   private readonly abort = new AbortController();
   private readonly listeners: Array<(snapshot: DashboardSnapshot) => void> = [];
   private readonly asleep: Record<Kind, boolean> = { sessions: false, git: false, quota: false };
@@ -361,6 +363,7 @@ class DashboardScheduler implements Scheduler {
     this.git = options.git;
     this.roots = [...(options.roots ?? [])];
     this.probesEnabled = options.probesEnabled === true;
+    this.alertEngine = createAlertEngine(options.store.listAlerts());
     this.intervals = {
       sessions: options.poll.sessionsSeconds * 1000,
       git: options.poll.gitSeconds * 1000,
@@ -456,10 +459,16 @@ class DashboardScheduler implements Scheduler {
   }
 
   private publish(): void {
+    const now = this.clock.now();
+    const generatedAt = isoOf(this.clock);
+    const projected = projectSnapshot({ ...this.state, alerts: [], generatedAt }, now);
+    const alerts = this.alertEngine.evaluate(projected, now, sessionCoverage(projected));
+    this.store.replaceAlerts(alerts);
     this.state = {
       ...this.state,
+      alerts,
       sequence: this.state.sequence + 1,
-      generatedAt: isoOf(this.clock),
+      generatedAt,
     };
     const snapshot = this.current();
     for (const listener of this.listeners) listener(snapshot);
