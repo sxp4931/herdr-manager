@@ -62,13 +62,19 @@ export function bufferExceeded(queuedBytes: number, limit = SSE_BUFFER_LIMIT): b
   return queuedBytes > limit;
 }
 
+export const SNAPSHOT_ROUTES: Record<string, (snapshot: DashboardSnapshot) => unknown> = {
+  "/api/snapshot": (snapshot) => snapshot,
+  "/api/providers": (snapshot) => ({ providers: snapshot.providers }),
+  "/api/sessions": (snapshot) => ({ sessions: snapshot.sessions }),
+  "/api/worktrees": (snapshot) => ({ worktrees: snapshot.worktrees }),
+  "/api/alerts": (snapshot) => ({ alerts: snapshot.alerts }),
+};
+
+export const READ_ONLY_ROUTES = ["/api/health", "/api/events", ...Object.keys(SNAPSHOT_ROUTES)] as const;
+
 function apiBody(pathname: string, snapshot: DashboardSnapshot): unknown | null {
-  if (pathname === "/api/snapshot") return snapshot;
-  if (pathname === "/api/providers") return { providers: snapshot.providers };
-  if (pathname === "/api/sessions") return { sessions: snapshot.sessions };
-  if (pathname === "/api/worktrees") return { worktrees: snapshot.worktrees };
-  if (pathname === "/api/alerts") return { alerts: snapshot.alerts };
-  return null;
+  const read = SNAPSHOT_ROUTES[pathname];
+  return read ? read(snapshot) : null;
 }
 
 function serveEvents(

@@ -70,6 +70,8 @@ test("shows fixture quotas, banked resets, and demo data", async ({ page }) => {
   const firstAgent = await boxOf(page.getByRole("button", { name: "Show details for daily-claude-worker" }));
   expect(firstAgent.y).toBeGreaterThanOrEqual(0);
   expect(firstAgent.y + firstAgent.height).toBeLessThanOrEqual(900);
+  const fits = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+  expect(fits).toBe(true);
   expectQuiet(guards);
 });
 
@@ -88,6 +90,8 @@ test("phone width keeps provider cards in a vertical stack", async ({ page }) =>
   }
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(1);
+  const fits = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+  expect(fits).toBe(true);
   expectQuiet(guards);
 });
 

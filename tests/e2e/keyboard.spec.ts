@@ -14,6 +14,7 @@ test("filters, expands work, and closes details from the keyboard", async ({ pag
   const guards = watchPage(page);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
+  await expect(page.getByRole("button", { name: "Show details for daily-claude-worker" })).toBeVisible();
 
   const buttons = (await page.getByRole("button").allTextContents()).map((label) => label.trim());
   const agents = buttons.filter((label) => label.startsWith("Show details for"));

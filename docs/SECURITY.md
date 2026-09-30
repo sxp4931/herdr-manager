@@ -25,4 +25,12 @@ A file that is not a SQLite database, or that fails `PRAGMA integrity_check`, ra
 
 ## HTTP
 
-JSON responses are `no-store`, unknown `/api` paths are 404, and mutating methods are 405. Request targets are not copied into response bodies.
+JSON responses are `no-store`, unknown `/api` paths are 404, and mutating methods are 405. Request targets are not copied into response bodies. The served routes are `GET` and `HEAD` for `/api/health`, `/api/events`, `/api/snapshot`, `/api/providers`, `/api/sessions`, `/api/worktrees`, and `/api/alerts`.
+
+## Commands
+
+Git observation is limited to `rev-parse`, `status`, `symbolic-ref`, `log`, `worktree list`, and `--version`, with hooks and fsmonitor disabled. Tmux observation is `list-panes` on an explicit socket, or `-V`. Herdr reads `agent.list` and `session.snapshot` and does not call answer, say, stop, or spawn. A crashed socket, a git command that passes its deadline, and a usage PTY that does not finish become source-health failures. They do not store a terminal screen.
+
+## Browser
+
+The page renders labels, commit subjects, paths, and URL credentials as text. It has no start, stop, approve, redeem, or refresh control. A dropped event stream is read again. Missing, disabled, and stale provider data leave the three provider cards on screen. Fonts are system stacks, so a failed font load does not blank the page.

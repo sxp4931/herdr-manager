@@ -504,10 +504,10 @@ Expected: every command exits 0; preflight JSON has `coreReady:true`, `platform:
 
 **Done:**
 
-- [ ] Mutation/leak audit exercised.
-- [ ] Degraded screen coverage.
-- [ ] Phone/reduced-motion checks.
-- [ ] Commit `test: verify safe degraded dashboard operation`.
+- [x] Mutation/leak audit exercised.
+- [x] Degraded screen coverage.
+- [x] Phone/reduced-motion checks.
+- [x] Commit `test: verify safe degraded dashboard operation`.
 
 ### 15. Write operations, provider doctor, and offline CI
 
