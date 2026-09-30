@@ -17,3 +17,7 @@ The server is a Node HTTP process using `node:sqlite` and the same TypeScript co
 ## 2026-09-29 — Fixture mode gate
 
 `mode=fixture` is selected only by `HERDR_FIXTURE=1`. The `--fixture` CLI flag refuses to start unless that variable is set, so a production start command cannot silently enter the demo catalog.
+
+## 2026-09-30 — System font stacks
+
+The Chhaya Digital reference ships Schibsted Grotesk, Source Serif 4, and IBM Plex Mono as local woff2 files under `chhaya-digital/assets/fonts/`. That tree has no OFL, LICENSE, or NOTICE beside the binaries. The dashboard does not copy those files and does not request a font host. `--font-body`, `--font-display`, and `--font-mono` name the brand families first, then Segoe UI, Georgia, and ui-monospace. Typography still renders through the system fallbacks with no network fetch.

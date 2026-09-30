@@ -80,6 +80,16 @@ export function repoRootFrom(importMetaUrl: string): string {
   return path.resolve(here, "../../..");
 }
 
+/** `--database` wins. Otherwise an explicit state directory keeps the sqlite file out of the repo. */
+export function resolveDatabaseFile(env: NodeJS.ProcessEnv, root: string, cliPath: string | null): string {
+  if (cliPath) return cliPath;
+  const stateDir = env.HERDR_STATE_DIR;
+  if (typeof stateDir === "string" && stateDir.trim() !== "") {
+    return path.join(stateDir, "dashboard.sqlite");
+  }
+  return path.join(root, ".local", "dashboard.sqlite");
+}
+
 function filePathFromUrl(value: string): string {
   if (value.startsWith("file:")) {
     return path.normalize(decodeURIComponent(new URL(value).pathname));
@@ -138,7 +148,7 @@ export function startFromCli(argv: readonly string[], env: NodeJS.ProcessEnv = p
     webDist: path.join(root, "apps/web/dist"),
     config,
     mode,
-    databaseFile: cli.databasePath ?? path.join(root, ".local", "dashboard.sqlite"),
+    databaseFile: resolveDatabaseFile(env, root, cli.databasePath),
     dev: env.HERDR_DEV === "1",
   });
   let shuttingDown = false;

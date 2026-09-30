@@ -19,7 +19,7 @@ Inspection only. Nothing under the reference root is modified. Hashes are the HE
 - Shepherd token-meter hour/day/week/month estimates are not subscription quota and are not shown on quota cards.
 - The finance app's loopback server plus local SQLite is the operating pattern. Its visual style is not reused.
 - Project Relay's local-first boundary is adopted by removing external actions entirely.
-- Chhaya Digital paper/ink tokens, flat borders, and the Source Serif 4 / Schibsted Grotesk / IBM Plex Mono pairing are the visual source. Font files are copied with upstream license notices when the UI milestone lands. If those notices cannot be retrieved, the UI falls back to system stacks.
+- Chhaya Digital paper/ink tokens, flat borders, and the Source Serif 4 / Schibsted Grotesk / IBM Plex Mono pairing are the visual source. The reference tree has the woff2 files and no OFL, LICENSE, or NOTICE, so the dashboard names those families and falls back to system stacks. The binaries are not copied.
 - Tests state what headless evidence proves. A fixture run is not a live-account result.
 
 ## Read mapping

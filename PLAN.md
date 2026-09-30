@@ -458,10 +458,10 @@ Expected: every command exits 0; preflight JSON has `coreReady:true`, `platform:
 
 **Done:**
 
-- [ ] Capacity and resets visible.
-- [ ] Health truthful.
-- [ ] Dark/light readable.
-- [ ] Commit `feat: display provider quota and banked reset cards`.
+- [x] Capacity and resets visible.
+- [x] Health truthful.
+- [x] Dark/light readable.
+- [x] Commit `feat: display provider quota and banked reset cards`.
 
 ### 13. Build session triage, loop and worktree details, and alert views
 
