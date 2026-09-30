@@ -1,0 +1,9 @@
+{
+  "name": "@herdr/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@herdr/contracts": "0.1.0"
+  }
+}

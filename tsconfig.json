@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@herdr/contracts": ["packages/contracts/src/index.ts"]
+    }
+  },
+  "include": [
+    "apps/server/src/**/*.ts",
+    "packages/contracts/src/**/*.ts",
+    "tests/unit/**/*.ts",
+    "tests/integration/**/*.ts",
+    "tests/helpers/**/*.ts",
+    "tests/e2e/**/*.ts"
+  ]
+}
