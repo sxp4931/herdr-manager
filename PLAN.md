@@ -481,10 +481,10 @@ Expected: every command exits 0; preflight JSON has `coreReady:true`, `platform:
 
 **Done:**
 
-- [ ] Work linked by cwd.
-- [ ] Loop certainty visible.
-- [ ] No action paths.
-- [ ] Commit `feat: show agent triage and git work details`.
+- [x] Work linked by cwd.
+- [x] Loop certainty visible.
+- [x] No action paths.
+- [x] Commit `feat: show agent triage and git work details`.
 
 ### 14. Verify read-only security, degraded operation, and browser resilience
 

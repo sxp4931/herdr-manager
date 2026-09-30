@@ -60,12 +60,16 @@ test("shows fixture quotas, banked resets, and demo data", async ({ page }) => {
   await expect(page.locator("img")).toHaveCount(0);
 
   const labels = (await page.getByRole("button").allTextContents()).map((label) => label.trim());
-  expect(labels).toHaveLength(1);
   expect(labels.some((label) => /start|stop|approve|redeem|refresh/i.test(label))).toBe(false);
+  expect(labels.filter((label) => label === "Use dark theme" || label === "Use light theme")).toHaveLength(1);
+  expect(labels.some((label) => label.startsWith("Show details for"))).toBe(true);
 
   for (const name of ["Claude", "Codex", "Grok"]) {
     await expectCardInView(page, name);
   }
+  const firstAgent = await boxOf(page.getByRole("button", { name: "Show details for daily-claude-worker" }));
+  expect(firstAgent.y).toBeGreaterThanOrEqual(0);
+  expect(firstAgent.y + firstAgent.height).toBeLessThanOrEqual(900);
   expectQuiet(guards);
 });
 

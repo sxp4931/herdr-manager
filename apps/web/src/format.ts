@@ -82,6 +82,18 @@ export function formatAbsolute(iso: string | null): string {
   return `${local} (${iso})`;
 }
 
+export function formatElapsed(startIso: string, nowIso: string): string {
+  const delta = Date.parse(nowIso) - Date.parse(startIso);
+  if (!Number.isFinite(delta) || delta < 0) return "Unknown dwell";
+  const minutes = Math.floor(delta / 60_000);
+  if (minutes <= 0) return "under 1 minute";
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  if (hours >= 1 && remainder === 0) return countPhrase(hours, "hour", "hours");
+  if (hours >= 1) return `${countPhrase(hours, "hour", "hours")} ${countPhrase(remainder, "minute", "minutes")}`;
+  return countPhrase(minutes, "minute", "minutes");
+}
+
 export function formatCountdown(target: string | null, nowIso: string): string {
   if (target === null) return "Unknown reset";
   const delta = Date.parse(target) - Date.parse(nowIso);

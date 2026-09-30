@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
 import type { DashboardSnapshot, ProviderId } from "@herdr/contracts";
+import { AgentTable } from "./AgentTable.js";
+import { AlertList, sourceProblemAlerts } from "./Alerts.js";
 import { isAbortError, loadSnapshot, subscribeSnapshots } from "./api.js";
 import { sourceLine } from "./format.js";
+import { GitPanel } from "./GitPanel.js";
 import { QuotaCard } from "./QuotaCard.js";
 import { applyTheme, readThemeChoice, resolvedTheme, storeThemeChoice, type ThemeChoice } from "./theme.js";
 
@@ -81,22 +84,42 @@ export function App() {
   );
 }
 
+function SourceProblems({ alerts }: { alerts: DashboardSnapshot["alerts"] }) {
+  const problems = sourceProblemAlerts(alerts);
+  if (problems.length === 0) return <p>No source problems</p>;
+  return (
+    <div className="source-problems">
+      <h3>Source problems</h3>
+      <ul>
+        {problems.map((alert) => (
+          <li key={alert.id}>{alert.message}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function Dashboard({ view }: { view: DashboardSnapshot }) {
   return (
     <>
       {view.mode === "fixture" ? <p className="banner" role="status">Demo data</p> : null}
       {view.mode === "passive" ? <p className="banner banner-passive" role="status">Probes disabled</p> : null}
       {view.providers.length === 0 ? <p>No provider data</p> : null}
-      <div className="cards">
-        {PROVIDERS.map((provider) => (
-          <QuotaCard
-            key={provider.id}
-            label={provider.label}
-            quota={view.providers.find((item) => item.provider === provider.id) ?? null}
-            generatedAt={view.generatedAt}
-          />
-        ))}
+      <div className="workspace">
+        <div className="cards">
+          {PROVIDERS.map((provider) => (
+            <QuotaCard
+              key={provider.id}
+              label={provider.label}
+              quota={view.providers.find((item) => item.provider === provider.id) ?? null}
+              generatedAt={view.generatedAt}
+            />
+          ))}
+        </div>
+        <AgentTable sessions={view.sessions} worktrees={view.worktrees} generatedAt={view.generatedAt} />
       </div>
+      <AlertList alerts={view.alerts} />
+      <GitPanel sessions={view.sessions} worktrees={view.worktrees} />
       <section className="sources" aria-labelledby="source-status-heading">
         <h2 id="source-status-heading">Source status</h2>
         {view.sources.length === 0 ? <p>No source reports</p> : (
@@ -106,6 +129,7 @@ function Dashboard({ view }: { view: DashboardSnapshot }) {
             ))}
           </ul>
         )}
+        <SourceProblems alerts={view.alerts} />
       </section>
     </>
   );
