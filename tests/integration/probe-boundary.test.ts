@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -314,21 +314,101 @@ describe("command runner", () => {
 });
 
 describe("capability doctor", () => {
+  function doctorEnv(bin: string): NodeJS.ProcessEnv {
+    return {
+      ...process.env,
+      PATH: bin,
+      ANTHROPIC_API_KEY: "SYNTHETIC_SECRET_SENTINEL",
+      HOME: "/home/doctor-must-not-print",
+    };
+  }
+
+  function assertQuiet(result: { stdout: string; stderr: string }): void {
+    expect(result.stdout).not.toContain("SYNTHETIC_SECRET_SENTINEL");
+    expect(result.stderr).not.toContain("SYNTHETIC_SECRET_SENTINEL");
+    expect(result.stdout).not.toContain("ANTHROPIC_API_KEY");
+    expect(result.stdout).not.toContain("/home/");
+    expect(result.stdout).not.toContain("rawScreen");
+    expect(result.stdout).not.toContain("\"screen\":");
+  }
+
   it("reports three providers without launching a probe", () => {
-    const result = spawnSync(process.execPath, ["scripts/probe-doctor.mjs", "--json"], { encoding: "utf8" });
+    const result = spawnSync(process.execPath, ["scripts/probe-doctor.mjs", "--json"], {
+      encoding: "utf8",
+      env: doctorEnv(process.env.PATH ?? ""),
+    });
     expect(result.status).toBe(0);
     const report = JSON.parse(result.stdout) as {
       quotaProbesEnabled: boolean;
-      providers: Array<{ provider: string; liveProbe: boolean; available: boolean }>;
+      executedCount: number;
+      providers: Array<{ provider: string; liveProbe: boolean; available: boolean; status: string; diagnostic: string }>;
     };
     expect(report.quotaProbesEnabled).toBe(false);
+    expect(report.executedCount).toBe(0);
     expect(report.providers.map((entry) => entry.provider)).toEqual(["claude", "codex", "grok"]);
     expect(report.providers.every((entry) => entry.liveProbe === false)).toBe(true);
-    expect(result.stdout).not.toContain("ANTHROPIC_API_KEY");
-    expect(result.stdout).not.toContain("/home/");
-    const live = spawnSync(process.execPath, ["scripts/probe-doctor.mjs", "--live"], { encoding: "utf8" });
-    expect(live.status).toBe(2);
-    expect(live.stderr).toContain("live probes are disabled");
+    for (const entry of report.providers) {
+      expect(entry.status).toBe(entry.available ? "present" : "missing");
+      expect(entry.diagnostic).toBe("not_requested");
+    }
+    assertQuiet(result);
+    const live = spawnSync(process.execPath, ["scripts/probe-doctor.mjs", "--live"], {
+      encoding: "utf8",
+      env: doctorEnv(process.env.PATH ?? ""),
+    });
+    expect(live.status).toBe(0);
+    const liveReport = JSON.parse(live.stdout) as {
+      executedCount: number;
+      providers: Array<{ available: boolean; status: string; diagnostic: string; liveProbe: boolean; reason?: string }>;
+    };
+    expect(liveReport.executedCount).toBe(0);
+    expect(liveReport.providers.every((entry) => entry.liveProbe === false)).toBe(true);
+    for (const entry of liveReport.providers) {
+      if (entry.available) {
+        expect(entry.status).toBe("profile_unsafe");
+        expect(entry.diagnostic).toBe("refused");
+        expect(entry.reason).toBe("startup hooks and MCP are not proven inert");
+      } else {
+        expect(entry.status).toBe("missing");
+        expect(entry.diagnostic).toBe("missing");
+      }
+    }
+    assertQuiet(live);
+  });
+
+  it("leaves a trap binary unexecuted for both doctor modes", () => {
+    const dir = tempDir();
+    const bin = path.join(dir, "bin");
+    const marker = path.join(dir, "launched");
+    mkdirSync(bin);
+    for (const name of ["claude", "codex", "grok"]) {
+      const file = path.join(bin, name);
+      writeFileSync(file, `#!/bin/sh\nprintf launched >> '${marker}'\n`);
+      chmodSync(file, 0o755);
+    }
+    for (const args of [["--json"], ["--live"]]) {
+      const result = spawnSync(process.execPath, ["scripts/probe-doctor.mjs", ...args], {
+        encoding: "utf8",
+        env: doctorEnv(bin),
+      });
+      expect(result.status).toBe(0);
+      expect(existsSync(marker)).toBe(false);
+      const report = JSON.parse(result.stdout) as {
+        executed: unknown[];
+        executedCount: number;
+        providers: Array<{ available: boolean; status: string; diagnostic: string; liveProbe: boolean }>;
+      };
+      expect(report.executed).toEqual([]);
+      expect(report.executedCount).toBe(0);
+      expect(report.providers.map((entry) => entry.available)).toEqual([true, true, true]);
+      expect(report.providers.every((entry) => entry.liveProbe === false)).toBe(true);
+      if (args[0] === "--live") {
+        expect(report.providers.every((entry) => entry.status === "profile_unsafe" && entry.diagnostic === "refused")).toBe(true);
+      } else {
+        expect(report.providers.every((entry) => entry.status === "present" && entry.diagnostic === "not_requested")).toBe(true);
+      }
+      assertQuiet(result);
+    }
   });
 });
 

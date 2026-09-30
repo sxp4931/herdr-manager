@@ -178,3 +178,20 @@ Entries record the milestone message and the HEAD that preceded the commit. The 
   - `npm run test:e2e` — exit 0. 15 passed in Chromium headless against the built fixture server. 0 failed, 0 skipped. An earlier full run exited 1 because the keyboard test read agent buttons before the snapshot render; it now waits for `Show details for daily-claude-worker`, and this rerun passed.
   - `node scripts/check-policy.mjs` — exit 0. `policy ok`.
 - Results: POST, PUT, PATCH, DELETE, and TRACE on `/` and every exported read-only route return 405 with `Allow: GET`. Responses, the fixture SQLite file, and server stderr do not contain `SYNTHETIC_SECRET_SENTINEL` or a raw screen. A real git commit whose subject contains that sentinel, a URL password, a script tag, a traversal path, and a control character is stored as redacted text. The git adapter’s observed commands stay in `rev-parse`, `status`, `symbolic-ref`, `log`, `worktree list`, and `--version`. A `log` that does not finish becomes worktree health `timeout` in about 8 seconds. Tmux is asked only for `-V` and `list-panes` on an explicit missing socket. A herdr socket that drops the frame reports a non-ok source and only sends `agent.list` and `session.snapshot`. A usage PTY that ignores a 100ms deadline returns `timeout`, sends no keys, and its process group is reaped. The browser keeps `document.documentElement.scrollWidth <= innerWidth` at 1440×900 and 390×844. Hostile script, traversal, and URL text stay text: no image, no inline script, and no link. A closed event stream reconnects and shows the updated row. Reduced motion computes to `0s`, a rejected font load still shows the heading in a sans-serif stack, and the theme control’s focus outline is at least 3px. Missing, disabled, and stale snapshots leave the page usable. B-01, B-02, B-03, and B-04 stay open. The existing user tmux server was left running.
+
+## Milestone 15 — Write operations, provider doctor, and offline CI
+
+- Status: complete
+- Date (UTC): 2026-09-30
+- Preceding HEAD: `332768c` `test: verify safe degraded dashboard operation` (`332768cb6a539b4a2140ec5d1c818354808bfdc8`)
+- Commit message: `docs: add Linux operations and offline verification CI`
+- Commands and results:
+  - `node scripts/probe-doctor.mjs --json` — exit 0. Three providers, each `liveProbe` false. Present binaries are `present` / `not_requested`. `executedCount` 0.
+  - `node scripts/probe-doctor.mjs --live` — exit 0. Three providers, each `liveProbe` false. Present binaries are `profile_unsafe` / `refused` with reason `startup hooks and MCP are not proven inert`. `executedCount` 0. No PTY was opened.
+  - `npm run test:unit -- tests/unit/ci-policy.test.ts` — exit 0. 1 passed, 0 failed, 0 skipped.
+  - `npm run test:integration -- tests/integration/probe-boundary.test.ts` — exit 0. 17 passed, 0 failed, 0 skipped. An isolated `PATH` of trap binaries named `claude`, `codex`, and `grok` stayed unexecuted for both `--json` and `--live`. Stdout omitted the synthetic env sentinel and home path.
+  - `npm run check` — exit 0 at 2026-09-30T05:40:54Z. Lint and typecheck passed. Unit 57 passed. Python 29 passed. Build passed. Integration 47 passed. Zero failures, zero skips.
+  - `npm run test:e2e` — exit 0. 15 passed in Chromium headless against the built fixture server. 0 failed, 0 skipped.
+  - `node scripts/check-policy.mjs` — exit 0. `policy ok`.
+  - `node scripts/check-ci.mjs` — exit 0. JSON `hostedActionsExecuted` false, `runsOn` `ubuntu-22.04`, Node `22.23.2`, Python `3.13.7`, permissions `contents: read`, `ok` true. This machine did not run hosted Actions.
+- Results: README lists `npm ci`, the Python venv, `npm run build`, `npm start`, the local config copy, and passive, live, and fixture modes. Ctrl+C maps to the existing SIGINT and SIGTERM shutdown. The doctor prints status codes and does not launch a usage PTY. `.github/workflows/ci.yml` names the hosted pins and the root scripts `check:policy`, `check`, and `test:e2e`. B-01, B-02, B-03, and B-04 stay open. The run did not create `.local/dashboard.sqlite`. The existing user tmux server was left running.

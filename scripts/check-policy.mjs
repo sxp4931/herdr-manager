@@ -145,6 +145,21 @@ for (const rootDir of sourceRoots) {
 const artifactRoot = process.argv.includes("--artifacts")
   ? process.argv[process.argv.indexOf("--artifacts") + 1]
   : "";
+try {
+  const ciText = execFileSync(process.execPath, ["scripts/check-ci.mjs"], { encoding: "utf8" });
+  const ciReport = JSON.parse(ciText);
+  if (ciReport.ok !== true) fail("ci workflow failed the local machine check");
+  if (ciReport.hostedActionsExecuted !== false) fail("ci check claimed hosted Actions ran");
+  if (ciReport.runsOn !== "ubuntu-22.04" || ciReport.node !== "22.23.2" || ciReport.python !== "3.13.7") {
+    fail("ci pins drifted");
+  }
+  if (ciReport.permissions?.contents !== "read") fail("ci permissions are not contents: read");
+} catch (error) {
+  const stderr = error && typeof error === "object" && "stderr" in error ? String(error.stderr ?? "") : "";
+  const stdout = error && typeof error === "object" && "stdout" in error ? String(error.stdout ?? "") : "";
+  fail(stderr.trim() || stdout.trim() || "check-ci failed");
+}
+
 if (artifactRoot) {
   if (!existsSync(artifactRoot)) fail(`missing artifacts ${artifactRoot}`);
   else {

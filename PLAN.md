@@ -527,10 +527,10 @@ Expected: every command exits 0; preflight JSON has `coreReady:true`, `platform:
 
 **Done:**
 
-- [ ] Start/run instructions exact.
-- [ ] Doctor safe by default.
-- [ ] CI defined locally.
-- [ ] Commit `docs: add Linux operations and offline verification CI`.
+- [x] Start/run instructions exact.
+- [x] Doctor safe by default.
+- [x] CI defined locally.
+- [x] Commit `docs: add Linux operations and offline verification CI`.
 
 ### 16. Deliver independent reproducible evidence
 
