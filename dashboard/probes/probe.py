@@ -34,6 +34,7 @@ from probes.profiles import (
 )
 from probes.terminal import Terminal
 
+FIXTURE_HELPERS = Path(__file__).resolve().parent.parent / "tests" / "helpers"
 DEFAULT_DEADLINE_MS = 20_000
 MIN_DEADLINE_MS = 100
 MAX_OUTPUT_BYTES = 512 * 1024
@@ -210,6 +211,14 @@ def _read_master(master: int) -> tuple[bytes, bool]:
     return b"".join(chunks), eof
 
 
+def _fixture_executable_allowed(profile_id: str, executable: str) -> bool:
+    """A fixture profile may launch only the repository's fake CLIs, never a real provider binary."""
+    if profile_id != "fixture-v1" and not profile_id.endswith("-fixture-v1"):
+        return True
+    real = Path(os.path.realpath(executable))
+    return real.parent == FIXTURE_HELPERS.resolve()
+
+
 def _reap(proc: subprocess.Popen[bytes]) -> None:
     if proc.poll() is not None:
         return
@@ -263,6 +272,9 @@ def execute(args: ProbeArgs) -> ProbePayload:
         return payload
     if not os.path.isfile(args.executable) or not os.access(args.executable, os.X_OK):
         payload["reason"] = "not_executable"
+        return payload
+    if not _fixture_executable_allowed(profile.profile_id, args.executable):
+        payload["reason"] = "fixture_executable_denied"
         return payload
     if not _cwd_private(args.cwd):
         payload["reason"] = "cwd_denied"

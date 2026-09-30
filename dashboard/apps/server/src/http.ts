@@ -3,7 +3,7 @@ import { stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
 import { parseHealth, type DashboardSnapshot, type Health } from "@herdr/contracts";
-import { redactText } from "./services/redaction.js";
+import { assertNoSentinel, redactOutbound } from "./services/redaction.js";
 import type { SnapshotHub } from "./services/snapshot.js";
 import { authorityAllowed, fetchSiteAllowed, originAllowed, SECURITY_HEADERS } from "./security.js";
 
@@ -38,8 +38,19 @@ function headerValue(value: string | string[] | undefined): string | undefined {
   return value;
 }
 
+/**
+ * Redact each string value, then serialize. Running the text patterns over
+ * serialized JSON let a query-string or URL-credential match run past the
+ * closing quote and corrupt the document.
+ */
+function redactedJson(body: unknown): string {
+  const payload = JSON.stringify(redactOutbound(body));
+  assertNoSentinel(payload);
+  return payload;
+}
+
 function writeJson(res: ServerResponse, status: number, body: unknown, extra?: Record<string, string>): void {
-  const payload = redactText(JSON.stringify(body));
+  const payload = redactedJson(body);
   res.writeHead(status, {
     ...SECURITY_HEADERS,
     "Content-Type": "application/json; charset=utf-8",
@@ -54,7 +65,7 @@ function writeError(res: ServerResponse, status: number, code: string, message: 
 }
 
 export function formatSnapshotEvent(snapshot: DashboardSnapshot): string {
-  const data = redactText(JSON.stringify(snapshot));
+  const data = redactedJson(snapshot);
   return `id: ${snapshot.sequence}\nevent: snapshot\ndata: ${data}\n\n`;
 }
 
@@ -162,9 +173,20 @@ async function serveStatic(res: ServerResponse, webDist: string, urlPath: string
       "Content-Type": MIME[ext] ?? "application/octet-stream",
       "Content-Length": info.size,
     });
-    createReadStream(file).pipe(res);
+    const stream = createReadStream(file);
+    stream.on("error", () => res.destroy());
+    stream.pipe(res);
   } catch {
     writeError(res, 404, "not_found", "not found");
+  }
+}
+
+/** A malformed absolute-form target must not throw inside the request listener. */
+function requestUrl(target: string | undefined, port: number): URL | null {
+  try {
+    return new URL(target ?? "/", `http://127.0.0.1:${port}`);
+  } catch {
+    return null;
   }
 }
 
@@ -194,7 +216,11 @@ export function createDashboardServer(options: ServerOptions): Server {
       return;
     }
     const method = req.method ?? "GET";
-    const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
+    const url = requestUrl(req.url, port);
+    if (!url) {
+      writeError(res, 400, "bad_request", "request target is not a valid path");
+      return;
+    }
     if (url.pathname.startsWith("/api/")) {
       if (method !== "GET" && method !== "HEAD") {
         writeError(res, 405, "method_not_allowed", "this dashboard is read-only", { Allow: "GET" });

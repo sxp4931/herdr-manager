@@ -265,6 +265,32 @@ describe("command runner", () => {
     expect(mode & 0o002).toBe(0);
   });
 
+  it("denies read commands whose options write a file, delete a ref, or swap helpers", async () => {
+    const dir = tempDir();
+    const git = which("git") ?? "/usr/bin/git";
+    const target = path.join(dir, "written.txt");
+    const denied = [
+      ["log", `--output=${target}`],
+      ["log", "--output", target],
+      ["-C", dir, "log", "-1", `--output=${target}`],
+      ["symbolic-ref", "-d", "HEAD"],
+      ["symbolic-ref", "--delete", "HEAD"],
+      ["symbolic-ref", "--quiet", "-d", "HEAD"],
+      [`--exec-path=${dir}`, "status"],
+      ["--exec-path", dir, "status"],
+    ];
+    for (const args of denied) {
+      await expect(
+        runCommand(
+          { executable: git, args, cwd: dir, timeoutMs: 500, maxBytes: 100, allowedEnvironment: {} },
+          new AbortController().signal,
+        ),
+        args.join(" "),
+      ).rejects.toBeInstanceOf(CommandDeniedError);
+    }
+    expect(existsSync(target)).toBe(false);
+  });
+
   it("keeps null git config switches and strips config injection", async () => {
     const dir = tempDir();
     const result = await runNode(

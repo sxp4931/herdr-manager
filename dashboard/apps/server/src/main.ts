@@ -9,8 +9,9 @@ import type { DashboardStore } from "./storage/repository.js";
 import { openStore } from "./storage/repository.js";
 
 export interface CliOptions {
-  host: string;
-  port: number;
+  /** Null when the flag is absent, so the config value applies. */
+  host: string | null;
+  port: number | null;
   fixtureFlag: boolean;
   configPath: string | null;
   databasePath: string | null;
@@ -23,8 +24,8 @@ export interface RunningDashboard {
 }
 
 export function parseCli(argv: readonly string[]): CliOptions {
-  let host = "127.0.0.1";
-  let port = 4317;
+  let host: string | null = null;
+  let port: number | null = null;
   let fixtureFlag = false;
   let configPath: string | null = null;
   let databasePath: string | null = null;
@@ -57,10 +58,19 @@ export function parseCli(argv: readonly string[]): CliOptions {
       throw new Error(`unknown argument: ${arg}`);
     }
   }
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  if (port !== null && (!Number.isInteger(port) || port < 1 || port > 65535)) {
     throw new Error("port must be an integer from 1 to 65535");
   }
   return { host, port, fixtureFlag, configPath, databasePath };
+}
+
+/** Flags win over the config file. Either way the host must be loopback. */
+export function resolveBind(cli: Pick<CliOptions, "host" | "port">, config: Pick<DashboardConfig, "host" | "port">): { host: string; port: number } {
+  const host = cli.host ?? config.host;
+  if (!isLoopbackHost(host)) {
+    throw new Error("refusing non-loopback host");
+  }
+  return { host, port: cli.port ?? config.port };
 }
 
 export function resolveMode(
@@ -140,16 +150,17 @@ export function launchDashboard(options: {
 
 export function startFromCli(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): void {
   const cli = parseCli(argv);
-  if (!isLoopbackHost(cli.host)) {
+  if (cli.host !== null && !isLoopbackHost(cli.host)) {
     throw new Error("refusing non-loopback host");
   }
   const root = repoRootFrom(import.meta.url);
   const loaded = loadConfigFile(cli.configPath ?? path.join(root, "config/dashboard.example.json"), env);
   const mode = resolveMode(env, cli.fixtureFlag, loaded.mode);
-  const config = { ...loaded, host: cli.host, port: cli.port, mode };
+  const bind = resolveBind(cli, loaded);
+  const config = { ...loaded, ...bind, mode };
   const running = launchDashboard({
-    host: cli.host,
-    port: cli.port,
+    host: bind.host,
+    port: bind.port,
     webDist: path.join(root, "apps/web/dist"),
     config,
     mode,
@@ -160,7 +171,7 @@ export function startFromCli(argv: readonly string[], env: NodeJS.ProcessEnv = p
   const shutdown = (): void => {
     if (shuttingDown) return;
     shuttingDown = true;
-    const timer = setTimeout(() => process.exit(0), 2000);
+    const timer = setTimeout(() => process.exit(), 2000);
     timer.unref();
     void running.scheduler.stop().finally(() => {
       try {
@@ -168,19 +179,27 @@ export function startFromCli(argv: readonly string[], env: NodeJS.ProcessEnv = p
       } catch {
         // The store may already be closed during a failed startup.
       }
-      running.server.close(() => process.exit(0));
+      running.server.close(() => process.exit());
+      // Open SSE streams would otherwise hold close() until the 2 second fallback.
+      running.server.closeAllConnections();
     });
   };
   const starting = running.scheduler.start();
   starting.catch((error: unknown) => {
     const message = error instanceof Error ? error.message : "scheduler failed";
     process.stderr.write(`${message}\n`);
+    process.exitCode = 1;
     shutdown();
   });
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
-  running.server.listen(cli.port, cli.host, () => {
-    process.stdout.write(`listening ${cli.host}:${cli.port}\n`);
+  running.server.on("error", (error: NodeJS.ErrnoException) => {
+    process.stderr.write(`cannot listen on ${bind.host}:${bind.port}: ${error.code ?? error.message}\n`);
+    process.exitCode = 1;
+    shutdown();
+  });
+  running.server.listen(bind.port, bind.host, () => {
+    process.stdout.write(`listening ${bind.host}:${bind.port}\n`);
   });
 }
 

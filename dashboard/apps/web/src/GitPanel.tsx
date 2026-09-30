@@ -7,11 +7,11 @@ export function GitPanel({ sessions, worktrees }: { sessions: readonly AgentSess
   return (
     <section className="panel" aria-labelledby="unmapped-worktrees-heading">
       <h2 id="unmapped-worktrees-heading">Unmapped worktrees</h2>
-      {unmapped.length === 0 ? <p>No unmapped worktrees</p> : (
+      {unmapped.length === 0 ? <p className="empty">No unmapped worktrees</p> : (
         <ul className="unmapped-list">
           {unmapped.map((tree) => (
             <li key={tree.id}>
-              <p>{tree.path}</p>
+              <p className="path">{tree.path}</p>
               <WorktreeFacts tree={tree} />
             </li>
           ))}
